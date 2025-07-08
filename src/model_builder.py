@@ -94,6 +94,18 @@ class ModelConfig:
     """
     architecture_type: str = "auto"  # "auto", "cnn", "text"
     
+    
+    
+    """
+    Flattening (traditional approach): Heavy computational bottleneck
+        Conv2D → Pool → Conv2D → Pool → Flatten → Dense(128) → Output
+        Example: (6×6×32 = 1152) × 128 = 147,456 parameters just for first dense layer!
+    Gloabal pooling (modern approach): Efficient parameter reduction  
+        Conv2D → Pool → Conv2D → Pool → GlobalAveragePooling2D → Dense(43)
+        Example: 32 → 43 = only 1,376 parameters (99% reduction!)
+    """
+    use_global_pooling: bool = False # Use global average pooling instead of flattening (modern CNNs)
+    
     # Convolutional layer parameters
     """
     The convolutional layers are used for feature extraction from images
@@ -312,6 +324,14 @@ class ModelBuilder:
         # Build hidden layers
         hidden_layers: List[keras.layers.Layer] = self._build_hidden_layers()
         
+        # Choose pooling strategy based on configuration
+        if self.model_config.use_global_pooling:
+            pooling_layer = keras.layers.GlobalAveragePooling2D()
+            logger.debug("running _build_cnn_model ... Using GlobalAveragePooling2D (modern architecture)")
+        else:
+            pooling_layer = keras.layers.Flatten()
+            logger.debug("running _build_cnn_model ... Using Flatten (traditional architecture)")
+        
         # Create complete CNN model
         model_layers: List[Union[keras.layers.Layer, keras.layers.InputLayer]] = [
             # Input layer with dataset-specific shape
@@ -320,8 +340,8 @@ class ModelBuilder:
             # Convolutional feature extraction layers
             *conv_layers,
             
-            # Flatten for dense layers
-            keras.layers.Flatten(),
+            # Pooling strategy (flatten or global average pooling, as determined above)
+            pooling_layer,
             
             # Hidden layers for classification
             *hidden_layers,
@@ -1011,79 +1031,322 @@ class ModelBuilder:
 
 
 # Convenience function for easy usage
+# Convenience function for easy usage
 def create_and_train_model(
-    data: Dict[str, Any], 
+    data: Optional[Dict[str, Any]] = None,
+    dataset_name: Optional[str] = None,
     model_config: Optional[ModelConfig] = None,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    test_size: float = 0.4,
+    **config_overrides
 ) -> Tuple[ModelBuilder, float]:
     """
     Convenience function to create, train, and evaluate a model in one call
     
     Args:
-        data: Dataset dictionary from DatasetManager
+        data: Dataset dictionary from DatasetManager (optional if dataset_name provided)
+        dataset_name: Name of dataset to load (optional if data provided)
         model_config: Optional model configuration
         save_path: Optional path to save the trained model
+        test_size: Fraction of data to use for testing (only used if dataset_name provided)
+        **config_overrides: Any ModelConfig parameters to override
         
     Returns:
         Tuple of (ModelBuilder instance, test_accuracy)
+        
+    Examples:
+        - Use via command line arguments to specify parameters
+            - Example (trains new model): python model_builder.py dataset_name=cifar10 use_global_pooling=true epochs=15
+            - xample (loads existing model): python src/model_builder.py load_model=/home/thebuleganteng/01_Repos/06_personal_work/computer-vision-classification/saved_models/model_20250708_122719_acc_0_3.keras dataset_name=cifar100 test_size=0.1
+    
+        - Option 1: Use dataset name with config overrides (most convenient)
+        builder, accuracy = create_and_train_model(
+            dataset_name='cifar10',
+            use_global_pooling=True,
+            epochs=15,
+            filters_per_conv_layer=64
+        )
+        
+        - Option 2: Use dataset name with ModelConfig object
+        config = ModelConfig(use_global_pooling=True, epochs=20)
+        builder, accuracy = create_and_train_model(
+            dataset_name='cifar10',
+            model_config=config
+        )
+        
+        - Option 3: Mix ModelConfig with overrides (overrides take precedence)
+        base_config = ModelConfig(epochs=10)
+        builder, accuracy = create_and_train_model(
+            dataset_name='imdb',
+            model_config=base_config,
+            epochs=5,  # This overrides the epochs=10 in base_config
+            embedding_dim=256
+        )
+        
+        - Option 4: Pre-loaded data
+        manager = DatasetManager()
+        data = manager.load_dataset('cifar10')
+        builder, accuracy = create_and_train_model(
+            data=data,
+            use_global_pooling=True
+        )
+        
+        - Option 5: Quick experiments
+        for pooling in [True, False]:
+            builder, acc = create_and_train_model(
+                dataset_name='fashion_mnist',
+                use_global_pooling=pooling,
+                epochs=5
+            )
+            print(f"Global pooling {pooling}: {acc:.4f}")
     """
+    # Validate arguments
+    if data is None and dataset_name is None:
+        raise ValueError("Must provide either 'data' or 'dataset_name'")
+    
+    if data is not None and dataset_name is not None:
+        raise ValueError("Provide either 'data' OR 'dataset_name', not both")
+    
+    # Load data if dataset_name provided
+    if dataset_name is not None:
+        logger.debug(f"running create_and_train_model ... Loading dataset: {dataset_name}")
+        manager = DatasetManager()
+        
+        # Check if dataset is available
+        if dataset_name not in manager.get_available_datasets():
+            available = ', '.join(manager.get_available_datasets())
+            raise ValueError(f"Dataset '{dataset_name}' not supported. Available: {available}")
+        
+        try:
+            data = manager.load_dataset(dataset_name, test_size=test_size)
+            logger.debug(f"running create_and_train_model ... Dataset {dataset_name} loaded successfully")
+        except Exception as e:
+            logger.error(f"running create_and_train_model ... Failed to load dataset {dataset_name}: {e}")
+            raise
+    
+    # Type guard: at this point data is guaranteed to not be None
+    assert data is not None
+    
     # Get dataset config from data
     dataset_config = data['config']
+    
+    # Create or modify model configuration
+    if model_config is None:
+        model_config = ModelConfig()
+    else:
+        # Create a copy to avoid modifying the original
+        import copy
+        model_config = copy.deepcopy(model_config)
+    
+    # Apply any config overrides
+    if config_overrides:
+        logger.debug(f"running create_and_train_model ... Applying config overrides: {config_overrides}")
+        for key, value in config_overrides.items():
+            if hasattr(model_config, key):
+                setattr(model_config, key, value)
+                logger.debug(f"running create_and_train_model ... Set {key} = {value}")
+            else:
+                logger.warning(f"running create_and_train_model ... Unknown config parameter: {key}")
+    
+    logger.debug(f"running create_and_train_model ... Creating model for {dataset_config.name}")
     
     # Create model builder
     builder = ModelBuilder(dataset_config, model_config)
     
     # Build and train model
+    logger.debug("running create_and_train_model ... Building and training model...")
     builder.build_model()
     builder.train(data)
     
     # Evaluate model
+    logger.debug("running create_and_train_model ... Evaluating model...")
     test_loss, test_accuracy = builder.evaluate(data)
     
     # Save if requested
     if save_path:
+        logger.debug(f"running create_and_train_model ... Saving model to {save_path}")
         builder.save_model(test_accuracy=test_accuracy)
     
+    logger.debug(f"running create_and_train_model ... Completed with accuracy: {test_accuracy:.4f}")
     return builder, test_accuracy
 
 
 # Example usage and testing
-# Example usage and testing
 if __name__ == "__main__":
+    from utils.logger import logger
     logger.debug("running model_builder.py ... Testing ModelBuilder...")
     
-    # Parse command line arguments
-    if len(sys.argv) > 1:
-        dataset_name = sys.argv[1].lower()
-    else:
-        dataset_name = 'cifar10'  # Default
-        
-    logger.debug(f"running model_builder.py ... Testing ModelBuilder with {dataset_name.upper()}...")
+    # Parse command line arguments in key=value format
+    # Expected formats:
+    # NEW: python model_builder.py load_model=/path/to/model.keras dataset_name=cifar100
+    # OLD: python model_builder.py dataset_name=cifar100 use_global_pooling=true epochs=20
     
-    # Load dataset - USE THE PARSED ARGUMENT!
-    manager: DatasetManager = DatasetManager()
+    # Default values - comprehensive set
+    config_params = {
+        'dataset_name': 'cifar10',  # Default dataset
+        'test_size': 0.2,           # Default test split
+        'save_path': 'test_model.keras',  # Default save path
+        'load_model': None,         # NEW: Path to existing model to load
+        
+        # ModelConfig parameters with defaults
+        'use_global_pooling': False,
+        'epochs': 10,
+        'num_layers_conv': 2,
+        'filters_per_conv_layer': 32,
+        'kernel_size': (3, 3),
+        'pool_size': (2, 2),
+        'num_layers_hidden': 1,
+        'first_hidden_layer_nodes': 128,
+        'first_hidden_layer_dropout': 0.5,
+        'subsequent_hidden_layer_nodes_decrease': 0.50,
+        'subsequent_hidden_layer_dropout_decrease': 0.20,
+        
+        # Text-specific parameters
+        'embedding_dim': 128,
+        'lstm_units': 64,
+        'vocab_size': 10000,
+        'use_bidirectional': True,
+        'text_dropout': 0.5,
+        
+        # Training parameters
+        'optimizer': 'adam',
+        'loss': 'categorical_crossentropy',
+        'activation': 'relu',
+        'hidden_layer_activation_algo': 'relu'
+    }
+    
+    # Parse all command line arguments
+    for arg in sys.argv[1:]:
+        if '=' in arg:
+            key, value = arg.split('=', 1)  # Split only on first '='
+            
+            # Handle boolean parameters
+            if key in ['use_global_pooling', 'use_bidirectional']:
+                config_params[key] = value.lower() in ['true', '1', 'yes', 'on']
+                logger.debug(f"running model_builder.py ... Parsed {key} = {config_params[key]} (boolean)")
+                
+            # Handle integer parameters
+            elif key in ['epochs', 'num_layers_conv', 'filters_per_conv_layer', 'num_layers_hidden', 
+                        'first_hidden_layer_nodes', 'embedding_dim', 'lstm_units', 'vocab_size']:
+                try:
+                    config_params[key] = int(value)
+                    logger.debug(f"running model_builder.py ... Parsed {key} = {config_params[key]} (integer)")
+                except ValueError:
+                    logger.warning(f"running model_builder.py ... Invalid integer value for {key}: {value}")
+                    
+            # Handle float parameters
+            elif key in ['first_hidden_layer_dropout', 'subsequent_hidden_layer_dropout_decrease', 
+                        'subsequent_hidden_layer_nodes_decrease', 'text_dropout', 'test_size']:
+                try:
+                    config_params[key] = float(value)
+                    logger.debug(f"running model_builder.py ... Parsed {key} = {config_params[key]} (float)")
+                except ValueError:
+                    logger.warning(f"running model_builder.py ... Invalid float value for {key}: {value}")
+                    
+            # Handle tuple parameters (kernel_size, pool_size)
+            elif key in ['kernel_size', 'pool_size']:
+                try:
+                    if ',' in value:
+                        # Handle "3,3" format
+                        parts = [int(x.strip()) for x in value.split(',')]
+                        if len(parts) == 2:
+                            config_params[key] = tuple(parts)
+                        else:
+                            logger.warning(f"running model_builder.py ... Invalid tuple format for {key}: {value}")
+                    else:
+                        # Handle "3" format (becomes (3,3))
+                        size = int(value)
+                        config_params[key] = (size, size)
+                    logger.debug(f"running model_builder.py ... Parsed {key} = {config_params[key]} (tuple)")
+                except ValueError:
+                    logger.warning(f"running model_builder.py ... Invalid tuple value for {key}: {value}")
+                    
+            # Handle string parameters (including NEW load_model parameter)
+            elif key in ['dataset_name', 'save_path', 'load_model', 'optimizer', 'loss', 'activation', 'hidden_layer_activation_algo']:
+                if key == 'dataset_name':
+                    config_params[key] = value.lower()  # Normalize dataset names
+                else:
+                    config_params[key] = value
+                logger.debug(f"running model_builder.py ... Parsed {key} = {config_params[key]} (string)")
+                
+            # Unknown parameter
+            else:
+                logger.warning(f"running model_builder.py ... Unknown parameter: {key}={value}")
+                
+        else:
+            logger.warning(f"running model_builder.py ... Invalid argument format (expected key=value): {arg}")
+    
+    # Extract special parameters that need different handling
+    dataset_name = config_params.pop('dataset_name')
+    test_size = config_params.pop('test_size', 0.2)
+    save_path = config_params.pop('save_path', 'test_model.keras')
+    load_model_path = config_params.pop('load_model', None)  # NEW
+    
+    # Log final configuration
+    logger.debug(f"running model_builder.py ... \n"
+                 f"Final Configuration:\n"
+                 f"- Dataset: {dataset_name.upper()}\n"
+                 f"- Test size: {test_size}\n"
+                 f"- Save path: {save_path}\n"
+                 f"- Load existing model: {load_model_path or 'None (create new)'}\n"
+                 f"- Model config overrides: {len(config_params)} parameters")
     
     # Check if dataset is available
+    manager: DatasetManager = DatasetManager()
     if dataset_name not in manager.get_available_datasets():
         available = ', '.join(manager.get_available_datasets())
         print(f"Error: Unsupported dataset '{dataset_name}'. Available: {available}")
         sys.exit(1)
     
     try:
-        data: Dict[str, Any] = manager.load_dataset(dataset_name, test_size=0.2)
-    except FileNotFoundError as e:
-        # This will trigger if GTSRB dataset is not found
-        print(f"Dataset error: {e}")
+        # Load dataset
+        logger.debug(f"running model_builder.py ... Loading dataset: {dataset_name}")
+        data = manager.load_dataset(dataset_name, test_size=test_size)
+        
+        # NEW: Handle model loading vs creating
+        if load_model_path:
+            # Load existing model workflow
+            logger.debug(f"running model_builder.py ... Loading existing model from: {load_model_path}")
+            
+            # Validate model file exists
+            from pathlib import Path
+            model_file = Path(load_model_path)
+            if not model_file.exists():
+                raise FileNotFoundError(f"Model file not found: {load_model_path}")
+            
+            # Create ModelBuilder and load existing model
+            builder = ModelBuilder(data['config'])
+            model = builder.load_model(load_model_path)
+            
+            logger.debug("running model_builder.py ... Existing model loaded successfully!")
+            
+            # Evaluate the loaded model
+            logger.debug("running model_builder.py ... Evaluating loaded model...")
+            test_loss, test_accuracy = builder.evaluate(data)
+            
+            logger.debug(f"running model_builder.py ... Loaded model performance:")
+            logger.debug(f"running model_builder.py ... - Test accuracy: {test_accuracy:.4f}")
+            logger.debug(f"running model_builder.py ... - Test loss: {test_loss:.4f}")
+            
+        else:
+            # Create new model workflow (existing code)
+            logger.debug("running model_builder.py ... Creating new model...")
+            
+            builder, test_accuracy = create_and_train_model(
+                dataset_name=dataset_name,
+                test_size=test_size,
+                save_path=save_path,
+                **config_params  # Pass all remaining parameters as keyword arguments
+            )
+            
+            logger.debug(f"running model_builder.py ... New model trained with accuracy: {test_accuracy:.4f}")
+        
+        logger.debug(f"running model_builder.py ... ✅ SUCCESS!")
+        logger.debug(f"running model_builder.py ... Final accuracy: {test_accuracy:.4f}")
+        logger.debug("running model_builder.py ... ModelBuilder is ready for integration!")
+        
+    except Exception as e:
+        logger.error(f"running model_builder.py ... ❌ ERROR: {e}")
+        import traceback
+        logger.error(f"running model_builder.py ... Traceback: {traceback.format_exc()}")
         sys.exit(1)
-    
-    # Create and train model with DEFAULT configurations
-    builder: ModelBuilder
-    accuracy: float
-    builder, accuracy = create_and_train_model(
-        data=data,
-        # model_config=None,  # Use default ModelConfig
-        save_path="test_model.keras"
-    )
-    
-    logger.debug(f"running model_builder.py ... Test completed with accuracy: {accuracy:.4f}")
-    logger.debug("running model_builder.py ... ModelBuilder is ready for integration!")
