@@ -194,6 +194,7 @@ class KerasDatasetLoader(BaseDatasetLoader):
             logger.warning(f"running _auto_detect_class_names ... Error auto-detecting class names: {e}")
             return None
     
+    
     def load_data(self, data_dir: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray]:
         """Load data from Keras built-in dataset"""
         logger.debug(f"running load_data ... Loading {self.config.name} from Keras...")
@@ -201,9 +202,24 @@ class KerasDatasetLoader(BaseDatasetLoader):
         # Get the load function
         load_function = self._get_dataset_load_function()
         
+        # Determine if this is a text dataset and get appropriate parameters
+        load_params = {}
+        if (self.config.img_height == 1 and 
+            self.config.channels == 1 and 
+            self.config.img_width > 100):
+            # This looks like text data - apply vocabulary control universally
+            load_params = {
+                'num_words': 10000,  # Standardize vocabulary across ALL text datasets
+                'maxlen': self.config.img_width  # Use sequence length from config
+            }
+            logger.debug(f"running load_data ... Text dataset detected, applying vocab control: {load_params}")
+
         # Load the dataset
         try:
-            (x_train, y_train), (x_test, y_test) = load_function()
+            if load_params:
+                (x_train, y_train), (x_test, y_test) = load_function(**load_params)
+            else:
+                (x_train, y_train), (x_test, y_test) = load_function()
         except Exception as e:
             raise RuntimeError(f"Failed to load dataset {self.dataset_module_path}: {e}")
         
@@ -215,31 +231,53 @@ class KerasDatasetLoader(BaseDatasetLoader):
         if labels.ndim > 1 and labels.shape[1] == 1:
             labels = labels.flatten()
         
-        # Resize images if needed
-        current_shape = (images.shape[1], images.shape[2])
-        target_shape = (self.config.img_width, self.config.img_height)
-        
-        if current_shape != target_shape:
-            logger.debug(f"running load_data ... Resizing images from {current_shape} to {target_shape}")
-            resized_images = []
-            for img in images:
-                resized = cv2.resize(img, target_shape)
-                resized_images.append(resized)
-            images = np.array(resized_images)
-        
-        # Handle grayscale images (convert to RGB if config expects 3 channels)
-        if images.ndim == 3 and self.config.channels == 3:
-            # Convert grayscale to RGB by repeating the channel
-            images = np.stack([images] * 3, axis=-1)
-            logger.debug(f"running load_data ... Converted grayscale to RGB")
-        elif images.ndim == 4 and images.shape[-1] == 3 and self.config.channels == 1:
-            # Convert RGB to grayscale
-            images = np.dot(images[...,:3], [0.2989, 0.5870, 0.1140])
-            images = np.expand_dims(images, axis=-1)
-            logger.debug(f"running load_data ... Converted RGB to grayscale")
-        
-        # Normalize pixel values to [0, 1]
-        images = images.astype('float32') / 255.0
+        # Check if this is text data (1D sequences) or image data (3D/4D arrays)
+        if images.ndim == 1:
+            logger.debug(f"running load_data ... Detected text data with {len(images)} sequences")
+            
+            # For text data, we need to pad sequences to uniform length
+            from tensorflow.keras.preprocessing.sequence import pad_sequences # type: ignore
+            
+            # Use img_width as max_sequence_length for text datasets
+            max_length = self.config.img_width
+            
+            # Pad sequences to uniform length
+            images = pad_sequences(images, maxlen=max_length, padding='post', truncating='post')
+            logger.debug(f"running load_data ... Padded sequences to length {max_length}")
+            logger.debug(f"running load_data ... Final shape: {images.shape}")
+            
+            # For text, we don't normalize (sequences are integers, not pixel values)
+            # We also don't resize or convert channels
+            
+        # Image data: proceed with image processing for 2-D and 3-D arrays, which represent images
+        else:
+            logger.debug(f"running load_data ... Detected image data with shape {images.shape}")
+            
+            # Resize images if needed
+            current_shape = (images.shape[1], images.shape[2])
+            target_shape = (self.config.img_width, self.config.img_height)
+            
+            if current_shape != target_shape:
+                logger.debug(f"running load_data ... Resizing images from {current_shape} to {target_shape}")
+                resized_images = []
+                for img in images:
+                    resized = cv2.resize(img, target_shape)
+                    resized_images.append(resized)
+                images = np.array(resized_images)
+            
+            # Handle grayscale images (convert to RGB if config expects 3 channels)
+            if images.ndim == 3 and self.config.channels == 3:
+                # Convert grayscale to RGB by repeating the channel
+                images = np.stack([images] * 3, axis=-1)
+                logger.debug(f"running load_data ... Converted grayscale to RGB")
+            elif images.ndim == 4 and images.shape[-1] == 3 and self.config.channels == 1:
+                # Convert RGB to grayscale
+                images = np.dot(images[...,:3], [0.2989, 0.5870, 0.1140])
+                images = np.expand_dims(images, axis=-1)
+                logger.debug(f"running load_data ... Converted RGB to grayscale")
+            
+            # Normalize pixel values to [0, 1] for images only
+            images = images.astype('float32') / 255.0
         
         # Update config with class names if available
         if self.config.class_names is None:
@@ -252,7 +290,7 @@ class KerasDatasetLoader(BaseDatasetLoader):
                 self.config.class_names = [f"Class_{i}" for i in range(self.config.num_classes)]
                 logger.debug(f"running load_data ... Using fallback class names: {self.config.class_names}")
         
-        logger.debug(f"running load_data ... Total {self.config.name} images loaded: {len(images)}")
+        logger.debug(f"running load_data ... Total {self.config.name} samples loaded: {len(images)}")
         return images, labels
 
 class DatasetManager:
@@ -304,6 +342,33 @@ class DatasetManager:
             channels=1,  # Grayscale
             folder_structure="builtin_keras",
             class_names=None  # Will be auto-detected or use fallback
+        ),
+        'imdb': DatasetConfig(
+            name="IMDB Movie Reviews", 
+            num_classes=2,
+            img_width=500,  # Using img_width to represent max sequence length
+            img_height=1,   # Not used for text, but required by current DatasetConfig
+            channels=1,     # Not used for text, but required by current DatasetConfig
+            folder_structure="builtin_keras",
+            class_names=['Negative', 'Positive']  # 0=negative, 1=positive
+        ),
+        'reuters': DatasetConfig(
+            name="Reuters Newswire Topics",
+            num_classes=46,  # 46 news categories
+            img_width=1000,  # Using img_width to represent max sequence length  
+            img_height=1,    # Not used for text
+            channels=1,      # Not used for text
+            folder_structure="builtin_keras",
+            class_names=None  # Will be auto-detected or use fallback
+        ),
+        'california_housing': DatasetConfig(
+            name="California Housing Prices",
+            num_classes=1,   # Regression task (continuous target)
+            img_width=8,     # Number of features
+            img_height=1,    # Single sample
+            channels=1,      # Single feature vector
+            folder_structure="builtin_keras", 
+            class_names=None  # Regression, no class names
         )
     }
     
@@ -313,6 +378,9 @@ class DatasetManager:
         'cifar100': 'tensorflow.keras.datasets.cifar100', # https://keras.io/api/datasets/cifar100/
         'fashion_mnist': 'tensorflow.keras.datasets.fashion_mnist', # https://keras.io/api/datasets/fashion_mnist/
         'mnist': 'tensorflow.keras.datasets.mnist', # https://keras.io/api/datasets/mnist/
+        'imdb': 'tensorflow.keras.datasets.imdb', # https://keras.io/api/datasets/imdb/
+        'reuters': 'tensorflow.keras.datasets.reuters', # https://keras.io/api/datasets/reuters/
+        'california_housing': 'tensorflow.keras.datasets.california_housing' # https://keras.io/api/datasets/california_housing/
     }
     
     # Dataset download configurations (only for non-Keras datasets)

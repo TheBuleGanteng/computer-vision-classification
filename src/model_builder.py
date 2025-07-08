@@ -1,8 +1,14 @@
 """
-Model Builder for Computer Vision Classification
+Model Builder for Multi-Modal Classification
 
-Creates and trains convolutional neural networks for image classification.
-Designed to work with any dataset configuration from DatasetManager.
+Creates and trains neural networks for both image classification (CNN) and 
+text classification (LSTM). Automatically detects data type and builds 
+appropriate architecture. Designed to work with any dataset configuration 
+from DatasetManager.
+
+Supported Architectures:
+- CNN: For image data (GTSRB, CIFAR-10, MNIST, etc.)
+- LSTM: For text data (IMDB, Reuters, etc.)
 """
 from dataset_manager import DatasetManager
 import sys
@@ -54,19 +60,39 @@ class ModelConfig:
     """
     Conceptual example: Stop Sign Recognition
     Convolutional Layers:
-    Filter 1: "I detect red color patches here and here"
-    Filter 5: "I see octagonal edges forming a shape" 
-    Filter 12: "There's white text-like patterns in the center"
-    Filter 23: "This has the characteristic red border pattern"
-    Hidden Layers:
-    Neuron 47: "Filters 1, 5, 12, and 23 are all active → probably a stop sign"
-    Neuron 89: "The size and position suggest it's a regulatory sign"
-    Neuron 156: "Confidence level: very high this is a stop sign"
+        Filter 1: "I detect red color patches here and here"
+        Filter 5: "I see octagonal edges forming a shape" 
+        Filter 12: "There's white text-like patterns in the center"
+        Filter 23: "This has the characteristic red border pattern"
+        Hidden Layers:
+        Neuron 47: "Filters 1, 5, 12, and 23 are all active → probably a stop sign"
+        Neuron 89: "The size and position suggest it's a regulatory sign"
+        Neuron 156: "Confidence level: very high this is a stop sign"
     
     This separation allows the network to:
         - Learn reusable features (convolutional layers can detect "red octagon" in any traffic sign dataset)
         - Make dataset-specific decisions (hidden layers learn "red octagon means stop sign in this particular dataset")
     """
+    
+    # Architecture selection: Determines which model type to build
+    """
+    Architecture Selection: Determines Model Type
+    Purpose: Control whether to build CNN (images) or LSTM (text) architecture
+    
+    Options:
+        - "auto": Automatically detect based on dataset characteristics
+        - "cnn": Force CNN architecture (for images)
+        - "text": Force text/LSTM architecture (for sequences)
+    
+    Auto-detection logic:
+        - Text indicators: img_height=1, channels=1, img_width>100 (sequence length)
+        - Image indicators: img_height>1, channels=3, typical image dimensions
+    
+    Examples:
+        - IMDB: (500, 1, 1) → detects as "text" → builds LSTM
+        - CIFAR-10: (32, 32, 3) → detects as "image" → builds CNN
+    """
+    architecture_type: str = "auto"  # "auto", "cnn", "text"
     
     # Convolutional layer parameters
     """
@@ -88,7 +114,40 @@ class ModelConfig:
     kernel_size: Tuple[int, int] = (3, 3) # Each filter looks at 3x3 pixel neighborhoods. Larger kernels (5x5, 7x7) detect bigger patterns but need more computation
     activation: str = "relu" # Activation function applied after each conv layer. Options: "relu" (most common, outputs max(0,x), handles negatives well), "sigmoid" (outputs 0-1, good for probabilities but can cause vanishing gradients), "tanh" (outputs -1 to 1, centered around zero), "leaky_relu" (like relu but allows small negative values), "swish" (smooth, modern alternative to relu)
     pool_size: Tuple[int, int] = (2, 2) # Pooling: Takes max value from 2x2 areas, reduces spatial dimensions, making features more robust and reduces computation
+           
+    # Text-specific parameters
+    """
+    Text Model Architecture = "Sequential Understanding"
+    Purpose: Process word sequences to understand meaning and context
+    Analogy: Like reading a sentence word-by-word while remembering what came before
     
+    Text vs Image Fundamental Differences:
+        - Images: Spatial relationships (nearby pixels are related)
+        - Text: Temporal relationships (word order matters, context builds over time)
+        - Images: Fixed 2D grid structure
+        - Text: Variable-length sequences of discrete tokens
+    
+    Text Model Pipeline:
+        Raw Text: "The movie was fantastic and well-acted"
+            ↓ Tokenization
+        Integers: [2, 45, 89, 234, 12, 567]  (word → index mapping)
+            ↓ Embedding Layer
+        Dense Vectors: Each word becomes 128-dimensional vector, wherein similar words have similar vectors
+            ↓ LSTM/Bidirectional LSTM
+        Context Understanding: Process sequence, build understanding
+            ↓ Dense Layers
+        Final Classification: Positive/Negative sentiment
+    
+    Key Text Components:
+        - Embedding: Converts sparse word indices to dense, learnable representations
+        - LSTM: Processes sequences while maintaining "memory" of previous words
+        - Bidirectional: Reads both forward and backward for better context
+    """
+    embedding_dim: int = 128           # Size of word embeddings: How many dimensions to represent each word. Common: 50-300. Larger = more expressive but slower. IMDB example: word "fantastic" becomes 128-dim vector like [0.1, -0.4, 0.8, ...]
+    lstm_units: int = 64              # Number of LSTM units: LSTM "memory cells" that track sequence context. More units = more memory capacity but slower. Range: 32-512 typical
+    vocab_size: int = 10000           # Vocabulary size for text: Number of unique words to track. IMDB uses top 10k most frequent words. Larger vocab = more precise but more parameters
+    use_bidirectional: bool = True    # Use bidirectional LSTM: Processes sequences forward AND backward. "I love this movie" vs "This movie I love" - bidirectional catches both patterns
+    text_dropout: float = 0.5         # Dropout for text layers: Randomly disable LSTM connections during training. Prevents overfitting to specific word patterns. Range: 0.2-0.6 typical
     
     # Hidden layer parameters
     """
@@ -139,7 +198,12 @@ class ModelConfig:
 
 
 class ModelBuilder:
-    """Main class for building and training CNN models"""
+    """
+    Main class for building and training neural network models
+
+    Supports both CNN (image) and LSTM (text) architectures with automatic
+    data type detection and architecture selection.
+    """
     
     def __init__(self, dataset_config: DatasetConfig, model_config: Optional[ModelConfig] = None) -> None:
         """
@@ -173,70 +237,40 @@ class ModelBuilder:
     
     def build_model(self) -> keras.Model:
         """
-        Build the CNN model based on dataset and model configurations
+        Build the appropriate model based on dataset and model configurations
+        
+        Automatically detects data type and builds either:
+        - CNN architecture for image data (GTSRB, CIFAR, etc.)
+        - LSTM architecture for text data (IMDB, Reuters, etc.)
         
         Returns:
             Compiled Keras model ready for training
         """
-        logger.debug("running build_model ... Building CNN model...")
+        logger.debug("running build_model ... Building model...")
         
         with TimedOperation("model building", "model_builder"): # Tracks how long model construction takes using your logging system
-            # Build convolutional layers
-            conv_layers: List[keras.layers.Layer] = self._build_conv_pooling_layers()
             
-            # Build hidden layers
-            hidden_layers: List[keras.layers.Layer] = self._build_hidden_layers()
+            # Detect data type
+            if self.model_config.architecture_type == "auto":
+                data_type = self._detect_data_type()
+            else:
+                data_type = self.model_config.architecture_type
             
-            # Create complete model
-            model_layers: List[Union[keras.layers.Layer, keras.layers.InputLayer]] = [
-                # Input layer with dataset-specific shape (e.g. dimensions, standarized via DatasetConfig)
-                keras.layers.Input(shape=self.dataset_config.input_shape),
+            # Build appropriate model architecture
+            if data_type == "text":
+                logger.debug("running build_model ... Building TEXT model architecture")
+                self.model = self._build_text_model()
+            else:
+                logger.debug("running build_model ... Building CNN model architecture")
+                self.model = self._build_cnn_model()
                 
-                # Convolutional feature extraction layers
-                *conv_layers,
-                
-                # Flatten for dense layers
-                keras.layers.Flatten(),
-                
-                # Hidden layers for classification
-                *hidden_layers,
-                
-                # Output layer with dataset-specific number of classes
-                keras.layers.Dense(
-                    self.dataset_config.num_classes, 
-                    activation="softmax"
-                )
-            ]
             
-            """
-            Sequential: Creates the actual neural network by connecting all the individual layers into one complete model.
-                - Example: Input → Conv1 → Pool1 → Conv2 → Pool2 → Flatten → Dense1 → Dropout → Output
-            Before this line, we built a list:
-                model_layers = [
-                    keras.layers.Input(shape=(30, 30, 3)),           # Layer 0: Input
-                    keras.layers.Conv2D(32, (3, 3), activation="relu"),  # Layer 1: Conv
-                    keras.layers.MaxPooling2D(pool_size=(2, 2)),         # Layer 2: Pool  
-                    keras.layers.Conv2D(32, (3, 3), activation="relu"),  # Layer 3: Conv
-                    keras.layers.MaxPooling2D(pool_size=(2, 2)),         # Layer 4: Pool
-                    keras.layers.Flatten(),                               # Layer 5: Flatten
-                    keras.layers.Dense(128, activation="relu"),           # Layer 6: Hidden
-                    keras.layers.Dropout(0.5),                           # Layer 7: Dropout
-                    keras.layers.Dense(43, activation="softmax")          # Layer 8: Output
-                ]
-            Sequential automatically connects them:
-                Layer 0 output → Layer 1 input
-                Layer 1 output → Layer 2 input  
-                Layer 2 output → Layer 3 input
-                # ... and so on
-            """
-            self.model = keras.models.Sequential(model_layers)
-            
-            # Compile model: Sets up how the network will learn from data
+            # Compile model
             assert self.model is not None
             self.model.compile(
-                optimizer=self.model_config.optimizer, # How to learn
-                loss=self.model_config.loss, # How to measure mistakes
-                metrics=self.model_config.metrics # What to track
+                optimizer=self.model_config.optimizer,
+                loss=self.model_config.loss,
+                metrics=self.model_config.metrics
             )
             
             # Log model summary
@@ -244,6 +278,153 @@ class ModelBuilder:
             self._log_model_summary()
         
         return self.model
+            
+        
+    def _detect_data_type(self) -> str:
+        """
+        Detect whether this is image or text data based on dataset configuration
+        
+        Returns:
+            "image" or "text"
+        """
+        # Check if this looks like text data
+        if (self.dataset_config.img_height == 1 and 
+            self.dataset_config.channels == 1 and 
+            self.dataset_config.img_width > 100):  # Sequence length > 100
+            logger.debug(f"running _detect_data_type ... Detected TEXT data: sequence_length={self.dataset_config.img_width}")
+            return "text"
+        else:
+            logger.debug(f"running _detect_data_type ... Detected IMAGE data: shape={self.dataset_config.input_shape}")
+            return "image"   
+    
+    
+    
+    def _build_cnn_model(self) -> keras.Model:
+        """
+        Build CNN model for image data (your existing architecture)
+        
+        Returns:
+            CNN model
+        """
+        # Build convolutional layers
+        conv_layers: List[keras.layers.Layer] = self._build_conv_pooling_layers()
+        
+        # Build hidden layers
+        hidden_layers: List[keras.layers.Layer] = self._build_hidden_layers()
+        
+        # Create complete CNN model
+        model_layers: List[Union[keras.layers.Layer, keras.layers.InputLayer]] = [
+            # Input layer with dataset-specific shape
+            keras.layers.Input(shape=self.dataset_config.input_shape),
+            
+            # Convolutional feature extraction layers
+            *conv_layers,
+            
+            # Flatten for dense layers
+            keras.layers.Flatten(),
+            
+            # Hidden layers for classification
+            *hidden_layers,
+            
+            # Output layer
+            keras.layers.Dense(
+                self.dataset_config.num_classes, 
+                activation="softmax"
+            )
+        ]
+        
+        """
+        Sequential: Creates the actual neural network by connecting all the individual layers into one complete model.
+            - Example: Input → Conv1 → Pool1 → Conv2 → Pool2 → Flatten → Dense1 → Dropout → Output
+        Before this line, we built a list:
+            model_layers = [
+                keras.layers.Input(shape=(30, 30, 3)),           # Layer 0: Input
+                keras.layers.Conv2D(32, (3, 3), activation="relu"),  # Layer 1: Conv
+                keras.layers.MaxPooling2D(pool_size=(2, 2)),         # Layer 2: Pool  
+                keras.layers.Conv2D(32, (3, 3), activation="relu"),  # Layer 3: Conv
+                keras.layers.MaxPooling2D(pool_size=(2, 2)),         # Layer 4: Pool
+                keras.layers.Flatten(),                               # Layer 5: Flatten
+                keras.layers.Dense(128, activation="relu"),           # Layer 6: Hidden
+                keras.layers.Dropout(0.5),                           # Layer 7: Dropout
+                keras.layers.Dense(43, activation="softmax")          # Layer 8: Output
+            ]
+        Sequential automatically connects them:
+            Layer 0 output → Layer 1 input
+            Layer 1 output → Layer 2 input  
+            Layer 2 output → Layer 3 input
+            # ... and so on
+        """
+        return keras.models.Sequential(model_layers)
+    
+    
+    def _build_text_model(self) -> keras.Model:
+        """
+        Build text model for sequence data (IMDB, Reuters, etc.)
+        
+        Architecture:
+        Input (sequence_length,) → Embedding → LSTM → Dense → Output
+        
+        Returns:
+            Text model
+        """
+        sequence_length = self.dataset_config.img_width  # We store sequence length in img_width
+        
+        model_layers: List[keras.layers.Layer] = [
+            # Input layer for integer sequences
+            keras.layers.Input(shape=(sequence_length,)),
+            
+            # Embedding layer: converts integers to dense vectors
+            keras.layers.Embedding(
+                input_dim=self.model_config.vocab_size,
+                output_dim=self.model_config.embedding_dim,
+                input_length=sequence_length,
+                mask_zero=True  # Handle padding tokens
+            ),
+            
+            # LSTM layer for sequence processing
+            keras.layers.LSTM(
+                units=self.model_config.lstm_units,
+                dropout=self.model_config.text_dropout,
+                recurrent_dropout=self.model_config.text_dropout / 2,
+                return_sequences=False  # Only return final output
+            ) if not self.model_config.use_bidirectional else keras.layers.Bidirectional(
+                keras.layers.LSTM(
+                    units=self.model_config.lstm_units,
+                    dropout=self.model_config.text_dropout,
+                    recurrent_dropout=self.model_config.text_dropout / 2,
+                    return_sequences=False
+                )
+            ),
+            
+            # Dense layer for feature combination
+            keras.layers.Dense(
+                self.model_config.first_hidden_layer_nodes,
+                activation=self.model_config.hidden_layer_activation_algo
+            ),
+            
+            # Dropout for regularization
+            keras.layers.Dropout(self.model_config.first_hidden_layer_dropout),
+            
+            # Output layer
+            keras.layers.Dense(
+                self.dataset_config.num_classes,
+                activation="softmax" if self.dataset_config.num_classes > 1 else "sigmoid"
+            )
+        ]
+        
+        logger.debug(f"running _build_text_model ... Text model architecture:")
+        logger.debug(f"running _build_text_model ... - Sequence length: {sequence_length}")
+        logger.debug(f"running _build_text_model ... - Vocab size: {self.model_config.vocab_size}")
+        logger.debug(f"running _build_text_model ... - Embedding dim: {self.model_config.embedding_dim}")
+        logger.debug(f"running _build_text_model ... - LSTM units: {self.model_config.lstm_units}")
+        logger.debug(f"running _build_text_model ... - Bidirectional: {self.model_config.use_bidirectional}")
+        
+        return keras.models.Sequential(model_layers)
+    
+    
+    
+    
+    
     
     def _build_conv_pooling_layers(self) -> List[keras.layers.Layer]:
         """
@@ -327,9 +508,9 @@ class ModelBuilder:
         Build dense hidden layers with dropout
         
         Each hidden layer contains:
-            1. a dense layer (to make final classification decisions by combining all detected features based on the flattened values produced by the conv layers) 
-            1. a dropout layer (to prevent overfitting)
-        
+            1. a dense layer (to make final classification decisions by combining all detected features from either convolutional layers (images) or LSTM layers (text))
+            2. a dropout layer (to prevent overfitting) 
+            
         Returns:
             List of Keras layers for classification
         """
@@ -351,15 +532,14 @@ class ModelBuilder:
             
             # Add dense layer
             """
-            Each of the 128 neurons in the dense layer connects to all 1152 flattened feature values from convolutional layers to learn specific feature combinations for traffic sign classification
-            This creates a massive number of connections (1152 inputs * 128 neurons = 147,456 weights)
-            Classic vs Modern CNN Architecture:
-                - Classic CNN architecture (used here):
-                    Conv → Pool → Conv → Pool → Flatten → Dense(128) → Output
-                - Modern CNN architecture (more efficient):
-                    Conv → Pool → Conv → Pool → GlobalAveragePooling → Output
-                    GlobalAveragePooling: Instead of flattening, it averages each feature map to reduce dimensions                          
-            
+            Dense Layer Connections:
+            For CNNs: 128 neurons connect to all flattened feature values from convolutional layers (e.g., if final dimension is 6x6 and 32 filters, then 6 x 6 x 32 = 1152 inputs × 128 neurons = 147,456 weights)
+            For LSTMs: 128 neurons connect to LSTM output features (e.g., 128 LSTM units × 128 neurons = 16,384 weights)
+
+            Architecture Examples:
+            CNN: Conv → Pool → Conv → Pool → Flatten → Dense(128) → Output
+            LSTM: Input → Embedding → LSTM → Dense(128) → Output
+            Modern CNN: Conv → Pool → Conv → Pool → GlobalAveragePooling → Output
             """
             dense_layer: keras.layers.Dense = keras.layers.Dense(
                 int(current_nodes), 
@@ -750,17 +930,73 @@ class ModelBuilder:
                                 f"Regularization layer, randomly disables {dropout_rate*100 if dropout_rate != 'unknown' else 'unknown'}% of neurons during training to prevent overfitting")
             
             elif layer_type == "InputLayer" or layer_type == "Input":
-                # Input layer - shows the expected input shape
-                if output_shape != "unknown" and len(output_shape) > 3:
-                    height = output_shape[1]
-                    width = output_shape[2]
-                    channels = output_shape[-1]
-                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Input) - "
-                                f"Output: (batch_size={output_shape[0]}, height={height}, width={width}, channels={channels}) - "
-                                f"Input layer expecting {height}x{width} images with {channels} color channels (RGB)")
+                # Handle both image and text input shapes
+                if output_shape != "unknown":
+                    if len(output_shape) > 3:  # Image data: (batch, height, width, channels)
+                        height = output_shape[1]
+                        width = output_shape[2]
+                        channels = output_shape[-1]
+                        logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Input) - "
+                                    f"Output: (batch_size={output_shape[0]}, height={height}, width={width}, channels={channels}) - "
+                                    f"Input layer expecting {height}x{width} images with {channels} color channels")
+                    elif len(output_shape) == 2:  # Text data: (batch, sequence_length)
+                        seq_length = output_shape[1]
+                        logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Input) - "
+                                    f"Output: (batch_size={output_shape[0]}, sequence_length={seq_length}) - "
+                                    f"Input layer expecting text sequences of {seq_length} word indices")
+                    else:
+                        logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Input) - "
+                                    f"Output: {output_shape} - Input layer")
                 else:
                     logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Input) - "
-                                f"Input layer for image data")
+                                f"Input layer for data")
+                       
+            elif layer_type == "Embedding":
+                # output_shape example: (None, 500, 128)
+                # None = batch size, 500 = sequence length, 128 = embedding dimension
+                if output_shape != "unknown" and len(output_shape) > 2:
+                    seq_length = output_shape[1]
+                    embed_dim = output_shape[2]
+                    vocab_size = getattr(layer, 'input_dim', 'unknown')
+                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Embedding) - "
+                                f"Output: (batch_size={output_shape[0]}, seq_length={seq_length}, embedding_dim={embed_dim}) - "
+                                f"Converts {vocab_size} word indices to {embed_dim}-dimensional dense vectors, enabling semantic understanding")
+                else:
+                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Embedding) - "
+                                f"Word-to-vector conversion layer for text processing")
+
+            elif layer_type == "LSTM":
+                # output_shape example: (None, 64) when return_sequences=False
+                if output_shape != "unknown" and len(output_shape) > 1:
+                    units = output_shape[-1]
+                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (LSTM) - "
+                                f"Output: (batch_size={output_shape[0]}, units={units}) - "
+                                f"Sequential processor with {units} memory cells, reads text left-to-right while maintaining context")
+                else:
+                    units = getattr(layer, 'units', 'unknown')
+                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (LSTM) - "
+                                f"Sequential text processor with {units} memory cells for context understanding")
+
+            elif layer_type == "Bidirectional":
+                # output_shape example: (None, 128) - double the LSTM units due to forward + backward
+                if output_shape != "unknown" and len(output_shape) > 1:
+                    total_units = output_shape[-1]
+                    lstm_units = total_units // 2  # Bidirectional doubles the output size
+                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Bidirectional) - "
+                                f"Output: (batch_size={output_shape[0]}, units={total_units}) - "
+                                f"Bidirectional LSTM with {lstm_units} units each direction, reads text both forward and backward for enhanced context")
+                else:
+                    logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Bidirectional) - "
+                                f"Bidirectional LSTM layer processing sequences in both directions")
+            
+            
+            
+            
+            
+            
+            
+            
+            
             
             else:
                 # Generic layer information for any other layer types
