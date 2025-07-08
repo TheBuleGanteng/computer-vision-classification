@@ -360,15 +360,6 @@ class DatasetManager:
             channels=1,      # Not used for text
             folder_structure="builtin_keras",
             class_names=None  # Will be auto-detected or use fallback
-        ),
-        'california_housing': DatasetConfig(
-            name="California Housing Prices",
-            num_classes=1,   # Regression task (continuous target)
-            img_width=8,     # Number of features
-            img_height=1,    # Single sample
-            channels=1,      # Single feature vector
-            folder_structure="builtin_keras", 
-            class_names=None  # Regression, no class names
         )
     }
     
@@ -379,8 +370,7 @@ class DatasetManager:
         'fashion_mnist': 'tensorflow.keras.datasets.fashion_mnist', # https://keras.io/api/datasets/fashion_mnist/
         'mnist': 'tensorflow.keras.datasets.mnist', # https://keras.io/api/datasets/mnist/
         'imdb': 'tensorflow.keras.datasets.imdb', # https://keras.io/api/datasets/imdb/
-        'reuters': 'tensorflow.keras.datasets.reuters', # https://keras.io/api/datasets/reuters/
-        'california_housing': 'tensorflow.keras.datasets.california_housing' # https://keras.io/api/datasets/california_housing/
+        'reuters': 'tensorflow.keras.datasets.reuters' # https://keras.io/api/datasets/reuters/
     }
     
     # Dataset download configurations (only for non-Keras datasets)

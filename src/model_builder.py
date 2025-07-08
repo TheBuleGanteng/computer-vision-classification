@@ -812,10 +812,14 @@ class ModelBuilder:
         # Type guard: we know model is not None here
         model: keras.Model = self.model
         
+        # Determine model architecture type for filename
+        data_type = self._detect_data_type()
+        architecture_name = "CNN" if data_type == "image" else "LSTM"
+        
         # Auto-generate filename based on results:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         accuracy_str = f"{test_accuracy:.1f}".replace(".", "_")
-        filename = f"model_{timestamp}_acc_{accuracy_str}.keras" # e.g., "model_20250107_143022_acc_94_2.keras"
+        filename = f"model_{timestamp}_{architecture_name}_acc_{accuracy_str}.keras" # e.g., "model_20250107_143022_acc_94_2.keras"
         
         # Determine filepath
         project_root: Path = Path(__file__).resolve().parent.parent
@@ -829,7 +833,14 @@ class ModelBuilder:
         logger.debug(f"running save_model ... Saving model to {final_filepath}")
         self.model.save(final_filepath)
         logger.debug(f"running save_model ... Model saved successfully")
-    
+        
+        logger.debug(f"running save_model ... Model details:")
+        logger.debug(f"running save_model ... - Dataset: {self.dataset_config.name}")
+        logger.debug(f"running save_model ... - Architecture: {architecture_name}")
+        logger.debug(f"running save_model ... - Input shape: {self.dataset_config.input_shape}")
+        logger.debug(f"running save_model ... - Classes: {self.dataset_config.num_classes}")
+        logger.debug(f"running save_model ... - Test accuracy: {test_accuracy:.4f}" if test_accuracy else "running save_model ... - Test accuracy: Not provided")
+        
     
     def load_model(self, filepath: str) -> keras.Model:
         """
@@ -1057,7 +1068,7 @@ def create_and_train_model(
     Examples:
         - Use via command line arguments to specify parameters
             - Example (trains new model): python model_builder.py dataset_name=cifar10 use_global_pooling=true epochs=15
-            - xample (loads existing model): python src/model_builder.py load_model=/home/thebuleganteng/01_Repos/06_personal_work/computer-vision-classification/saved_models/model_20250708_122719_acc_0_3.keras dataset_name=cifar100 test_size=0.1
+            - Example (loads existing model): python src/model_builder.py load_model=/home/thebuleganteng/01_Repos/06_personal_work/computer-vision-classification/saved_models/model_20250708_122719_acc_0_3.keras dataset_name=cifar100 test_size=0.1
     
         - Option 1: Use dataset name with config overrides (most convenient)
         builder, accuracy = create_and_train_model(
