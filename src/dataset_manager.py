@@ -449,6 +449,8 @@ class DatasetManager:
         else:
             raise ValueError(f"No loader available for dataset '{dataset_name}'")
     
+    # In your dataset_manager.py, update the _get_manual_class_names method:
+
     def _get_manual_class_names(self, dataset_name: str) -> Optional[List[str]]:
         """
         Get manual class names for datasets where auto-detection might not work
@@ -459,13 +461,36 @@ class DatasetManager:
         Returns:
             Manual class names if available, None otherwise
         """
-        # Only add manual class names if auto-detection doesn't work well
+        # Add manual class names for common datasets
         manual_names = {
+            'cifar10': [ # https://www.cs.toronto.edu/~kriz/cifar.html
+                'airplane', 'automobile', 'bird', 'cat', 'deer',
+                'dog', 'frog', 'horse', 'ship', 'truck'
+            ],
+            'cifar100': [ # https://www.cs.toronto.edu/~kriz/cifar.html
+                'apple', 'aquarium_fish', 'baby', 'bear', 'beaver', 'bed', 'bee', 'beetle',
+                'bicycle', 'bottle', 'bowl', 'boy', 'bridge', 'bus', 'butterfly', 'camel',
+                'can', 'castle', 'caterpillar', 'cattle', 'chair', 'chimpanzee', 'clock',
+                'cloud', 'cockroach', 'couch', 'crab', 'crocodile', 'cup', 'dinosaur',
+                'dolphin', 'elephant', 'flatfish', 'forest', 'fox', 'girl', 'hamster',
+                'house', 'kangaroo', 'keyboard', 'lamp', 'lawn_mower', 'leopard', 'lion',
+                'lizard', 'lobster', 'man', 'maple_tree', 'motorcycle', 'mountain', 'mouse',
+                'mushroom', 'oak_tree', 'orange', 'orchid', 'otter', 'palm_tree', 'pear',
+                'pickup_truck', 'pine_tree', 'plain', 'plate', 'poppy', 'porcupine',
+                'possum', 'rabbit', 'raccoon', 'ray', 'road', 'rocket', 'rose',
+                'sea', 'seal', 'shark', 'shrew', 'skunk', 'skyscraper', 'snail', 'snake',
+                'spider', 'squirrel', 'streetcar', 'sunflower', 'sweet_pepper', 'table',
+                'tank', 'telephone', 'television', 'tiger', 'tractor', 'train', 'trout',
+                'tulip', 'turtle', 'wardrobe', 'whale', 'willow_tree', 'wolf', 'woman',
+                'worm'
+            ],
             'fashion_mnist': [
                 'T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',
                 'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot'
             ],
-            'mnist': [f'Digit_{i}' for i in range(10)]  # 0, 1, 2, ..., 9
+            'mnist': [f'Digit_{i}' for i in range(10)],  # 0, 1, 2, ..., 9
+            'imdb': ['Negative', 'Positive'],  # 0=negative, 1=positive
+            'gtsrb': [f'Traffic_Sign_{i}' for i in range(43)]  # Could be improved with actual sign names
         }
         
         return manual_names.get(dataset_name)
