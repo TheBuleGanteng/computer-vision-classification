@@ -15,10 +15,13 @@ from dataset_manager import DatasetConfig, DatasetManager
 import datetime
 from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
 from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
+from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
 from plot_creation.confusion_matrix import ConfusionMatrixAnalyzer
 from plot_creation.training_history import TrainingHistoryAnalyzer
 from plot_creation.training_animation import TrainingAnimationAnalyzer
 from plot_creation.gradient_flow import GradientFlowAnalyzer
+from plot_creation.weights_bias import WeightsBiasAnalyzer
+from plot_creation.activation_map import ActivationMapAnalyzer
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -136,7 +139,9 @@ class ModelConfig:
     filters_per_conv_layer: int = 32
     kernel_size: Tuple[int, int] = (3, 3) # Each filter looks at 3x3 pixel neighborhoods. Larger kernels (5x5, 7x7) detect bigger patterns but need more computation
     activation: str = "relu" # Activation function applied after each conv layer. Options: "relu" (most common, outputs max(0,x), handles negatives well), "sigmoid" (outputs 0-1, good for probabilities but can cause vanishing gradients), "tanh" (outputs -1 to 1, centered around zero), "leaky_relu" (like relu but allows small negative values), "swish" (smooth, modern alternative to relu)
+    kernel_initializer: str = "he_normal" # Kernel initializer for conv layers. "he_normal" is good for ReLU-like activations, "glorot_uniform" (Xavier) is good for tanh/sigmoid, "lecun_normal" is good for Leaky ReLU. Default: "he_normal"
     pool_size: Tuple[int, int] = (2, 2) # Pooling: Takes max value from 2x2 areas, reduces spatial dimensions, making features more robust and reduces computation
+    batch_normalization: bool = False # Use batch normalization after each conv layer to stabilize learning and improve convergence. Helps with internal covariate shift by normalizing activations across the batch
            
     # Text-specific parameters
     """
@@ -170,7 +175,7 @@ class ModelConfig:
     lstm_units: int = 64              # Number of LSTM units: LSTM "memory cells" that track sequence context. More units = more memory capacity but slower. Range: 32-512 typical
     vocab_size: int = 10000           # Vocabulary size for text: Number of unique words to track. IMDB uses top 10k most frequent words. Larger vocab = more precise but more parameters
     use_bidirectional: bool = True    # Use bidirectional LSTM: Processes sequences forward AND backward. "I love this movie" vs "This movie I love" - bidirectional catches both patterns
-    text_dropout: float = 0.3         # Dropout for text layers: Randomly disable LSTM connections during training. Prevents overfitting to specific word patterns. Range: 0.2-0.6 typical
+    text_dropout: float = 0.5         # Dropout for text layers: Randomly disable LSTM connections during training. Prevents overfitting to specific word patterns. Range: 0.2-0.6 typical
     
     # Hidden layer parameters
     """
@@ -185,9 +190,9 @@ class ModelConfig:
     num_layers_hidden: int = 1
     first_hidden_layer_nodes: int = 128
     subsequent_hidden_layer_nodes_decrease: float = 0.50 # Layer 1: 128 nodes, Layer 2: 128 * 0.50 = 64 nodes, Layer 3: 64 * 0.50 = 32 nodes. Creates a "funnel" effect - broad feature combination → specific decisions
-    hidden_layer_activation_algo: str = "leaky_relu" # Activation function applied after each conv layer. Options: "relu" (most common, outputs max(0,x), handles negatives well), "sigmoid" (outputs 0-1, good for probabilities but can cause vanishing gradients), "tanh" (outputs -1 to 1, centered around zero), "leaky_relu" (like relu but allows small negative values), "swish" (smooth, modern alternative to relu)
-    first_hidden_layer_dropout: float = 0.3 # Dropout rate for first hidden layer. Randomly sets this fraction of neurons to 0 during training to prevent overfitting. Options: 0.0 (no dropout), 0.1-0.3 (light), 0.4-0.6 (moderate, most common), 0.7-0.9 (heavy, can hurt learning). Higher values = more regularization but slower learning
-    subsequent_hidden_layer_dropout_decrease: float = 0.10 # How much to reduce dropout in each subsequent layer. Layer 1: 0.5 dropout, Layer 2: 0.5-0.2=0.3 dropout, Layer 3: 0.3-0.2=0.1 dropout. Rationale: deeper layers need less regularization as they're making more specific decisions
+    hidden_layer_activation_algo: str = "relu" # Activation function applied after each conv layer. Options: "relu" (most common, outputs max(0,x), handles negatives well), "sigmoid" (outputs 0-1, good for probabilities but can cause vanishing gradients), "tanh" (outputs -1 to 1, centered around zero), "leaky_relu" (like relu but allows small negative values), "swish" (smooth, modern alternative to relu)
+    first_hidden_layer_dropout: float = 0.5 # Dropout rate for first hidden layer. Randomly sets this fraction of neurons to 0 during training to prevent overfitting. Options: 0.0 (no dropout), 0.1-0.3 (light), 0.4-0.6 (moderate, most common), 0.7-0.9 (heavy, can hurt learning). Higher values = more regularization but slower learning
+    subsequent_hidden_layer_dropout_decrease: float = 0.20 # How much to reduce dropout in each subsequent layer. Layer 1: 0.5 dropout, Layer 2: 0.5-0.2=0.3 dropout, Layer 3: 0.3-0.2=0.1 dropout. Rationale: deeper layers need less regularization as they're making more specific decisions
     
     
     # Training parameters
@@ -212,6 +217,7 @@ class ModelConfig:
     """
     epochs: int = 10 # Number of complete passes through training data. More epochs = more learning but risk overfitting. Range: 5-50 typical.
     optimizer: str = "adam" # Algorithm for adjusting weights during training. Options: "adam" (adaptive, most popular, good default), "sgd" (simple, requires learning rate tuning), "rmsprop" (good for RNNs), "adagrad" (adapts to sparse data). Adam combines best of multiple approaches
+    learning_rate: float = 0.001  # Learning rate for optimizer (default Adam rate)
     loss: str = "categorical_crossentropy" # Function measuring prediction error. For multi-class classification (traffic signs): "categorical_crossentropy" (standard choice). Other options: "sparse_categorical_crossentropy" (if labels are integers not one-hot), "binary_crossentropy" (for binary classification), "mse" (for regression)
     metrics: List[str] = field(default_factory=lambda: ["accuracy"]) # What to track during training beyond loss. "accuracy" = percentage of correct predictions. Other options: "precision", "recall", "f1_score", "top_5_accuracy" (useful for large datasets)
     
@@ -228,15 +234,55 @@ class ModelConfig:
     # Gradient flow analysis parameters
     show_gradient_flow: bool = True           # Enable/disable gradient flow analysis during evaluation
     gradient_flow_sample_size: int = 100      # Number of samples to use for gradient analysis
-    enable_gradient_clipping: bool = True     # Enable/disable gradient clipping
+    enable_gradient_clipping: bool = False    # Enable/disable gradient clipping
     gradient_clip_norm: float = 1.0          # Maximum gradient norm (typical: 0.5-2.0)
     
     # Real-time gradient flow monitoring parameters (ADD THESE)
-    enable_gradient_flow_monitoring: bool = False    # Enable/disable gradient flow monitoring
+    enable_gradient_flow_monitoring: bool = True    # Enable/disable gradient flow monitoring
     gradient_monitoring_frequency: int = 1           # Monitor every N epochs (1 = every epoch)
     gradient_history_length: int = 50               # Number of epochs to keep in gradient history
     gradient_sample_size: int = 32                  # Samples used for gradient computation
     save_gradient_flow_plots: bool = True           # Save gradient flow plots to disk
+    
+    # Weights and bias analysis parameters
+    show_weights_bias_analysis: bool = True # Enable/disable weights and bias analysis during evaluation
+
+    # Real-time weights and bias monitoring parameters
+    enable_realtime_weights_bias: bool = True     # Enable/disable real-time weights/bias monitoring
+    weights_bias_monitoring_frequency: int = 1   # Monitor every N epochs (1 = every epoch)
+    weights_bias_sample_percentage: float = 0.1  # Fraction of parameters to sample (0.1 = 10%)
+    
+    
+    # Activation map analysis parameters
+    show_activation_maps: bool = True                              # Enable/disable activation map analysis during evaluation
+
+    # Layer selection parameters  
+    activation_layer_frequency: int = 1                           # Analyze every nth convolutional layer (1=all, 2=every 2nd, etc.)
+    activation_max_layers_to_analyze: int = 10                    # Maximum number of layers to analyze (prevents overwhelming output)
+
+    # Sample selection parameters
+    activation_num_samples_per_class: int = 1                     # Number of sample images per class to analyze
+    activation_max_total_samples: int = 10                        # Maximum total samples to analyze across all classes
+    activation_sample_selection_strategy: str = "mixed"           # Options: "representative", "random", "problematic", "mixed"
+
+    # Filter visualization parameters
+    activation_filters_per_row: int = 8                           # Number of filters to show per row in grid visualizations
+    activation_max_filters_per_layer: int = 32                    # Maximum filters to visualize per layer (for performance)
+
+    # Activation analysis parameters
+    activation_dead_filter_threshold: float = 0.1                 # Threshold below which filter is considered "dead" (max activation)
+    activation_saturated_filter_threshold: float = 0.8            # Threshold above which filter is considered "saturated" (mean activation)
+
+    # Visualization parameters
+    activation_figsize_individual: Tuple[int, int] = (15, 10)     # Figure size for individual layer analysis
+    activation_figsize_overview: Tuple[int, int] = (20, 12)       # Figure size for overview/summary plots
+    activation_cmap: str = "viridis"                              # Colormap for activation maps
+    activation_cmap_original: str = "gray"                        # Colormap for original images
+
+    # Real-time activation monitoring parameters (for future real-time implementation)
+    enable_realtime_activation_maps: bool = False                 # Enable/disable real-time activation monitoring
+    activation_monitoring_frequency: int = 5                      # Monitor every N epochs (5 = every 5th epoch)
+    activation_save_frequency: int = 10          
     
     def __post_init__(self) -> None:
         if not self.metrics:
@@ -322,15 +368,27 @@ class ModelBuilder:
                 
                 # Create optimizer with gradient clipping
                 if self.model_config.optimizer.lower() == "adam":
-                    optimizer = keras.optimizers.Adam(clipnorm=self.model_config.gradient_clip_norm)
+                    optimizer = keras.optimizers.Adam(
+                        #learning_rate=self.model_config.learning_rate,
+                        clipnorm=self.model_config.gradient_clip_norm
+                        )
                 elif self.model_config.optimizer.lower() == "sgd":
-                    optimizer = keras.optimizers.SGD(clipnorm=self.model_config.gradient_clip_norm)
+                    optimizer = keras.optimizers.SGD(
+                        #learning_rate=self.model_config.learning_rate,
+                        clipnorm=self.model_config.gradient_clip_norm
+                        )
                 elif self.model_config.optimizer.lower() == "rmsprop":
-                    optimizer = keras.optimizers.RMSprop(clipnorm=self.model_config.gradient_clip_norm)
+                    optimizer = keras.optimizers.RMSprop(
+                        #learning_rate=self.model_config.learning_rate,
+                        clipnorm=self.model_config.gradient_clip_norm
+                        )
                 else:
                     # Fallback: use Adam with clipping for unknown optimizers
                     logger.warning(f"running build_model ... Unknown optimizer '{self.model_config.optimizer}', using Adam with clipping")
-                    optimizer = keras.optimizers.Adam(clipnorm=self.model_config.gradient_clip_norm)
+                    optimizer = keras.optimizers.Adam(
+                        #learning_rate=self.model_config.learning_rate,
+                        clipnorm=self.model_config.gradient_clip_norm
+                        )
             else:
                 logger.debug("running build_model ... Gradient clipping disabled, using standard optimizer")
                 # Use standard optimizer without clipping
@@ -522,9 +580,20 @@ class ModelBuilder:
             conv_layer: keras.layers.Conv2D = keras.layers.Conv2D(
                 self.model_config.filters_per_conv_layer,
                 self.model_config.kernel_size,
-                activation=self.model_config.activation
+                activation=self.model_config.activation,
+                kernel_initializer=self.model_config.kernel_initializer  # Use the specified activation function
             )
             conv_layers.append(conv_layer)
+            
+            # Add batch normalization layer
+            
+            if self.model_config.batch_normalization:
+                logger.debug(f"running _build_conv_pooling_layers ... Adding BatchNormalization layer after Conv2D layer {layer_num + 1}")
+                batch_norm_layer: keras.layers.BatchNormalization = keras.layers.BatchNormalization()
+                conv_layers.append(batch_norm_layer)
+            else:
+                logger.debug(f"running _build_conv_pooling_layers ... Skipping BatchNormalization layer after Conv2D layer {layer_num + 1}")
+            
             
             # Add pooling layer
             """
@@ -746,6 +815,7 @@ class ModelBuilder:
         # Set up callbacks list
         callbacks_list = []
         
+        
         # Add real-time visualization if enabled
         realtime_visualizer = None
         if self.model_config.enable_realtime_plots:
@@ -830,6 +900,49 @@ class ModelBuilder:
             logger.debug(f"running train ... Gradient history length: {self.model_config.gradient_history_length} epochs")
             logger.debug(f"running train ... Gradient sample size: {self.model_config.gradient_sample_size}")   
             
+        
+        # Add real-time weights and bias monitoring if enabled
+        weights_bias_monitor = None
+        if self.model_config.enable_realtime_weights_bias:
+            logger.debug("running train ... Setting up real-time weights and bias monitoring...")
+            
+            # Use the same plot_dir as other monitoring systems
+            if self.plot_dir is None:
+                # Fallback: create directory if not provided (shouldn't happen in normal flow)
+                dataset_name_clean = self.dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+                data_type = self._detect_data_type()
+                architecture_name = "CNN" if data_type == "image" else "LSTM"
+                run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+                project_root = Path(__file__).resolve().parent.parent
+                plots_dir = project_root / "plots"
+                plot_dir = plots_dir / f"{run_timestamp}_{architecture_name}_{dataset_name_clean}"
+                plot_dir.mkdir(parents=True, exist_ok=True)
+                logger.debug("running train ... Created fallback plot directory for weights/bias monitoring")
+            else:
+                plot_dir = self.plot_dir
+                logger.debug(f"running train ... Using provided plot directory for weights/bias monitoring: {plot_dir}")
+            
+            # Create weights and bias monitor using convenience function
+            try:
+                weights_bias_monitor, weights_bias_callback = create_realtime_weights_bias_monitor(
+                    model_builder=self,
+                    plot_dir=plot_dir,
+                    monitoring_frequency=self.model_config.weights_bias_monitoring_frequency,
+                    sample_percentage=self.model_config.weights_bias_sample_percentage
+                )
+                
+                callbacks_list.append(weights_bias_callback)
+                logger.debug("running train ... Real-time weights and bias monitoring enabled")
+                
+            except Exception as setup_error:
+                logger.error(f"running train ... Weights and bias monitoring setup failed: {setup_error}")
+                logger.debug(f"running train ... Error details: {traceback.format_exc()}")
+                weights_bias_monitor = None  # Disable monitoring if setup fails
+            
+            # Log weights and bias monitoring configuration
+            logger.debug(f"running train ... Weights/bias monitoring frequency: every {self.model_config.weights_bias_monitoring_frequency} epochs")
+            logger.debug(f"running train ... Weights/bias sample percentage: {self.model_config.weights_bias_sample_percentage*100:.1f}%")        
+        
         # Train model with timing and callbacks
         with TimedOperation("model training", "model_builder"):
             self.training_history = self.model.fit(
@@ -941,6 +1054,7 @@ class ModelBuilder:
             else:
                 test_loss = float(evaluation_results)
                 test_accuracy = 0.0
+        
         
         # Generate confusion matrix analysis if enabled
         if self.model_config.show_confusion_matrix:
@@ -1133,6 +1247,153 @@ class ModelBuilder:
                 logger.warning(f"running evaluate ... Failed to create gradient flow analysis: {gradient_error}")
                 logger.debug(f"running evaluate ... Gradient flow error traceback: {traceback.format_exc()}")
         
+        
+        # Generate weights and bias analysis if enabled and model is available
+        if self.model_config.show_weights_bias_analysis and self.model is not None:
+            try:
+                logger.debug("running evaluate ... Generating weights and bias analysis...")
+                
+                # Create weights and bias analyzer
+                weights_bias_analyzer = WeightsBiasAnalyzer(model_name=self.dataset_config.name)
+                
+                # Perform comprehensive weights and bias analysis
+                weights_bias_results = weights_bias_analyzer.analyze_and_visualize(
+                    model=model,
+                    dataset_name=self.dataset_config.name,
+                    run_timestamp=run_timestamp,
+                    plot_dir=plot_dir,
+                    max_layers_to_plot=12  # Reasonable default for most models
+                )
+                
+                # Log results
+                if 'error' in weights_bias_results:
+                    logger.warning(f"running evaluate ... Weights and bias analysis failed: {weights_bias_results['error']}")
+                else:
+                    logger.debug("running evaluate ... Weights and bias analysis completed successfully")
+                    
+                    # Log key insights from parameter health assessment
+                    parameter_health = weights_bias_results.get('parameter_health', 'unknown')
+                    logger.debug(f"running evaluate ... Parameter health assessment: {parameter_health}")
+                    
+                    # Log training insights
+                    insights = weights_bias_results.get('training_insights', [])
+                    if insights:
+                        logger.debug("running evaluate ... Parameter analysis insights:")
+                        for insight in insights[:3]:  # Show first 3 insights
+                            logger.debug(f"running evaluate ... - {insight}")
+                    
+                    # Log recommendations
+                    recommendations = weights_bias_results.get('recommendations', [])
+                    if recommendations:
+                        logger.debug("running evaluate ... Parameter optimization recommendations:")
+                        for rec in recommendations[:3]:  # Show first 3 recommendations
+                            logger.debug(f"running evaluate ... - {rec}")
+                    
+                    # Log visualization path
+                    viz_path = weights_bias_results.get('visualization_path')
+                    if viz_path:
+                        logger.debug(f"running evaluate ... Weights and bias analysis saved to: {viz_path}")
+                        
+            except Exception as weights_bias_error:
+                logger.warning(f"running evaluate ... Failed to create weights and bias analysis: {weights_bias_error}")
+                logger.debug(f"running evaluate ... Weights and bias error traceback: {traceback.format_exc()}")
+            
+        
+        # Generate activation map analysis if enabled and model is available (for CNN models only)
+        if self.model_config.show_activation_maps and self.model is not None:
+            try:
+                logger.debug("running evaluate ... Generating activation map analysis...")
+                
+                # Check if this is a CNN model (activation maps only make sense for convolutional layers)
+                data_type = self._detect_data_type()
+                if data_type == "image":
+                    logger.debug("running evaluate ... Detected CNN architecture, proceeding with activation map analysis...")
+                    
+                    # Prepare sample data for activation analysis
+                    # Use a subset of test data for performance
+                    sample_size = min(self.model_config.activation_max_total_samples, len(data['x_test']))
+                    sample_indices = np.random.choice(len(data['x_test']), sample_size, replace=False)
+                    sample_x = data['x_test'][sample_indices]
+                    sample_y = data['y_test'][sample_indices]
+                    
+                    # Convert one-hot encoded labels to class indices if needed
+                    if sample_y.ndim > 1 and sample_y.shape[1] > 1:
+                        sample_labels = np.argmax(sample_y, axis=1)
+                    else:
+                        sample_labels = sample_y.flatten()
+                    
+                    # Get class names
+                    class_names = self.dataset_config.class_names or [f"Class_{i}" for i in range(self.dataset_config.num_classes)]
+                    
+                    # Create activation map analyzer
+                    activation_analyzer = ActivationMapAnalyzer(model_name=self.dataset_config.name)
+                    
+                    # Perform activation map analysis
+                    activation_results = activation_analyzer.analyze_and_visualize(
+                        model=model,
+                        sample_images=sample_x,
+                        sample_labels=sample_labels,
+                        class_names=class_names,
+                        dataset_name=self.dataset_config.name,
+                        run_timestamp=run_timestamp,
+                        plot_dir=plot_dir,
+                        model_config=self.model_config  # Pass ModelConfig for configuration parameters
+                    )
+                    
+                    # Log results
+                    if 'error' in activation_results:
+                        logger.warning(f"running evaluate ... Activation map analysis failed: {activation_results['error']}")
+                    else:
+                        logger.debug("running evaluate ... Activation map analysis completed successfully")
+                        
+                        # Log key insights from filter health assessment
+                        filter_health = activation_results.get('filter_health', {})
+                        health_status = filter_health.get('overall_status', 'unknown')
+                        logger.debug(f"running evaluate ... Filter health assessment: {health_status}")
+                        
+                        # Log dead and saturated filter statistics
+                        dead_filter_ratio = filter_health.get('dead_filter_ratio', 0.0)
+                        saturation_ratio = filter_health.get('saturation_ratio', 0.0)
+                        if dead_filter_ratio > 0:
+                            logger.debug(f"running evaluate ... Dead filters detected: {dead_filter_ratio:.1%}")
+                        if saturation_ratio > 0:
+                            logger.debug(f"running evaluate ... Saturated filters detected: {saturation_ratio:.1%}")
+                        
+                        # Log activation insights
+                        insights = activation_results.get('activation_insights', [])
+                        if insights:
+                            logger.debug("running evaluate ... Activation analysis insights:")
+                            for insight in insights[:3]:  # Show first 3 insights
+                                logger.debug(f"running evaluate ... - {insight}")
+                        
+                        # Log recommendations
+                        recommendations = activation_results.get('recommendations', [])
+                        if recommendations:
+                            logger.debug("running evaluate ... Activation optimization recommendations:")
+                            for rec in recommendations[:3]:  # Show first 3 recommendations
+                                logger.debug(f"running evaluate ... - {rec}")
+                        
+                        # Log sample selection info
+                        sample_info = activation_results.get('sample_info', {})
+                        selected_count = sample_info.get('selected_count', 0)
+                        strategy = sample_info.get('selection_strategy', 'unknown')
+                        logger.debug(f"running evaluate ... Analyzed {selected_count} samples using '{strategy}' selection strategy")
+                        
+                        # Log visualization paths
+                        viz_paths = activation_results.get('visualization_paths', [])
+                        if viz_paths:
+                            logger.debug(f"running evaluate ... Created {len(viz_paths)} activation map visualizations")
+                            for path in viz_paths[:3]:  # Show first 3 paths
+                                logger.debug(f"running evaluate ... Activation visualization saved to: {path}")
+                            if len(viz_paths) > 3:
+                                logger.debug(f"running evaluate ... ... and {len(viz_paths) - 3} more activation visualizations")
+                        
+                else:
+                    logger.debug("running evaluate ... Detected text/LSTM architecture, skipping activation map analysis (only applicable to CNN models)")
+                    
+            except Exception as activation_error:
+                logger.warning(f"running evaluate ... Failed to create activation map analysis: {activation_error}")
+                logger.debug(f"running evaluate ... Activation map error traceback: {traceback.format_exc()}")       
         
         # Show detailed individual predictions if requested
         if log_detailed_predictions and max_predictions_to_show > 0:
@@ -1580,14 +1841,6 @@ class ModelBuilder:
             plt.close()  # Clean up memory
    
 
-
-    def plot_weight_distributions(self) -> None:
-        """
-        Show histograms of weights in each layer over training
-        Helps detect dead neurons or weight saturation
-        """
-        pass
-
     def plot_activation_maps(
         self, 
         sample_images: np.ndarray
@@ -1857,17 +2110,7 @@ class ModelBuilder:
                                 f"Bidirectional LSTM with {lstm_units} units each direction, reads text both forward and backward for enhanced context")
                 else:
                     logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} (Bidirectional) - "
-                                f"Bidirectional LSTM layer processing sequences in both directions")
-            
-            
-            
-            
-            
-            
-            
-            
-            
-            
+                                f"Bidirectional LSTM layer processing sequences in both directions")            
             else:
                 # Generic layer information for any other layer types
                 logger.debug(f"running _log_model_summary ... Layer {i}: {layer.name} ({layer_type}) - "
@@ -1880,7 +2123,6 @@ class ModelBuilder:
                     f"These are the weights and biases the model learns during training")
 
 
-# Convenience function for easy usage
 # Convenience function for easy usage
 def create_and_train_model(
     data: Optional[Dict[str, Any]] = None,
@@ -2131,19 +2373,22 @@ if __name__ == "__main__":
             logger.warning(f"Invalid test_size: {args['test_size']}")
             del args['test_size']
     
-    # Convert boolean parameters (INCLUDING NEW GRADIENT FLOW PARAMETERS)
+    # Convert boolean parameters
     for bool_param in ['use_global_pooling', 'use_bidirectional',
                        'log_detailed_predictions', 'enable_realtime_plots', 
                        'save_realtime_plots', 'enable_gradient_flow_monitoring',  
-                       'save_gradient_flow_plots', 'enable_gradient_clipping']:
+                       'save_gradient_flow_plots', 'enable_gradient_clipping',
+                       'show_weights_bias_analysis', 'enable_realtime_weights_bias',
+                       'batch_normalization']:
         if bool_param in args:
             args[bool_param] = args[bool_param].lower() in ['true', '1', 'yes', 'on']
     
-    # Convert integer parameters (INCLUDING NEW GRADIENT FLOW PARAMETERS)
+    # Convert integer parameters
     int_params = ['epochs', 'num_layers_conv', 'filters_per_conv_layer', 'num_layers_hidden', 
                   'first_hidden_layer_nodes', 'embedding_dim', 'lstm_units', 'vocab_size', 
                   'max_predictions_to_show', 'gradient_monitoring_frequency',
-                  'gradient_history_length', 'gradient_sample_size']
+                  'gradient_history_length', 'gradient_sample_size',
+                  'weights_bias_monitoring_frequency']
     for int_param in int_params:
         if int_param in args:
             try:
@@ -2155,7 +2400,8 @@ if __name__ == "__main__":
     # Convert float parameters  
     float_params = ['first_hidden_layer_dropout', 'subsequent_hidden_layer_dropout_decrease', 
                     'subsequent_hidden_layer_nodes_decrease', 'text_dropout',
-                    'gradient_clip_norm']
+                    'gradient_clip_norm', 'weights_bias_sample_percentage',
+                    'learning_rate']
     for float_param in float_params:
         if float_param in args:
             try:
