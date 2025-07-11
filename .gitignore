@@ -217,3 +217,7 @@ datasets/*
 # datasets
 saved_models/*
 !saved_models/.gitkeep
+
+# datasets
+plots/*
+!plots/.gitkeep
