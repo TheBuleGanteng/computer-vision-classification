@@ -142,7 +142,8 @@ class ModelConfig:
     kernel_initializer: str = "he_normal" # Kernel initializer for conv layers. "he_normal" is good for ReLU-like activations, "glorot_uniform" (Xavier) is good for tanh/sigmoid, "lecun_normal" is good for Leaky ReLU. Default: "he_normal"
     pool_size: Tuple[int, int] = (2, 2) # Pooling: Takes max value from 2x2 areas, reduces spatial dimensions, making features more robust and reduces computation
     batch_normalization: bool = False # Use batch normalization after each conv layer to stabilize learning and improve convergence. Helps with internal covariate shift by normalizing activations across the batch
-           
+    padding: str = "same"  # "same" or "valid" - controls spatial dimension preservation
+    
     # Text-specific parameters
     """
     Text Model Architecture = "Sequential Understanding"
@@ -220,6 +221,7 @@ class ModelConfig:
     learning_rate: float = 0.001  # Learning rate for optimizer (default Adam rate)
     loss: str = "categorical_crossentropy" # Function measuring prediction error. For multi-class classification (traffic signs): "categorical_crossentropy" (standard choice). Other options: "sparse_categorical_crossentropy" (if labels are integers not one-hot), "binary_crossentropy" (for binary classification), "mse" (for regression)
     metrics: List[str] = field(default_factory=lambda: ["accuracy"]) # What to track during training beyond loss. "accuracy" = percentage of correct predictions. Other options: "precision", "recall", "f1_score", "top_5_accuracy" (useful for large datasets)
+    validation_split: float = 0.2  # Fraction of training data to use for validation
     
     # Evaluation and analysis parameters
     show_confusion_matrix: bool = True    # Generate confusion matrix analysis during evaluation
@@ -581,7 +583,8 @@ class ModelBuilder:
                 self.model_config.filters_per_conv_layer,
                 self.model_config.kernel_size,
                 activation=self.model_config.activation,
-                kernel_initializer=self.model_config.kernel_initializer  # Use the specified activation function
+                kernel_initializer=self.model_config.kernel_initializer,  # Use the specified activation function
+                padding=self.model_config.padding,  # Use the specified padding
             )
             conv_layers.append(conv_layer)
             
@@ -723,7 +726,7 @@ class ModelBuilder:
     def train(
         self, 
         data: Dict[str, Any], 
-        validation_split: float = 0.2
+        validation_split: Optional[float] = None
         ) -> keras.callbacks.History:
         """
         Train the model on provided data
@@ -1856,10 +1859,11 @@ class ModelBuilder:
     def save_model(
         self, 
         test_accuracy: Optional[float] = None,
-        run_timestamp: Optional[str] = None
-        ) -> None:
+        run_timestamp: Optional[str] = None,
+        run_name: Optional[str] = None
+        ) -> str:  # NEW: Return the saved model path
         """
-        Save the trained model to disk
+        Save the trained model to disk with optimizer-aware naming
         
         Model formats:
             - Modern .keras format benefits:
@@ -1879,10 +1883,28 @@ class ModelBuilder:
             3. Optimizer state: Adam optimizer's internal variables
             4. Compilation info: Loss function, metrics, optimizer settings
             5. Training config: How the model was configured for training
+            
+        Filename naming patterns:
+            - Manual training: "model_TIMESTAMP_ARCHITECTURE_DATASET_acc_ACCURACY.keras"
+            - Simple optimizer: "model_TIMESTAMP_ARCHITECTURE_DATASET_simple-OBJECTIVE_acc_ACCURACY.keras"  
+            - Health optimizer: "model_TIMESTAMP_ARCHITECTURE_DATASET_health_acc_ACCURACY.keras"
+            
+        Examples:
+            - "model_2025-01-08-14:30:22_CNN_cifar10_acc_85_3.keras"
+            - "model_2025-01-08-14:30:22_CNN_cifar10_simple-accuracy_acc_87_1.keras"
+            - "model_2025-01-08-14:30:22_LSTM_imdb_health_acc_88_5.keras"
+            
+        Args:
+            test_accuracy: Model's test accuracy for filename generation
+            run_timestamp: Timestamp for this run (auto-generated if None)
+            naming_string: Optional naming string from optimizer for consistent naming
+            
+        Returns:
+            str: Path to the saved model file
         """
         if self.model is None:
             raise ValueError("No model to save. Build and train a model first.")
-        
+    
         # Type guard: we know model is not None here
         model: keras.Model = self.model
         
@@ -1894,34 +1916,43 @@ class ModelBuilder:
         data_type = self._detect_data_type()
         architecture_name = "CNN" if data_type == "image" else "LSTM"
         
-        # Create run-specific subdirectory
-        dataset_name_clean = self.dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-        project_root: Path = Path(__file__).resolve().parent.parent
-        plots_dir = project_root / "plots"
-        run_subdir = plots_dir / f"{run_timestamp}_{architecture_name}_{dataset_name_clean}"
-        run_subdir.mkdir(parents=True, exist_ok=True)
-        
-        # Clean dataset name for filename (remove spaces, special chars)
+        # Clean dataset name for filename
         dataset_name_clean = self.dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_")
-        # Convert to lowercase and remove common words for shorter names
         dataset_name_clean = dataset_name_clean.lower()
         if "dataset" in dataset_name_clean:
             dataset_name_clean = dataset_name_clean.replace("_dataset", "")
         
+        # Auto-generate filename based on results and optimizer context
+        accuracy_str = f"{test_accuracy:.1f}".replace(".", "_") if test_accuracy is not None else "unknown"
         
-        # Auto-generate filename based on results:
-        accuracy_str = f"{test_accuracy:.1f}".replace(".", "_")
-        filename = f"model_{run_timestamp}_{architecture_name}_{dataset_name_clean}_acc_{accuracy_str}.keras" # e.g., "model_20250107_143022_acc_94_2.keras"
+        # Build filename with run_name
+        if run_name:
+            # Use run_name in filename
+            filename = f"model_{run_name}_acc_{accuracy_str}.keras"
+            logger.debug(f"running save_model ... Using run_name in filename: {filename}")
+        else:
+            # Fallback to old naming
+            filename = f"model_{run_timestamp}_{architecture_name}_{dataset_name_clean}_acc_{accuracy_str}.keras"
+            logger.debug(f"running save_model ... No run_name, using fallback filename: {filename}")
         
-        # Determine filepath
-        project_root: Path = Path(__file__).resolve().parent.parent
-        models_dir = project_root / "saved_models"
+        # Determine filepath - UPDATED LOGIC
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent
         
-        # Create directory if it doesn't exist
-        models_dir.mkdir(exist_ok=True)
+        if run_name:
+            # Save in optimization_results/run_name/ directory
+            optimization_results_dir = project_root / "optimization_results"
+            models_dir = optimization_results_dir / run_name
+            models_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"running save_model ... Saving to optimization_results/{run_name}/")
+        else:
+            # Fallback to saved_models directory for manual training
+            models_dir = project_root / "saved_models"
+            models_dir.mkdir(exist_ok=True)
+            logger.debug(f"running save_model ... Saving to saved_models/ (fallback)")
         
         final_filepath = models_dir / filename
-                
+        
         logger.debug(f"running save_model ... Saving model to {final_filepath}")
         self.model.save(final_filepath)
         logger.debug(f"running save_model ... Model saved successfully")
@@ -1932,6 +1963,13 @@ class ModelBuilder:
         logger.debug(f"running save_model ... - Input shape: {self.dataset_config.input_shape}")
         logger.debug(f"running save_model ... - Classes: {self.dataset_config.num_classes}")
         logger.debug(f"running save_model ... - Test accuracy: {test_accuracy:.4f}" if test_accuracy else "running save_model ... - Test accuracy: Not provided")
+        if run_name:
+            logger.debug(f"running save_model ... - Run name: {run_name}")
+        else:
+            logger.debug(f"running save_model ... - Training context: manual")
+        
+        # Return the path for use by calling code
+        return str(final_filepath)
         
     
     def load_model(self, filepath: str) -> keras.Model:
@@ -2123,6 +2161,59 @@ class ModelBuilder:
                     f"These are the weights and biases the model learns during training")
 
 
+def _create_plot_directory(
+    dataset_config: DatasetConfig, 
+    run_timestamp: str, 
+    run_name: Optional[str] = None
+) -> Path:
+    """
+    Create plot directory with unified run_name approach
+    
+    Args:
+        dataset_config: Dataset configuration
+        run_timestamp: Timestamp for this run (fallback only)
+        run_name: Unified run name from optimizer (preferred)
+        
+    Returns:
+        Path to created plot directory
+        
+    Directory naming patterns:
+        - With run_name: "RUN_NAME" (directly use the provided name)
+        - Fallback: "TIMESTAMP_ARCHITECTURE_DATASET" (legacy behavior)
+        
+    Examples:
+        - "2025-01-08-14:30:22_cifar10_health"
+        - "2025-01-08-14:30:22_cifar10_simple-accuracy"  
+        - "2025-01-08-14:30:22_CNN_cifar10" (fallback)
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    plots_dir = project_root / "plots"
+    
+    if run_name:
+        # Use the provided run_name directly - this ensures consistency across all components
+        plot_dir = plots_dir / run_name
+        logger.debug(f"running _create_plot_directory ... Using provided run_name: {run_name}")
+    else:
+        # Fallback to old naming pattern for manual training
+        dataset_name_clean = dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+        
+        # Detect architecture type based on input shape
+        if (dataset_config.img_height == 1 and 
+            dataset_config.channels == 1 and 
+            dataset_config.img_width > 100):
+            architecture_name = "LSTM"
+        else:
+            architecture_name = "CNN"
+        
+        dir_name = f"{run_timestamp}_{architecture_name}_{dataset_name_clean}"
+        plot_dir = plots_dir / dir_name
+        logger.debug(f"running _create_plot_directory ... No run_name provided, using fallback: {dir_name}")
+    
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug(f"running _create_plot_directory ... Created plot directory: {plot_dir}")
+    return plot_dir
+
+
 # Convenience function for easy usage
 def create_and_train_model(
     data: Optional[Dict[str, Any]] = None,
@@ -2132,8 +2223,9 @@ def create_and_train_model(
     test_size: float = 0.4,
     log_detailed_predictions: bool = True, 
     max_predictions_to_show: int = 20,
+    run_name: Optional[str] = None,
     **config_overrides
-) -> Tuple[ModelBuilder, float]:
+) -> Dict[str, Any]:  # NEW: Return dict with more information
     """
     Convenience function to create, train, and evaluate a model in one call
     
@@ -2141,63 +2233,48 @@ def create_and_train_model(
         data: Dataset dictionary from DatasetManager (optional if dataset_name provided)
         dataset_name: Name of dataset to load (optional if data provided)
         model_config: Optional model configuration
-        load_model_path: Optional path to existing model to load (NEW)
+        load_model_path: Optional path to existing model to load
         test_size: Fraction of data to use for testing (only used if dataset_name provided)
         log_detailed_predictions: Whether to show individual prediction results
         max_predictions_to_show: Maximum number of individual predictions to log
+        naming_string: Optional string for optimizer-specific directory naming
         **config_overrides: Any ModelConfig parameters to override (ignored if loading existing model)
         
     Returns:
-        Tuple of (ModelBuilder instance, test_accuracy)
-        
+        Dict containing:
+            - 'model_builder': ModelBuilder instance
+            - 'test_accuracy': float
+            - 'test_loss': float
+            - 'model_path': str (path to saved model, None if loading existing)
+            - 'plot_dir': str (path to plots directory)
+            - 'run_timestamp': str (timestamp for this run)
+            - 'architecture_type': str ('CNN' or 'LSTM')
+            - 'dataset_name': str (clean dataset name)
+            
     Examples:
-        - Use via command line arguments to specify parameters
-            - Example (trains new model): python model_builder.py dataset_name=cifar10 use_global_pooling=true epochs=15
-            - Example (loads existing model): python src/model_builder.py load_model_path=/home/thebuleganteng/01_Repos/06_personal_work/computer-vision-classification/saved_models/model_20250708_122719_acc_0_3.keras dataset_name=cifar100 test_size=0.1
-    
-        - Option 1: Use dataset name with config overrides (most convenient)
-        builder, accuracy = create_and_train_model(
-            dataset_name='cifar10',
-            use_global_pooling=True,
-            epochs=15,
-            filters_per_conv_layer=64
-        )
+        # Manual training
+        result = create_and_train_model(dataset_name='cifar10', epochs=15)
+        print(f"Model saved to: {result['model_path']}")
         
-        - Option 2: Use dataset name with ModelConfig object
-        config = ModelConfig(use_global_pooling=True, epochs=20)
-        builder, accuracy = create_and_train_model(
-            dataset_name='cifar10',
-            model_config=config
+        # Optimizer usage
+        result = create_and_train_model(
+            dataset_name='cifar10', 
+            naming_string='health',
+            epochs=15
         )
-        
-        - Option 3: Mix ModelConfig with overrides (overrides take precedence)
-        base_config = ModelConfig(epochs=10)
-        builder, accuracy = create_and_train_model(
-            dataset_name='imdb',
-            model_config=base_config,
-            epochs=5,  # This overrides the epochs=10 in base_config
-            embedding_dim=256
-        )
-        
-        - Option 4: Pre-loaded data
-        manager = DatasetManager()
-        data = manager.load_dataset('cifar10')
-        builder, accuracy = create_and_train_model(
-            data=data,
-            use_global_pooling=True
-        )
-        
-        - Option 5: Quick experiments
-        for pooling in [True, False]:
-            builder, acc = create_and_train_model(
-                dataset_name='fashion_mnist',
-                use_global_pooling=pooling,
-                epochs=5
-            )
-            print(f"Global pooling {pooling}: {acc:.4f}")
+        print(f"Plots in: {result['plot_dir']}")
+        print(f"Model saved to: {result['model_path']}")
     """
-    # Obtain start of run timestamp to be used for saving model and plots
-    run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+    # Use run_name for timestamp if provided, otherwise generate
+    if run_name:
+        # Extract timestamp from run_name (first part before first underscore after date)
+        # e.g., "2025-01-08-14:30:22_cifar10_health" -> "2025-01-08-14:30:22"
+        run_timestamp = run_name.split('_')[0]
+        logger.debug(f"running create_and_train_model ... Using timestamp from run_name: {run_timestamp}")
+    else:
+        run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+        logger.debug(f"running create_and_train_model ... Generated new timestamp: {run_timestamp}")
+    
     
     # Validate arguments
     if data is None and dataset_name is None:
@@ -2229,6 +2306,31 @@ def create_and_train_model(
     # Get dataset config from data
     dataset_config = data['config']
     
+    # Determine architecture type for result metadata
+    if (dataset_config.img_height == 1 and 
+        dataset_config.channels == 1 and 
+        dataset_config.img_width > 100):
+        architecture_type = "LSTM"
+    else:
+        architecture_type = "CNN"
+    
+    # Clean dataset name for result metadata
+    dataset_name_clean = dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+        
+    # Create plot directory - used by both load and train paths
+    if run_name:
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent
+        optimization_results_dir = project_root / "optimization_results"
+        plot_dir = optimization_results_dir / run_name / "plots"  # Use run_name/plots structure
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"running create_and_train_model ... Using run_name for plots: {run_name}")
+    else:
+        # Fallback to old behavior for manual training
+        plot_dir = _create_plot_directory(dataset_config, run_timestamp, None)
+        logger.debug(f"running create_and_train_model ... No run_name, using fallback plot directory")
+    
+    
     # Handling for loading existing model
     if load_model_path:
         logger.debug(f"running create_and_train_model ... Loading existing model from: {load_model_path}")
@@ -2242,22 +2344,14 @@ def create_and_train_model(
         builder = ModelBuilder(dataset_config)
         model = builder.load_model(load_model_path)
         logger.debug("running create_and_train_model ... Existing model loaded successfully!")
-        
-        # Create the plot directory once
-        dataset_name_clean = dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-        data_type = builder._detect_data_type()
-        architecture_name = "CNN" if data_type == "image" else "LSTM"
-        project_root = Path(__file__).resolve().parent.parent
-        plots_dir = project_root / "plots"
-        plot_dir = plots_dir / f"{run_timestamp}_{architecture_name}_{dataset_name_clean}"
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        
+               
         # Evaluate the loaded model
         logger.debug("running create_and_train_model ... Evaluating loaded model...")
         test_loss, test_accuracy = builder.evaluate(
             data=data,
             log_detailed_predictions=log_detailed_predictions,
             max_predictions_to_show=max_predictions_to_show,
+            run_timestamp=run_timestamp,
             plot_dir=plot_dir
         )
         
@@ -2265,8 +2359,17 @@ def create_and_train_model(
         logger.debug(f"running create_and_train_model ... - Test accuracy: {test_accuracy:.4f}")
         logger.debug(f"running create_and_train_model ... - Test loss: {test_loss:.4f}")
         
-        return builder, test_accuracy     
-        
+        # Return comprehensive result dictionary
+        return {
+            'model_builder': builder,
+            'test_accuracy': test_accuracy,
+            'test_loss': test_loss,
+            'model_path': None,  # No new model saved when loading existing
+            'plot_dir': str(plot_dir),
+            'run_timestamp': run_timestamp,
+            'architecture_type': architecture_type,
+            'dataset_name': dataset_name_clean
+        }
         
     # Handling for loading data and creating a new model
     else:
@@ -2294,7 +2397,7 @@ def create_and_train_model(
         else:
             logger.debug("running create_and_train_model ... Real-time training visualization DISABLED")
         
-        # Log gradient flow monitoring status (NEW)
+        # Log gradient flow monitoring status
         if model_config.enable_gradient_flow_monitoring:
             logger.debug("running create_and_train_model ... Real-time gradient flow monitoring ENABLED")
             logger.debug(f"running create_and_train_model ... Gradient monitoring frequency: every {model_config.gradient_monitoring_frequency} epochs")
@@ -2306,15 +2409,6 @@ def create_and_train_model(
         # Create model builder
         builder = ModelBuilder(dataset_config, model_config)
         
-        # Create the plot directory BEFORE building/training model
-        dataset_name_clean = dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-        data_type = builder._detect_data_type()
-        architecture_name = "CNN" if data_type == "image" else "LSTM"
-        project_root = Path(__file__).resolve().parent.parent
-        plots_dir = project_root / "plots"
-        plot_dir = plots_dir / f"{run_timestamp}_{architecture_name}_{dataset_name_clean}"
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        
         # PASS the plot_dir to the ModelBuilder so it can use it for real-time plots
         builder.plot_dir = plot_dir  # Add this attribute to store the plot directory
         
@@ -2323,33 +2417,38 @@ def create_and_train_model(
         builder.build_model()
         builder.train(data)
         
-        # Create the plot directory once
-        dataset_name_clean = dataset_config.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-        data_type = builder._detect_data_type()
-        architecture_name = "CNN" if data_type == "image" else "LSTM"
-        project_root = Path(__file__).resolve().parent.parent
-        plots_dir = project_root / "plots"
-        plot_dir = plots_dir / f"{run_timestamp}_{architecture_name}_{dataset_name_clean}"
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        
-        
         # Evaluate model
         logger.debug("running create_and_train_model ... Evaluating model...")
         test_loss, test_accuracy = builder.evaluate(
             data=data, 
             log_detailed_predictions=log_detailed_predictions, 
             max_predictions_to_show=max_predictions_to_show,
+            run_timestamp=run_timestamp,
             plot_dir=plot_dir
             )
         
-        # Save the model
-        builder.save_model(
+        # Save the model with optimizer-aware naming
+        model_path = builder.save_model(
             test_accuracy=test_accuracy,
-            run_timestamp=run_timestamp
+            run_timestamp=run_timestamp,
+            run_name=run_name  # NEW: Pass naming_string to save_model
             )
         
         logger.debug(f"running create_and_train_model ... Completed with accuracy: {test_accuracy:.4f}")
-        return builder, test_accuracy
+        logger.debug(f"running create_and_train_model ... Model saved to: {model_path}")
+        
+        # Return comprehensive result dictionary
+        return {
+            'model_builder': builder,
+            'test_accuracy': test_accuracy,
+            'test_loss': test_loss,
+            'model_path': model_path,  # Path to newly saved model
+            'plot_dir': str(plot_dir),
+            'run_timestamp': run_timestamp,
+            'architecture_type': architecture_type,
+            'dataset_name': dataset_name_clean
+        }
+
 
 
 if __name__ == "__main__":
@@ -2401,7 +2500,7 @@ if __name__ == "__main__":
     float_params = ['first_hidden_layer_dropout', 'subsequent_hidden_layer_dropout_decrease', 
                     'subsequent_hidden_layer_nodes_decrease', 'text_dropout',
                     'gradient_clip_norm', 'weights_bias_sample_percentage',
-                    'learning_rate']
+                    'learning_rate', 'validation_split']
     for float_param in float_params:
         if float_param in args:
             try:
@@ -2436,7 +2535,9 @@ if __name__ == "__main__":
     
     try:
         # One function call with all arguments
-        builder, test_accuracy = create_and_train_model(**args)
+        result = create_and_train_model(**args)
+        builder = result['model_builder']
+        test_accuracy = result['test_accuracy']
         
         # Success
         load_path = args.get('load_model_path')

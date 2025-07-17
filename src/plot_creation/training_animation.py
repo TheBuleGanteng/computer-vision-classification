@@ -208,7 +208,10 @@ class TrainingAnimationAnalyzer:
             insights.append(f"🚀 Biggest breakthrough at epoch {max_drop_epoch}")
             
             # Find convergence point (where improvement slows)
-            recent_improvements = [abs(losses[i-1] - losses[i]) for i in range(-3, 0) if i+len(losses) >= 0]
+            recent_improvements = []
+            if len(losses) >= 4:  # Need at least 4 epochs to calculate 3 recent improvements
+                for i in range(max(1, len(losses)-3), len(losses)):
+                    recent_improvements.append(abs(losses[i-1] - losses[i]))
             if len(recent_improvements) >= 2 and all(imp < 0.01 for imp in recent_improvements):
                 convergence_epoch = len(losses) - 2
                 interesting_epochs.append(('convergence', convergence_epoch))

@@ -221,3 +221,7 @@ saved_models/*
 # datasets
 plots/*
 !plots/.gitkeep
+
+# datasets
+optimization_results/*
+!optimization_results/.gitkeep
