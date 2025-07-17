@@ -31,6 +31,7 @@ from tensorflow import keras # type: ignore
 import time
 import traceback
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
+import uuid
 import yaml
 
 # Import existing modules
@@ -39,6 +40,54 @@ from health_analyzer import HealthAnalyzer
 from model_builder import ModelBuilder, ModelConfig, create_and_train_model
 from utils.logger import logger
 from model_builder import create_and_train_model
+
+
+
+
+@dataclass
+class TrialProgress:
+    """Real-time trial progress data for API streaming"""
+    trial_id: str
+    trial_number: int
+    status: str  # "running", "completed", "failed", "pruned"
+    started_at: str
+    completed_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    
+    # Architecture Information
+    architecture: Optional[Dict[str, Any]] = None
+    hyperparameters: Optional[Dict[str, Any]] = None
+    model_size: Optional[Dict[str, Any]] = None
+    
+    # Health Metrics (populated during/after training)
+    health_metrics: Optional[Dict[str, Any]] = None
+    training_stability: Optional[Dict[str, Any]] = None
+    
+    # Performance Data
+    performance: Optional[Dict[str, Any]] = None
+    training_history: Optional[Dict[str, Any]] = None
+    
+    # Pruning Information
+    pruning_info: Optional[Dict[str, Any]] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API serialization"""
+        return {
+            'trial_id': self.trial_id,
+            'trial_number': self.trial_number,
+            'status': self.status,
+            'started_at': self.started_at,
+            'completed_at': self.completed_at,
+            'duration_seconds': self.duration_seconds,
+            'architecture': self.architecture,
+            'hyperparameters': self.hyperparameters,
+            'model_size': self.model_size,
+            'health_metrics': self.health_metrics,
+            'training_stability': self.training_stability,
+            'performance': self.performance,
+            'training_history': self.training_history,
+            'pruning_info': self.pruning_info
+        }
 
 
 class OptimizationMode(Enum):
@@ -163,7 +212,7 @@ class OptimizationConfig:
     min_accuracy_threshold: float = 0.5
     
     # Stability detection parameters
-    min_epochs_per_trial: int = 10      # Force longer observation - updated from 15
+    min_epochs_per_trial: int = 5      # Force longer observation - updated from 15
     enable_stability_checks: bool = True # Monitor for instabilities
     stability_window: int = 5           # Check stability over last N epochs
     max_bias_change_per_epoch: float = 10.0  # Flag rapid bias changes
@@ -309,16 +358,12 @@ class ModelOptimizer:
     Uses configurable health_weight to balance objective vs health importance.
     """
     
-    def __init__(
-        self, 
-        dataset_name: str,
-        optimization_config: Optional[OptimizationConfig] = None,
-        datasets_root: Optional[str] = None,
-        run_name: Optional[str] = None,
-        health_analyzer: Optional[HealthAnalyzer] = None
-    ):
+    def __init__(self, dataset_name: str, optimization_config: Optional[OptimizationConfig] = None, 
+             datasets_root: Optional[str] = None, run_name: Optional[str] = None,
+             health_analyzer: Optional[HealthAnalyzer] = None,
+             progress_callback: Optional[Callable[[TrialProgress], None]] = None):
         """
-        Initialize ModelOptimizer
+        Initialize ModelOptimizer with optional progress callback for real-time updates
         
         Args:
             dataset_name: Name of dataset to optimize for
@@ -326,6 +371,8 @@ class ModelOptimizer:
             datasets_root: Optional custom datasets directory
             run_name: Optional unified run name for consistent directory/file naming
             health_analyzer: Optional HealthAnalyzer instance (creates new if None)
+            progress_callback: Optional callback function that receives TrialProgress updates
+                            Used by API endpoints to stream real-time progress
         """
         self.dataset_name = dataset_name
         self.config = optimization_config or OptimizationConfig()
@@ -368,6 +415,16 @@ class ModelOptimizer:
         # Create results directory
         self._setup_results_directory()
         
+        # Real-time trial tracking
+        self.progress_callback = progress_callback
+        self.current_trial_progress: Optional[TrialProgress] = None
+        self.trial_progress_history: List[TrialProgress] = []
+        self.best_trial_progress: Optional[TrialProgress] = None
+        
+        # Architecture and health trends for visualization
+        self.architecture_trends: Dict[str, List[float]] = {}
+        self.health_trends: Dict[str, List[float]] = {}
+        
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
         logger.debug(f"running ModelOptimizer.__init__ ... Mode: {self.config.mode.value}")
         logger.debug(f"running ModelOptimizer.__init__ ... Objective: {self.config.objective.value}")
@@ -377,6 +434,252 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.__init__ ... Health monitoring: enabled (all modes)")
         if self.run_name:
             logger.debug(f"running ModelOptimizer.__init__ ... Run name: {self.run_name}")
+        logger.debug(f"running ModelOptimizer.__init__ ... Real-time trial tracking enabled: {progress_callback is not None}")
+    
+    
+    # MODEL MONITORING API METHODS ------------------------------------------
+    def get_trial_history(self) -> List[Dict[str, Any]]:
+        """Get complete trial history for API"""
+        return [trial.to_dict() for trial in self.trial_progress_history]
+
+    def get_current_trial(self) -> Optional[Dict[str, Any]]:
+        """Get currently running trial data"""
+        return self.current_trial_progress.to_dict() if self.current_trial_progress else None
+
+    def get_best_trial(self) -> Optional[Dict[str, Any]]:
+        """Get best performing trial so far"""
+        return self.best_trial_progress.to_dict() if self.best_trial_progress else None
+
+    def get_architecture_trends(self) -> Dict[str, List[float]]:
+        """Get architecture performance trends"""
+        return self.architecture_trends.copy()
+
+    def get_health_trends(self) -> Dict[str, List[float]]:
+        """Get health metrics trends"""
+        return self.health_trends.copy()
+
+    def get_optimization_progress(self) -> Dict[str, Any]:
+        """Get overall optimization progress for API"""
+        completed_trials = len([t for t in self.trial_progress_history if t.status == "completed"])
+        total_trials = self.config.n_trials
+        
+        return {
+            "current_trial": len(self.trial_progress_history),
+            "total_trials": total_trials,
+            "completed_trials": completed_trials,
+            "success_rate": completed_trials / max(len(self.trial_progress_history), 1),
+            "best_value": self.study.best_value if self.study and self.study.best_value else None,
+            "elapsed_time": time.time() - self.optimization_start_time if self.optimization_start_time else 0
+        }
+    
+    def _start_trial(self, trial_number: int, hyperparameters: Dict[str, Any]) -> str:
+        """Start tracking a new optimization trial"""
+        trial_id = f"trial_{trial_number}_{uuid.uuid4().hex[:8]}"
+        
+        # Create trial progress object
+        trial_progress = TrialProgress(
+            trial_id=trial_id,
+            trial_number=trial_number,
+            status="running",
+            started_at=datetime.now().isoformat(),
+            hyperparameters=hyperparameters
+        )
+        
+        # Store current trial
+        self.current_trial_progress = trial_progress
+        self.trial_progress_history.append(trial_progress)
+        
+        # Notify callback if available
+        if self.progress_callback:
+            self.progress_callback(trial_progress)
+        
+        logger.debug(f"running ModelOptimizer._start_trial ... Started trial {trial_number} (ID: {trial_id})")
+        return trial_id
+    
+    def _update_trial_architecture(self, trial_id: str, model: Any, hyperparameters: Dict[str, Any]) -> None:
+        """Update trial with detailed architecture information"""
+        if not self.current_trial_progress or self.current_trial_progress.trial_id != trial_id:
+            return
+        
+        try:
+            # Extract architecture details
+            architecture = self._analyze_model_architecture(model, hyperparameters)
+            model_size = self._calculate_model_size(model)
+            
+            # Update trial progress
+            self.current_trial_progress.architecture = architecture
+            self.current_trial_progress.model_size = model_size
+            
+            # Notify callback
+            if self.progress_callback:
+                self.progress_callback(self.current_trial_progress)
+            
+            logger.debug(f"running ModelOptimizer._update_trial_architecture ... Updated architecture for trial {trial_id}")
+            
+        except Exception as e:
+            logger.warning(f"running ModelOptimizer._update_trial_architecture ... Failed to analyze architecture: {e}")
+    
+    def _update_trial_health(self, trial_id: str, health_metrics: Dict[str, Any]) -> None:
+        """Update trial with health metrics"""
+        if not self.current_trial_progress or self.current_trial_progress.trial_id != trial_id:
+            return
+        
+        try:
+            # Update health metrics
+            self.current_trial_progress.health_metrics = health_metrics
+            
+            # Update health trends for visualization
+            self._update_health_trends(self.current_trial_progress.trial_number, health_metrics)
+            
+            # Notify callback
+            if self.progress_callback:
+                self.progress_callback(self.current_trial_progress)
+            
+            logger.debug(f"running ModelOptimizer._update_trial_health ... Updated health metrics for trial {trial_id}")
+            
+        except Exception as e:
+            logger.warning(f"running ModelOptimizer._update_trial_health ... Failed to update health metrics: {e}")
+    
+    def _complete_trial(self, trial_id: str, performance: Dict[str, Any], 
+                       training_history: Dict[str, Any], status: str = "completed",
+                       pruning_info: Optional[Dict[str, Any]] = None) -> None:
+        """Complete trial and store final results"""
+        if not self.current_trial_progress or self.current_trial_progress.trial_id != trial_id:
+            return
+        
+        try:
+            # Update completion info
+            self.current_trial_progress.completed_at = datetime.now().isoformat()
+            self.current_trial_progress.status = status
+            self.current_trial_progress.performance = performance
+            self.current_trial_progress.training_history = training_history
+            self.current_trial_progress.pruning_info = pruning_info
+            
+            # Calculate duration
+            if self.current_trial_progress.started_at:
+                start_time = datetime.fromisoformat(self.current_trial_progress.started_at.replace('Z', '+00:00'))
+                end_time = datetime.fromisoformat(self.current_trial_progress.completed_at.replace('Z', '+00:00'))
+                self.current_trial_progress.duration_seconds = (end_time - start_time).total_seconds()
+            
+            # Update best trial tracking
+            if (status == "completed" and performance.get('final_val_accuracy') and
+                (self.best_trial_progress is None or 
+                performance['final_val_accuracy'] > (self.best_trial_progress.performance.get('final_val_accuracy', 0) if self.best_trial_progress.performance else 0))):
+                self.best_trial_progress = self.current_trial_progress
+            
+            # Update architecture trends
+            self._update_architecture_trends(
+                self.current_trial_progress.trial_number, 
+                performance, 
+                self.current_trial_progress.architecture
+            )
+            
+            # Final callback notification
+            if self.progress_callback:
+                self.progress_callback(self.current_trial_progress)
+            
+            # Clear current trial
+            self.current_trial_progress = None
+            
+            logger.debug(f"running ModelOptimizer._complete_trial ... Completed trial {trial_id} with status: {status}")
+            
+        except Exception as e:
+            logger.warning(f"running ModelOptimizer._complete_trial ... Failed to complete trial: {e}")
+    
+    def _analyze_model_architecture(self, model: Any, hyperparameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze model architecture for visualization"""
+        try:
+            architecture = {
+                "type": "cnn" if hyperparameters.get("architecture_type") == "cnn" else "lstm",
+                "layers": [],
+                "total_params": model.count_params(),
+                "trainable_params": sum([layer.count_params() for layer in model.layers if layer.trainable]),
+                "input_shape": list(model.input_shape[1:]) if model.input_shape else [],
+                "output_shape": list(model.output_shape[1:]) if model.output_shape else []
+            }
+            
+            # Analyze each layer
+            for i, layer in enumerate(model.layers):
+                layer_info = {
+                    "index": i,
+                    "name": layer.name,
+                    "type": type(layer).__name__,
+                    "params": layer.count_params(),
+                    "trainable": layer.trainable
+                }
+                
+                # Add layer-specific details
+                if hasattr(layer, 'filters'):
+                    layer_info["filters"] = layer.filters
+                if hasattr(layer, 'kernel_size'):
+                    layer_info["kernel_size"] = list(layer.kernel_size)
+                if hasattr(layer, 'units'):
+                    layer_info["units"] = layer.units
+                if hasattr(layer, 'rate'):
+                    layer_info["dropout_rate"] = layer.rate
+                
+                architecture["layers"].append(layer_info)
+            
+            return architecture
+            
+        except Exception as e:
+            logger.warning(f"running ModelOptimizer._analyze_model_architecture ... Architecture analysis failed: {e}")
+            return {"type": "unknown", "layers": [], "total_params": 0, "error": str(e)}
+    
+    def _calculate_model_size(self, model: Any) -> Dict[str, Any]:
+        """Calculate model size metrics"""
+        try:
+            total_params = model.count_params()
+            trainable_params = sum([layer.count_params() for layer in model.layers if layer.trainable])
+            memory_mb = total_params * 4 / (1024 * 1024)  # Rough estimate
+            
+            return {
+                "total_params": total_params,
+                "trainable_params": trainable_params,
+                "non_trainable_params": total_params - trainable_params,
+                "memory_mb": round(memory_mb, 2),
+                "size_category": self._categorize_model_size(total_params)
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def _categorize_model_size(self, total_params: int) -> str:
+        """Categorize model size"""
+        if total_params < 100_000:
+            return "small"
+        elif total_params < 1_000_000:
+            return "medium"
+        elif total_params < 10_000_000:
+            return "large"
+        else:
+            return "very_large"
+    
+    def _update_health_trends(self, trial_number: int, health_metrics: Dict[str, Any]) -> None:
+        """Update health trends for visualization"""
+        for metric_name, value in health_metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if metric_name not in self.health_trends:
+                    self.health_trends[metric_name] = []
+                self.health_trends[metric_name].append(float(value))
+    
+    def _update_architecture_trends(self, trial_number: int, performance: Dict[str, Any], 
+                                   architecture: Optional[Dict[str, Any]]) -> None:
+        """Update architecture performance trends"""
+        if not architecture:
+            return
+        
+        # Track performance by architecture features
+        total_params = architecture.get("total_params", 0)
+        val_accuracy = performance.get("final_val_accuracy", 0)
+        
+        # Update trends
+        if "parameter_count" not in self.architecture_trends:
+            self.architecture_trends["parameter_count"] = []
+        self.architecture_trends["parameter_count"].append(total_params)
+        
+        if "val_accuracy" not in self.architecture_trends:
+            self.architecture_trends["val_accuracy"] = []
+        self.architecture_trends["val_accuracy"].append(val_accuracy)  
     
     def _detect_data_type(self) -> str:
         """Detect whether this is image or text data"""
@@ -385,8 +688,7 @@ class ModelOptimizer:
             self.dataset_config.img_width > 100):
             return "text"
         else:
-            return "image"
-    
+            return "image"    
     
     def _setup_results_directory(self) -> None:
         """Create directory using the unified run_name"""
@@ -429,7 +731,6 @@ class ModelOptimizer:
         self.summary_plots_dir = self.results_dir / "plots" / "summary_plots"
         self.summary_plots_dir.mkdir(exist_ok=True)
         logger.debug(f"running _setup_results_directory ... Created summary plots directory: {self.summary_plots_dir}")
-
 
     def _detect_training_instabilities(
         self, 
@@ -526,7 +827,6 @@ class ModelOptimizer:
         
         logger.debug(f"running _detect_training_instabilities ... Stability check complete: stable={is_stable}, issues={len(issues)}")
         return is_stable, issues
-
     
     def _build_and_save_best_model(self, results: OptimizationResult) -> str:
         """
@@ -755,6 +1055,9 @@ class ModelOptimizer:
             # Generate hyperparameters based on data type
             params = self._suggest_hyperparameters(trial)
             
+            # Start trial tracking
+            trial_id = self._start_trial(trial.number, params)
+            
             # Log trial start
             logger.debug(f"running _objective_function ... Trial {trial.number} config: "
                 f"conv_layers={params.get('num_layers_conv')}, "
@@ -778,6 +1081,9 @@ class ModelOptimizer:
             if model_builder.model is None:
                 raise RuntimeError("Model building failed - model is None")
             
+            # UPDATE ARCHITECTURE INFO - NEW
+            self._update_trial_architecture(trial_id, model_builder.model, params)
+                        
             # Split training data for validation            
             x_train_split, x_val_split, y_train_split, y_val_split = train_test_split(
                 self.data['x_train'], 
@@ -792,8 +1098,7 @@ class ModelOptimizer:
             # Create callbacks for early stopping and pruning
             callbacks = []
             
-            if self.config.enable_early_stopping:
-                
+            if self.config.enable_early_stopping:                
                 early_stopping = keras.callbacks.EarlyStopping(
                     monitor='val_accuracy' if 'accuracy' in self.config.objective.value else 'val_loss',
                     patience=self.config.early_stopping_patience,
@@ -853,6 +1158,15 @@ class ModelOptimizer:
                 epochs_completed = len(history.history.get('loss', []))
                 if epochs_completed < self.config.min_epochs_per_trial:
                     logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} insufficient epochs: {epochs_completed} < {self.config.min_epochs_per_trial}")
+                                    
+                    # Complete trial with pruning due to insufficient epochs
+                    self._complete_trial(
+                        trial_id, 
+                        {"error": f"Insufficient epochs: {epochs_completed} < {self.config.min_epochs_per_trial}"}, 
+                        {}, 
+                        "pruned",
+                        pruning_info={"reason": "insufficient_epochs", "epochs_completed": epochs_completed}
+                    )                    
                     raise optuna.TrialPruned(f"Trial completed only {epochs_completed} epochs, minimum required: {self.config.min_epochs_per_trial}")
                 
                 # Detect training instabilities
@@ -866,24 +1180,59 @@ class ModelOptimizer:
                     logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} unstable training detected")
                     for issue in stability_issues:
                         logger.debug(f"running ModelOptimizer._objective_function ... - Stability issue: {issue}")
+                                        
+                    # Complete trial with pruning due to instability
+                    self._complete_trial(
+                        trial_id,
+                        {"error": f"Training instability: {'; '.join(stability_issues[:3])}"}, 
+                        {}, 
+                        "pruned",
+                        pruning_info={"reason": "instability", "issues": stability_issues}
+                    )
                     
                     # Prune trial due to instability
                     issue_summary = "; ".join(stability_issues[:3])  # Limit to first 3 issues for readability
                     raise optuna.TrialPruned(f"Training instability detected: {issue_summary}")
                 else:
                     logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} passed stability checks")
-            
-            
+                        
             # Check resource constraints
             if training_time_minutes > self.config.max_training_time_minutes:
                 logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} exceeded time limit")
+                
+                # Complete trial with pruning due to time limit
+                self._complete_trial(
+                    trial_id,
+                    {"error": f"Training time {training_time_minutes:.1f}min exceeded limit"}, 
+                    {}, 
+                    "pruned",
+                    pruning_info={"reason": "time_limit", "training_time_minutes": training_time_minutes}
+                )            
                 raise optuna.TrialPruned(f"Training time {training_time_minutes:.1f}min exceeded limit")
-            
+                
             # Count parameters
             total_params = model_builder.model.count_params()
             if total_params > self.config.max_parameters:
                 logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} exceeded parameter limit")
+                
+                # Complete trial with pruning due to parameter limit
+                self._complete_trial(
+                    trial_id,
+                    {"error": f"Parameters {total_params:,} exceeded limit"}, 
+                    {}, 
+                    "pruned",
+                    pruning_info={"reason": "parameter_limit", "total_params": total_params}
+                )                
                 raise optuna.TrialPruned(f"Parameters {total_params:,} exceeded limit")
+            
+            # Calculate health metrics
+            health_metrics = self._calculate_trial_health_metrics(
+                history, model_builder.model, validation_data, 
+                training_time_minutes, total_params, trial
+            )
+            
+            # Update health info
+            self._update_trial_health(trial_id, health_metrics)
             
             # Calculate objective value based on optimization mode and target
             objective_value = self._calculate_objective_value(
@@ -899,7 +1248,34 @@ class ModelOptimizer:
             final_accuracy = history.history.get('val_accuracy', [0])[-1] if history.history.get('val_accuracy') else 0
             if final_accuracy < self.config.min_accuracy_threshold:
                 logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} below accuracy threshold")
+                
+                # Complete trial with pruning due to accuracy threshold
+                self._complete_trial(
+                    trial_id,
+                    {"error": f"Accuracy {final_accuracy:.3f} below threshold"}, 
+                    {}, 
+                    "pruned",
+                    pruning_info={"reason": "accuracy_threshold", "final_accuracy": final_accuracy}
+                )                
                 raise optuna.TrialPruned(f"Accuracy {final_accuracy:.3f} below threshold")
+            
+            # Calculate final performance
+            performance = {
+                'final_accuracy': history.history.get('accuracy', [0])[-1],
+                'final_val_accuracy': history.history.get('val_accuracy', [0])[-1],
+                'final_loss': history.history.get('loss', [0])[-1],
+                'best_val_accuracy': max(history.history.get('val_accuracy', [0])),
+                'training_time_minutes': training_time_minutes,
+                'total_params': total_params
+            }
+            
+            # Convert training history to serializable format
+            training_history_dict = {
+                k: [float(v) for v in values] for k, values in history.history.items()
+            }
+            
+            # COMPLETE TRIAL TRACKING - NEW
+            self._complete_trial(trial_id, performance, training_history_dict, "completed")
             
             # Log trial success
             logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} completed: {self.config.objective.value}={objective_value:.4f}")
@@ -2102,6 +2478,7 @@ def optimize_model(
     optimize_for: str = "val_accuracy",
     trials: int = 50,
     run_name: Optional[str] = None,
+    progress_callback: Optional[Callable[[TrialProgress], None]] = None,
     **config_overrides
 ) -> OptimizationResult:
     """
@@ -2176,7 +2553,12 @@ def optimize_model(
             logger.warning(f"running optimize_model ... Unknown config parameter: {key}")
     
     # Run optimization
-    optimizer = ModelOptimizer(dataset_name, opt_config, run_name=run_name)
+    optimizer = ModelOptimizer(
+        dataset_name=dataset_name,
+        optimization_config=opt_config,
+        run_name=run_name,
+        progress_callback=progress_callback
+    )
     return optimizer.optimize()
 
 

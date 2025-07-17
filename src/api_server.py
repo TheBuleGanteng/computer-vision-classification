@@ -2,7 +2,7 @@
 FastAPI Server for Hyperparameter Optimization
 
 Provides REST API endpoints for managing hyperparameter optimization jobs.
-Integrates with existing model_optimizer system to provide:
+Integrates with existing optimizer system to provide:
 - Asynchronous job management
 - Progress monitoring
 - Result retrieval
@@ -26,9 +26,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
-# Import existing optimizer components
-from model_optimizer import optimize_model
-from model_builder import create_and_train_model
+# UPDATED IMPORTS - Fixed compatibility
+from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, TrialProgress
 from dataset_manager import DatasetManager
 from utils.logger import logger
 
@@ -58,25 +57,23 @@ class OptimizationRequest(BaseModel):
     """
     Request model for starting a new hyperparameter optimization job
     
-    Defines the structure and validation for optimization requests.
-    All parameters correspond to those accepted by the underlying
-    model_optimizer system.
+    UPDATED: Aligned with new optimizer.py parameters
     
     Attributes:
         dataset_name: Name of dataset to optimize (e.g., 'cifar10', 'imdb')
-        optimizer: Optimizer type ('simple' or 'health')
-        optimize_for: Optimization objective ('accuracy', 'val_accuracy', etc.)
+        mode: Optimization mode ('simple' or 'health')
+        optimize_for: Optimization objective ('val_accuracy', 'accuracy', etc.)
         trials: Number of optimization trials to run
-        create_model: Whether to build final model with best parameters
+        health_weight: Health weighting (0.0-1.0, only used in health mode)
         config_overrides: Additional configuration parameters
         
     Example:
         {
             "dataset_name": "cifar10",
-            "optimizer": "health",
+            "mode": "health",
             "optimize_for": "val_accuracy",
             "trials": 50,
-            "create_model": true,
+            "health_weight": 0.3,
             "config_overrides": {
                 "max_epochs_per_trial": 25,
                 "n_startup_trials": 15
@@ -84,10 +81,10 @@ class OptimizationRequest(BaseModel):
         }
     """
     dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'imdb')")
-    optimizer: str = Field(default="health", description="Optimizer type ('simple' or 'health')")
-    optimize_for: str = Field(default="accuracy", description="Optimization objective")
+    mode: str = Field(default="simple", description="Optimization mode ('simple' or 'health')")
+    optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
     trials: int = Field(default=50, ge=1, le=200, description="Number of optimization trials")
-    create_model: bool = Field(default=True, description="Build final model with best parameters")
+    health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
     config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration")
 
 
@@ -139,8 +136,7 @@ class TrialData(BaseModel):
     """
     Comprehensive data structure for individual optimization trials
     
-    Captures all information needed for rich visualization including
-    model architecture, health metrics, performance data, and timing.
+    UPDATED: Aligned with new TrialProgress structure
     
     Attributes:
         trial_id: Unique trial identifier within the job
@@ -158,7 +154,6 @@ class TrialData(BaseModel):
         # Health Metrics
         health_metrics: Model health assessment data
         training_stability: Training stability indicators
-        gradient_health: Gradient flow health metrics
         
         # Performance Data
         performance: Training and validation metrics
@@ -177,17 +172,13 @@ class TrialData(BaseModel):
             "duration_seconds": 105.5,
             "architecture": {
                 "type": "cnn",
-                "layers": [
-                    {"type": "conv2d", "filters": 64, "kernel_size": [3,3], "params": 1792},
-                    {"type": "maxpool", "pool_size": [2,2], "params": 0},
-                    {"type": "dense", "units": 128, "params": 32896}
-                ],
+                "layers": [...],
                 "total_params": 245000,
                 "memory_mb": 12.5
             },
             "health_metrics": {
-                "dead_neuron_ratio": 0.15,
-                "gradient_health": 0.82,
+                "overall_health": 0.82,
+                "neuron_utilization": 0.85,
                 "parameter_efficiency": 0.91,
                 "training_stability": 0.88
             },
@@ -214,7 +205,6 @@ class TrialData(BaseModel):
     # Health Metrics
     health_metrics: Optional[Dict[str, Any]] = None
     training_stability: Optional[Dict[str, Any]] = None
-    gradient_health: Optional[Dict[str, Any]] = None
     
     # Performance Data
     performance: Optional[Dict[str, Any]] = None
@@ -226,18 +216,20 @@ class TrialData(BaseModel):
 
 class OptimizationJob:
     """
-    Enhanced job management class for tracking optimization tasks with rich visualization data
+    Enhanced job management class for tracking optimization tasks with real-time updates
+    
+    UPDATED: Integrated with new optimizer.py progress tracking system
     
     Handles the lifecycle of individual optimization jobs including:
     - Job state management
-    - Detailed trial tracking with architecture and health metrics
-    - Progress tracking with real-time updates
+    - Real-time trial tracking via progress callbacks
+    - Progress tracking with live updates
     - Result storage and retrieval
     - Error handling and logging
     
-    This class bridges the FastAPI async world with the synchronous
-    optimization code, providing clean separation of concerns while
-    capturing comprehensive data for frontend visualization.
+    This class bridges the FastAPI async world with the new optimizer system,
+    providing clean separation of concerns while capturing comprehensive data 
+    for frontend visualization.
     
     Attributes:
         job_id: Unique identifier for this job
@@ -251,13 +243,11 @@ class OptimizationJob:
         error: Error message if job failed (None if successful)
         task: Background asyncio task handle
         
-        # Enhanced tracking for visualization
-        trials: List of all trial data for rich visualization
-        current_trial: Currently running trial data
-        trial_history: Complete trial history for analysis
-        best_trial: Best performing trial so far
-        architecture_trends: Architecture performance trends
-        health_trends: Health metrics trends over time
+        # NEW: Real-time trial tracking
+        optimizer: ModelOptimizer instance with progress callback
+        trial_progress_history: List of all trial progress updates
+        current_trial_progress: Currently running trial data
+        best_trial_progress: Best performing trial so far
         
     Example Usage:
         job = OptimizationJob(request)
@@ -269,7 +259,7 @@ class OptimizationJob:
     
     def __init__(self, request: OptimizationRequest):
         """
-        Initialize a new optimization job with enhanced trial tracking
+        Initialize a new optimization job with real-time progress tracking
         
         Args:
             request: OptimizationRequest containing job parameters
@@ -285,20 +275,89 @@ class OptimizationJob:
         self.error: Optional[str] = None
         self.task: Optional[asyncio.Task] = None
         
-        # Enhanced tracking for visualization
-        self.trials: List[TrialData] = []
-        self.current_trial: Optional[TrialData] = None
-        self.trial_history: Dict[str, TrialData] = {}
-        self.best_trial: Optional[TrialData] = None
-        self.architecture_trends: Dict[str, List[float]] = {}
-        self.health_trends: Dict[str, List[float]] = {}
+        # NEW: Real-time trial tracking
+        self.optimizer: Optional[Any] = None  # Will be ModelOptimizer instance
+        self.trial_progress_history: List[TrialProgress] = []
+        self.current_trial_progress: Optional[TrialProgress] = None
+        self.best_trial_progress: Optional[TrialProgress] = None
         
         logger.debug(f"running OptimizationJob.__init__ ... Created job {self.job_id} for dataset {request.dataset_name}")
-        logger.debug(f"running OptimizationJob.__init__ ... Enhanced tracking enabled for rich visualization")
+        logger.debug(f"running OptimizationJob.__init__ ... Mode: {request.mode}, Objective: {request.optimize_for}")
+        logger.debug(f"running OptimizationJob.__init__ ... Real-time trial tracking enabled")
+    
+    def _progress_callback(self, trial_progress: TrialProgress) -> None:
+        """
+        Callback function to receive real-time trial progress updates
+        
+        This method is called by the optimizer whenever trial progress is updated.
+        It maintains the job's trial tracking state and updates progress metrics.
+        
+        Args:
+            trial_progress: TrialProgress object with current trial state
+        """
+        logger.debug(f"running OptimizationJob._progress_callback ... Trial {trial_progress.trial_number} update: {trial_progress.status}")
+        
+        # Store trial progress
+        self.trial_progress_history.append(trial_progress)
+        
+        # Update current trial
+        if trial_progress.status == "running":
+            self.current_trial_progress = trial_progress
+        elif trial_progress.status in ["completed", "failed", "pruned"]:
+            # Clear current trial when completed
+            if self.current_trial_progress and self.current_trial_progress.trial_id == trial_progress.trial_id:
+                self.current_trial_progress = None
+            
+            # Update best trial if this one performed better
+            if (trial_progress.status == "completed" and 
+                trial_progress.performance and 
+                trial_progress.performance.get('final_val_accuracy')):
+                
+                current_val_acc = trial_progress.performance['final_val_accuracy']
+                best_val_acc = (self.best_trial_progress.performance.get('final_val_accuracy', 0) 
+                              if self.best_trial_progress and self.best_trial_progress.performance else 0)
+                
+                if current_val_acc > best_val_acc:
+                    self.best_trial_progress = trial_progress
+                    logger.debug(f"running OptimizationJob._progress_callback ... New best trial: {trial_progress.trial_number} with val_acc: {current_val_acc:.4f}")
+        
+        # Update job progress
+        self._update_job_progress()
+    
+    def _update_job_progress(self) -> None:
+        """
+        Update job progress based on current trial state
+        
+        Called whenever trial progress is updated to maintain overall job progress.
+        """
+        if not self.optimizer:
+            return
+        
+        try:
+            # Get progress from optimizer
+            opt_progress = self.optimizer.get_optimization_progress()
+            
+            # Update job progress
+            self.progress = {
+                "current_trial": opt_progress["current_trial"],
+                "total_trials": opt_progress["total_trials"],
+                "completed_trials": opt_progress["completed_trials"],
+                "success_rate": opt_progress["success_rate"],
+                "best_value": opt_progress["best_value"],
+                "elapsed_time": opt_progress["elapsed_time"],
+                "status_message": f"Trial {opt_progress['current_trial']}/{opt_progress['total_trials']} running"
+            }
+            
+            logger.debug(f"running OptimizationJob._update_job_progress ... Progress: {opt_progress['current_trial']}/{opt_progress['total_trials']} trials")
+            
+        except Exception as e:
+            logger.warning(f"running OptimizationJob._update_job_progress ... Failed to update progress: {e}")
     
     async def start(self) -> None:
         """
         Start the optimization job as a background task
+        
+        UPDATED: Uses new optimizer.py with progress callback integration
         
         Launches the optimization process asynchronously while updating
         job status and progress. Handles all exceptions gracefully.
@@ -320,7 +379,8 @@ class OptimizationJob:
         
         logger.debug(f"running OptimizationJob.start ... Starting optimization job {self.job_id}")
         logger.debug(f"running OptimizationJob.start ... Dataset: {self.request.dataset_name}")
-        logger.debug(f"running OptimizationJob.start ... Optimizer: {self.request.optimizer}")
+        logger.debug(f"running OptimizationJob.start ... Mode: {self.request.mode}")
+        logger.debug(f"running OptimizationJob.start ... Objective: {self.request.optimize_for}")
         logger.debug(f"running OptimizationJob.start ... Trials: {self.request.trials}")
         
         # Start the optimization task
@@ -330,11 +390,13 @@ class OptimizationJob:
         """
         Execute the optimization process in background
         
-        Runs the actual hyperparameter optimization using the existing
-        model_optimizer system. Updates progress and handles results.
+        UPDATED: Uses new optimizer.py with progress callback
         
-        This method bridges async FastAPI with sync optimization code
-        by running the optimization in a thread pool executor.
+        Runs the actual hyperparameter optimization using the new unified
+        optimizer system. Updates progress and handles results.
+        
+        This method bridges async FastAPI with the optimizer by running
+        the optimization in a thread pool executor.
         
         Side Effects:
             - Updates job progress during execution
@@ -355,6 +417,8 @@ class OptimizationJob:
             self.progress = {
                 "current_trial": 0,
                 "total_trials": self.request.trials,
+                "completed_trials": 0,
+                "success_rate": 0.0,
                 "best_value": None,
                 "elapsed_time": 0,
                 "status_message": "Initializing optimization..."
@@ -373,17 +437,21 @@ class OptimizationJob:
                 self._execute_optimization
             )
             
+            # Convert OptimizationResult to API format
+            api_result = self._convert_optimization_result(result)
+            
             # Store successful result
-            self.result = result
+            self.result = api_result
             self.status = JobStatus.COMPLETED
             self.completed_at = datetime.now().isoformat()
             
             # Update final progress
             self.progress["status_message"] = "Optimization completed successfully"
             self.progress["current_trial"] = self.request.trials
+            self.progress["best_value"] = result.best_value
             
             logger.debug(f"running OptimizationJob._run_optimization ... Job {self.job_id} completed successfully")
-            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.get('best_value', 'unknown')}")
+            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.best_value:.4f}")
             
         except Exception as e:
             # Handle any optimization errors
@@ -397,542 +465,137 @@ class OptimizationJob:
             logger.error(f"running OptimizationJob._run_optimization ... Job {self.job_id} failed: {e}")
             logger.debug(f"running OptimizationJob._run_optimization ... Error traceback: {traceback.format_exc()}")
     
-    def _execute_optimization(self) -> Dict[str, Any]:
+    def _execute_optimization(self) -> OptimizationResult:
         """
         Execute the actual optimization (synchronous)
         
-        Calls the existing model_optimizer.optimize_model function with
-        the job's parameters. This runs in a thread pool to avoid
-        blocking the async event loop.
+        UPDATED: Uses new optimizer.py with progress callback integration
+        FIXED: Generate proper timestamp-based run_name instead of using job_id
+        
+        Calls the new unified optimize_model function with the job's parameters
+        and integrates real-time progress tracking. This runs in a thread pool 
+        to avoid blocking the async event loop.
         
         Returns:
-            Dictionary containing optimization results including:
-            - optimization_result: OptimizationResult object
-            - model_result: Model training results (if create_model=True)
-            - run_name: Unique run identifier
-            - best_value: Best optimization value achieved
-            - best_params: Best hyperparameters found
+            OptimizationResult object from the new optimizer
             
         Raises:
             Exception: Any error from the optimization process
         """
         logger.debug(f"running OptimizationJob._execute_optimization ... Executing optimization for job {self.job_id}")
         
-        # Call existing optimizer with job parameters
+        # Validate mode and objective
+        try:
+            opt_mode = OptimizationMode(self.request.mode.lower())
+            opt_objective = OptimizationObjective(self.request.optimize_for.lower())
+        except ValueError as e:
+            raise ValueError(f"Invalid optimization parameters: {e}")
+        
+        # Early validation for mode-objective compatibility
+        if opt_mode == OptimizationMode.SIMPLE and OptimizationObjective.is_health_only(opt_objective):
+            universal_objectives = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
+            raise ValueError(
+                f"Cannot use health-only objective '{self.request.optimize_for}' in simple mode. "
+                f"Available objectives for simple mode: {universal_objectives}"
+            )
+        
+        # FIXED: Use enhanced optimize_model function to avoid duplicating run_name generation logic
+        # This ensures consistency and eliminates code duplication
+        
+        # Apply config overrides
+        config_overrides = self.request.config_overrides.copy()
+        config_overrides['health_weight'] = self.request.health_weight
+        
+        logger.debug(f"running OptimizationJob._execute_optimization ... Using optimize_model function")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Config overrides: {config_overrides}")
+        
+        # Use the enhanced optimize_model function with progress callback support
+        from optimizer import optimize_model
+        
         result = optimize_model(
             dataset_name=self.request.dataset_name,
-            optimizer=self.request.optimizer,
+            mode=self.request.mode,
             optimize_for=self.request.optimize_for,
             trials=self.request.trials,
-            create_model=self.request.create_model,
-            **self.request.config_overrides
+            run_name=None,  # Let optimize_model generate the run_name using its established logic
+            progress_callback=self._progress_callback,  # Real-time progress updates
+            **config_overrides
         )
+        
+        # Note: The optimizer instance is not directly accessible when using optimize_model
+        # but that's okay since the progress_callback handles real-time updates
+        self.optimizer = None  # Will be set by the optimize_model function if needed
         
         logger.debug(f"running OptimizationJob._execute_optimization ... Optimization completed for job {self.job_id}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Results directory: {result.results_dir}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Best value: {result.best_value:.4f}")
         
-        # Convert OptimizationResult to serializable format
-        serializable_result = {
-            "optimization_result": {
-                "best_value": result["best_value"],
-                "best_params": result["best_params"],
-                "total_trials": result["optimization_result"].total_trials,
-                "successful_trials": result["optimization_result"].successful_trials,
-                "optimization_time_hours": result["optimization_result"].optimization_time_hours,
-                "parameter_importance": result["optimization_result"].parameter_importance,
-                "dataset_name": result["optimization_result"].dataset_name
-            },
-            "model_result": result.get("model_result"),
-            "run_name": result["run_name"],
-            "best_value": result["best_value"],
-            "best_params": result["best_params"]
-        }
-        
-        return serializable_result
-    
-    def _start_trial(self, trial_number: int, hyperparameters: Dict[str, Any]) -> str:
+        return result
+            
+    def _convert_optimization_result(self, result: OptimizationResult) -> Dict[str, Any]:
         """
-        Start tracking a new optimization trial
+        Convert OptimizationResult to API-compatible format
         
-        Creates a new TrialData object and begins tracking the trial's
-        architecture, health metrics, and performance data.
+        UPDATED: Handles new OptimizationResult dataclass format
         
         Args:
-            trial_number: Sequential trial number (1, 2, 3, ...)
-            hyperparameters: Complete hyperparameters for this trial
+            result: OptimizationResult from optimizer
             
         Returns:
-            trial_id: Unique identifier for this trial
-            
-        Side Effects:
-            - Creates new TrialData object
-            - Adds to trials list and trial_history
-            - Updates current_trial pointer
-            - Logs trial start event
-        """
-        trial_id = f"trial_{trial_number}_{uuid.uuid4().hex[:8]}"
-        
-        trial_data = TrialData(
-            trial_id=trial_id,
-            trial_number=trial_number,
-            status="running",
-            started_at=datetime.now().isoformat(),
-            hyperparameters=hyperparameters
-        )
-        
-        self.trials.append(trial_data)
-        self.trial_history[trial_id] = trial_data
-        self.current_trial = trial_data
-        
-        logger.debug(f"running OptimizationJob._start_trial ... Started trial {trial_number} (ID: {trial_id})")
-        logger.debug(f"running OptimizationJob._start_trial ... Hyperparameters: {self._format_hyperparameters(hyperparameters)}")
-        
-        return trial_id
-    
-    def _update_trial_architecture(self, trial_id: str, model: Any, hyperparameters: Dict[str, Any]) -> None:
-        """
-        Update trial with detailed architecture information
-        
-        Analyzes the built model and extracts comprehensive architecture
-        details for visualization including layer structure, parameters,
-        and memory usage.
-        
-        Args:
-            trial_id: Unique trial identifier
-            model: Built Keras model
-            hyperparameters: Trial hyperparameters
-            
-        Side Effects:
-            - Updates trial_data.architecture with detailed layer info
-            - Updates trial_data.model_size with parameter counts
-            - Logs architecture analysis
-        """
-        if trial_id not in self.trial_history:
-            logger.warning(f"running OptimizationJob._update_trial_architecture ... Trial {trial_id} not found")
-            return
-        
-        trial_data = self.trial_history[trial_id]
-        
-        try:
-            # Extract architecture details
-            architecture = self._analyze_model_architecture(model, hyperparameters)
-            model_size = self._calculate_model_size(model)
-            
-            trial_data.architecture = architecture
-            trial_data.model_size = model_size
-            
-            logger.debug(f"running OptimizationJob._update_trial_architecture ... Updated architecture for trial {trial_id}")
-            logger.debug(f"running OptimizationJob._update_trial_architecture ... Total parameters: {model_size.get('total_params', 'unknown')}")
-            
-        except Exception as e:
-            logger.warning(f"running OptimizationJob._update_trial_architecture ... Failed to analyze architecture for trial {trial_id}: {e}")
-    
-    def _update_trial_health(self, trial_id: str, model: Any, history: Any) -> None:
-        """
-        Update trial with health metrics and training stability data
-        
-        Analyzes model health using existing health metric functions
-        and training stability indicators for visualization.
-        
-        Args:
-            trial_id: Unique trial identifier
-            model: Trained Keras model
-            history: Training history object
-            
-        Side Effects:
-            - Updates trial_data.health_metrics
-            - Updates trial_data.training_stability
-            - Updates trial_data.gradient_health
-            - Updates health_trends for visualization
-            - Logs health assessment
-        """
-        if trial_id not in self.trial_history:
-            logger.warning(f"running OptimizationJob._update_trial_health ... Trial {trial_id} not found")
-            return
-        
-        trial_data = self.trial_history[trial_id]
-        
-        try:
-            # Calculate health metrics (integrate with existing health system)
-            health_metrics = self._calculate_trial_health_metrics(model, history)
-            training_stability = self._calculate_trial_training_stability(history)
-            gradient_health = self._calculate_trial_gradient_health(model)
-            
-            trial_data.health_metrics = health_metrics
-            trial_data.training_stability = training_stability
-            trial_data.gradient_health = gradient_health
-            
-            # Update trends for visualization
-            self._update_health_trends(trial_data.trial_number, health_metrics)
-            
-            logger.debug(f"running OptimizationJob._update_trial_health ... Updated health metrics for trial {trial_id}")
-            logger.debug(f"running OptimizationJob._update_trial_health ... Dead neuron ratio: {health_metrics.get('dead_neuron_ratio', 'unknown')}")
-            logger.debug(f"running OptimizationJob._update_trial_health ... Gradient health: {gradient_health.get('overall_health', 'unknown')}")
-            
-        except Exception as e:
-            logger.warning(f"running OptimizationJob._update_trial_health ... Failed to analyze health for trial {trial_id}: {e}")
-    
-    def _complete_trial(self, trial_id: str, performance: Dict[str, Any], training_history: Dict[str, Any], 
-                       status: str = "completed", pruning_info: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Mark trial as completed and store final results
-        
-        Finalizes trial data with performance metrics, training history,
-        and pruning information. Updates best trial tracking.
-        
-        Args:
-            trial_id: Unique trial identifier
-            performance: Final performance metrics
-            training_history: Complete training history
-            status: Final trial status (completed, failed, pruned)
-            pruning_info: Information about early stopping/pruning
-            
-        Side Effects:
-            - Updates trial completion timestamp and duration
-            - Stores final performance and training history
-            - Updates best_trial if this trial performed better
-            - Updates architecture_trends for visualization
-            - Logs trial completion
-        """
-        if trial_id not in self.trial_history:
-            logger.warning(f"running OptimizationJob._complete_trial ... Trial {trial_id} not found")
-            return
-        
-        trial_data = self.trial_history[trial_id]
-        
-        # Update completion info
-        trial_data.completed_at = datetime.now().isoformat()
-        trial_data.status = status
-        trial_data.performance = performance
-        trial_data.training_history = training_history
-        trial_data.pruning_info = pruning_info
-        
-        # Calculate duration
-        if trial_data.started_at:
-            start_time = datetime.fromisoformat(trial_data.started_at.replace('Z', '+00:00'))
-            end_time = datetime.fromisoformat(trial_data.completed_at.replace('Z', '+00:00'))
-            trial_data.duration_seconds = (end_time - start_time).total_seconds()
-        
-        # Update best trial tracking
-        if status == "completed" and performance.get('final_val_accuracy'):
-            if (self.best_trial is None or 
-                performance['final_val_accuracy'] > self.best_trial.performance.get('final_val_accuracy', 0)): # type: ignore
-                self.best_trial = trial_data
-                logger.debug(f"running OptimizationJob._complete_trial ... New best trial: {trial_id} with val_acc: {performance['final_val_accuracy']:.4f}")
-        
-        # Update architecture trends
-        self._update_architecture_trends(trial_data.trial_number, performance, trial_data.architecture)
-        
-        # Clear current trial if this was it
-        if self.current_trial and self.current_trial.trial_id == trial_id:
-            self.current_trial = None
-        
-        logger.debug(f"running OptimizationJob._complete_trial ... Completed trial {trial_id} with status: {status}")
-        logger.debug(f"running OptimizationJob._complete_trial ... Duration: {trial_data.duration_seconds:.1f}s")
-    
-    def _analyze_model_architecture(self, model: Any, hyperparameters: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Analyze model architecture for visualization
-        
-        Extracts detailed layer information, parameter counts, and
-        architectural patterns for frontend visualization.
-        
-        Args:
-            model: Built Keras model
-            hyperparameters: Trial hyperparameters
-            
-        Returns:
-            Dictionary with detailed architecture information
+            Dictionary in API-expected format
         """
         try:
-            architecture = {
-                "type": "cnn" if hyperparameters.get("architecture_type") == "cnn" else "lstm",
-                "layers": [],
-                "total_params": model.count_params(),
-                "trainable_params": sum([layer.count_params() for layer in model.layers if layer.trainable]),
-                "input_shape": list(model.input_shape[1:]) if model.input_shape else [],
-                "output_shape": list(model.output_shape[1:]) if model.output_shape else []
+            # Convert to API format
+            api_result = {
+                "optimization_result": {
+                    "best_value": result.best_value,
+                    "best_params": result.best_params,
+                    "total_trials": result.total_trials,
+                    "successful_trials": result.successful_trials,
+                    "optimization_time_hours": result.optimization_time_hours,
+                    "parameter_importance": result.parameter_importance,
+                    "dataset_name": result.dataset_name,
+                    "optimization_mode": result.optimization_mode,
+                    "health_weight": result.health_weight,
+                    "objective_history": result.objective_history,
+                    "best_trial_health": result.best_trial_health,
+                    "average_health_metrics": result.average_health_metrics
+                },
+                "model_result": {
+                    "model_path": result.best_model_path,
+                    "test_accuracy": result.best_value if (result.optimization_config and "accuracy" in str(result.optimization_config.objective)) else None,
+                    "results_dir": str(result.results_dir) if result.results_dir else None
+                } if result.best_model_path else None,
+                "run_name": self.job_id,
+                "best_value": result.best_value,
+                "best_params": result.best_params,
+                "health_data": {
+                    "best_trial_health": result.best_trial_health,
+                    "average_health_metrics": result.average_health_metrics,
+                    "health_history": result.health_history
+                }
             }
             
-            # Analyze each layer
-            for i, layer in enumerate(model.layers):
-                layer_info = {
-                    "index": i,
-                    "name": layer.name,
-                    "type": type(layer).__name__,
-                    "params": layer.count_params(),
-                    "trainable": layer.trainable,
-                    "input_shape": list(layer.input_shape[1:]) if hasattr(layer, 'input_shape') and layer.input_shape else [],
-                    "output_shape": list(layer.output_shape[1:]) if hasattr(layer, 'output_shape') and layer.output_shape else []
-                }
-                
-                # Add layer-specific details
-                if hasattr(layer, 'filters'):
-                    layer_info["filters"] = layer.filters
-                if hasattr(layer, 'kernel_size'):
-                    layer_info["kernel_size"] = list(layer.kernel_size)
-                if hasattr(layer, 'units'):
-                    layer_info["units"] = layer.units
-                if hasattr(layer, 'pool_size'):
-                    layer_info["pool_size"] = list(layer.pool_size)
-                if hasattr(layer, 'rate'):
-                    layer_info["dropout_rate"] = layer.rate
-                if hasattr(layer, 'activation'):
-                    layer_info["activation"] = str(layer.activation)
-                
-                architecture["layers"].append(layer_info)
-            
-            return architecture
+            logger.debug(f"running OptimizationJob._convert_optimization_result ... Converted OptimizationResult to API format")
+            return api_result
             
         except Exception as e:
-            logger.warning(f"running OptimizationJob._analyze_model_architecture ... Failed to analyze architecture: {e}")
+            logger.error(f"running OptimizationJob._convert_optimization_result ... Failed to convert result: {e}")
+            # Return minimal result on conversion error
             return {
-                "type": "unknown",
-                "layers": [],
-                "total_params": 0,
-                "error": str(e)
+                "optimization_result": {
+                    "best_value": result.best_value,
+                    "best_params": result.best_params,
+                    "total_trials": result.total_trials,
+                    "successful_trials": result.successful_trials,
+                    "dataset_name": result.dataset_name,
+                    "optimization_mode": result.optimization_mode
+                },
+                "run_name": self.job_id,
+                "best_value": result.best_value,
+                "best_params": result.best_params,
+                "conversion_error": str(e)
             }
-    
-    def _calculate_model_size(self, model: Any) -> Dict[str, Any]:
-        """
-        Calculate model size metrics for visualization
-        
-        Args:
-            model: Built Keras model
-            
-        Returns:
-            Dictionary with model size information
-        """
-        try:
-            total_params = model.count_params()
-            trainable_params = sum([layer.count_params() for layer in model.layers if layer.trainable])
-            
-            # Estimate memory usage (rough approximation)
-            memory_mb = total_params * 4 / (1024 * 1024)  # 4 bytes per float32 parameter
-            
-            return {
-                "total_params": total_params,
-                "trainable_params": trainable_params,
-                "non_trainable_params": total_params - trainable_params,
-                "memory_mb": round(memory_mb, 2),
-                "size_category": self._categorize_model_size(total_params)
-            }
-            
-        except Exception as e:
-            logger.warning(f"running OptimizationJob._calculate_model_size ... Failed to calculate model size: {e}")
-            return {"error": str(e)}
-    
-    def _categorize_model_size(self, total_params: int) -> str:
-        """
-        Categorize model size for visualization
-        
-        Args:
-            total_params: Total number of parameters
-            
-        Returns:
-            Size category string
-        """
-        if total_params < 100_000:
-            return "small"
-        elif total_params < 1_000_000:
-            return "medium"
-        elif total_params < 10_000_000:
-            return "large"
-        else:
-            return "very_large"
-    
-    def _calculate_trial_health_metrics(self, model: Any, history: Any) -> Dict[str, Any]:
-        """
-        Calculate health metrics for a trial (stub for integration)
-        
-        This method should integrate with your existing health metric
-        calculations from model_optimizer_health.py
-        
-        Args:
-            model: Trained Keras model
-            history: Training history
-            
-        Returns:
-            Dictionary with health metrics
-        """
-        try:
-            # TODO: Integrate with existing health metric calculations
-            # For now, return placeholder values
-            health_metrics = {
-                "dead_neuron_ratio": 0.0,  # Placeholder
-                "parameter_efficiency": 0.0,  # Placeholder
-                "training_stability": 0.0,  # Placeholder
-                "gradient_health": 0.0,  # Placeholder
-                "convergence_quality": 0.0,  # Placeholder
-                "overall_health": 0.0  # Placeholder
-            }
-            
-            # Add basic health indicators
-            if history and hasattr(history, 'history'):
-                # Calculate basic stability from loss curve
-                if 'loss' in history.history:
-                    losses = history.history['loss']
-                    if len(losses) > 1:
-                        loss_stability = 1.0 - (np.std(losses) / max(np.mean(losses), 1e-6))
-                        health_metrics["training_stability"] = max(0.0, min(1.0, float(loss_stability)))
-                
-                # Calculate convergence quality from accuracy
-                if 'val_accuracy' in history.history:
-                    val_acc = history.history['val_accuracy']
-                    if val_acc:
-                        health_metrics["convergence_quality"] = val_acc[-1]
-            
-            return health_metrics
-            
-        except Exception as e:
-            logger.warning(f"running OptimizationJob._calculate_trial_health_metrics ... Failed to calculate health metrics: {e}")
-            return {"error": str(e)}
-    
-    def _calculate_trial_training_stability(self, history: Any) -> Dict[str, Any]:
-        """
-        Calculate training stability metrics
-        
-        Args:
-            history: Training history
-            
-        Returns:
-            Dictionary with training stability data
-        """
-        try:
-            if not history or not hasattr(history, 'history'):
-                return {"error": "No training history available"}
-            
-            stability_metrics = {}
-            
-            # Analyze loss stability
-            if 'loss' in history.history:
-                losses = np.array(history.history['loss'])
-                stability_metrics["loss_stability"] = {
-                    "mean": float(np.mean(losses)),
-                    "std": float(np.std(losses)),
-                    "trend": "decreasing" if losses[-1] < losses[0] else "increasing",
-                    "stability_score": float(1.0 - (np.std(losses) / max(float(np.mean(losses)), 1e-6)))
-                }
-            
-            # Analyze accuracy stability
-            if 'accuracy' in history.history:
-                acc = np.array(history.history['accuracy'])
-                stability_metrics["accuracy_stability"] = {
-                    "mean": float(np.mean(acc)),
-                    "std": float(np.std(acc)),
-                    "final": float(acc[-1]),
-                    "best": float(np.max(acc))
-                }
-            
-            return stability_metrics
-            
-        except Exception as e:
-            logger.warning(f"running OptimizationJob._calculate_trial_training_stability ... Failed to calculate training stability: {e}")
-            return {"error": str(e)}
-    
-    def _calculate_trial_gradient_health(self, model: Any) -> Dict[str, Any]:
-        """
-        Calculate gradient health metrics (stub for integration)
-        
-        Args:
-            model: Trained Keras model
-            
-        Returns:
-            Dictionary with gradient health data
-        """
-        try:
-            # TODO: Integrate with existing gradient health calculations
-            gradient_health = {
-                "overall_health": 0.5,  # Placeholder
-                "gradient_norm": 0.0,  # Placeholder
-                "gradient_variance": 0.0,  # Placeholder
-                "vanishing_gradients": False,  # Placeholder
-                "exploding_gradients": False  # Placeholder
-            }
-            
-            return gradient_health
-            
-        except Exception as e:
-            logger.warning(f"running OptimizationJob._calculate_trial_gradient_health ... Failed to calculate gradient health: {e}")
-            return {"error": str(e)}
-    
-    def _update_health_trends(self, trial_number: int, health_metrics: Dict[str, Any]) -> None:
-        """
-        Update health trends for visualization
-        
-        Args:
-            trial_number: Sequential trial number
-            health_metrics: Health metrics for this trial
-        """
-        for metric_name, value in health_metrics.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if metric_name not in self.health_trends:
-                    self.health_trends[metric_name] = []
-                self.health_trends[metric_name].append(float(value))
-    
-    def _update_architecture_trends(self, trial_number: int, performance: Dict[str, Any], 
-                                   architecture: Optional[Dict[str, Any]]) -> None:
-        """
-        Update architecture performance trends for visualization
-        
-        Args:
-            trial_number: Sequential trial number
-            performance: Performance metrics for this trial
-            architecture: Architecture information for this trial
-        """
-        if not architecture:
-            return
-        
-        # Track performance by architecture features
-        arch_type = architecture.get("type", "unknown")
-        total_params = architecture.get("total_params", 0)
-        
-        # Update parameter count trend
-        if "parameter_count" not in self.architecture_trends:
-            self.architecture_trends["parameter_count"] = []
-        self.architecture_trends["parameter_count"].append(total_params)
-        
-        # Update performance trend
-        val_accuracy = performance.get("final_val_accuracy", 0)
-        if "val_accuracy" not in self.architecture_trends:
-            self.architecture_trends["val_accuracy"] = []
-        self.architecture_trends["val_accuracy"].append(val_accuracy)
-        
-        # Track architecture-specific trends
-        if arch_type == "cnn":
-            layer_count = len([layer for layer in architecture.get("layers", []) if "conv" in layer.get("type", "").lower()])
-            if "cnn_layer_count" not in self.architecture_trends:
-                self.architecture_trends["cnn_layer_count"] = []
-            self.architecture_trends["cnn_layer_count"].append(layer_count)
-        elif arch_type == "lstm":
-            lstm_layers = [layer for layer in architecture.get("layers", []) if "lstm" in layer.get("type", "").lower()]
-            if lstm_layers and "units" in lstm_layers[0]:
-                if "lstm_units" not in self.architecture_trends:
-                    self.architecture_trends["lstm_units"] = []
-                self.architecture_trends["lstm_units"].append(lstm_layers[0]["units"])
-    
-    def _format_hyperparameters(self, hyperparameters: Dict[str, Any]) -> str:
-        """
-        Format hyperparameters for logging
-        
-        Args:
-            hyperparameters: Dictionary of hyperparameters
-            
-        Returns:
-            Formatted string for logging
-        """
-        key_params = []
-        if 'num_layers_conv' in hyperparameters:
-            key_params.append(f"conv_layers={hyperparameters['num_layers_conv']}")
-        if 'filters_per_conv_layer' in hyperparameters:
-            key_params.append(f"filters={hyperparameters['filters_per_conv_layer']}")
-        if 'embedding_dim' in hyperparameters:
-            key_params.append(f"embedding_dim={hyperparameters['embedding_dim']}")
-        if 'lstm_units' in hyperparameters:
-            key_params.append(f"lstm_units={hyperparameters['lstm_units']}")
-        if 'epochs' in hyperparameters:
-            key_params.append(f"epochs={hyperparameters['epochs']}")
-        
-        return ', '.join(key_params) if key_params else "hyperparameters logged"
     
     def get_status(self) -> JobResponse:
         """
@@ -960,35 +623,53 @@ class OptimizationJob:
         """
         Get complete trial history for visualization
         
+        NEW: Uses real-time trial progress data from optimizer
+        
         Returns serialized trial data for frontend consumption including
         architecture details, health metrics, and performance data.
         
         Returns:
             List of trial dictionaries with complete information
         """
-        return [trial.dict() for trial in self.trials]
+        if self.optimizer:
+            return self.optimizer.get_trial_history()
+        else:
+            # Fallback to stored progress history
+            return [trial.to_dict() for trial in self.trial_progress_history]
     
     def get_current_trial(self) -> Optional[Dict[str, Any]]:
         """
         Get currently running trial data
         
+        NEW: Uses real-time trial progress data from optimizer
+        
         Returns:
             Current trial dictionary or None if no trial running
         """
-        return self.current_trial.dict() if self.current_trial else None
+        if self.optimizer:
+            return self.optimizer.get_current_trial()
+        else:
+            return self.current_trial_progress.to_dict() if self.current_trial_progress else None
     
     def get_best_trial(self) -> Optional[Dict[str, Any]]:
         """
         Get best performing trial so far
         
+        NEW: Uses real-time trial progress data from optimizer
+        
         Returns:
             Best trial dictionary or None if no completed trials
         """
-        return self.best_trial.dict() if self.best_trial else None
+        if self.optimizer:
+            return self.optimizer.get_best_trial()
+        else:
+            return self.best_trial_progress.to_dict() if self.best_trial_progress else None
     
     def get_architecture_trends(self) -> Dict[str, List[float]]:
         """
         Get architecture performance trends for visualization
+        
+        NEW: Uses real-time data from optimizer
         
         Returns trends showing how different architectural choices
         affect performance over time.
@@ -996,11 +677,16 @@ class OptimizationJob:
         Returns:
             Dictionary mapping architecture features to performance trends
         """
-        return self.architecture_trends.copy()
+        if self.optimizer:
+            return self.optimizer.get_architecture_trends()
+        else:
+            return {}
     
     def get_health_trends(self) -> Dict[str, List[float]]:
         """
         Get health metrics trends for visualization
+        
+        NEW: Uses real-time data from optimizer
         
         Returns trends showing how model health metrics evolve
         across trials.
@@ -1008,7 +694,10 @@ class OptimizationJob:
         Returns:
             Dictionary mapping health metrics to trend data
         """
-        return self.health_trends.copy()
+        if self.optimizer:
+            return self.optimizer.get_health_trends()
+        else:
+            return {}
     
     async def cancel(self) -> None:
         """
@@ -1046,17 +735,19 @@ class OptimizationAPI:
     """
     Main FastAPI application class for hyperparameter optimization
     
+    UPDATED: Integrated with new optimizer.py system
+    
     Provides REST API endpoints for managing optimization jobs and
-    integrates with the existing model_optimizer system. Handles
+    integrates with the new unified optimizer system. Handles
     job lifecycle management, progress tracking, and result retrieval.
     
     Key Features:
         - Asynchronous job management
-        - Real-time progress monitoring
+        - Real-time progress monitoring with trial tracking
         - Result persistence and retrieval
         - Model download capabilities
         - Comprehensive error handling
-        - Integration with existing codebase
+        - Integration with new optimizer.py
     
     Attributes:
         app: FastAPI application instance
@@ -1127,6 +818,33 @@ class OptimizationAPI:
             """Get list of available datasets"""
             return {"datasets": self.dataset_manager.get_available_datasets()}
         
+        # UPDATED: Available modes and objectives endpoints
+        @self.app.get("/modes")
+        async def list_modes():
+            """Get available optimization modes"""
+            return {
+                "modes": [mode.value for mode in OptimizationMode],
+                "descriptions": {
+                    "simple": "Pure objective optimization (health monitoring only)",
+                    "health": "Health-aware optimization with configurable weighting"
+                }
+            }
+        
+        @self.app.get("/objectives")
+        async def list_objectives():
+            """Get available optimization objectives"""
+            universal_objectives = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
+            health_objectives = [obj.value for obj in OptimizationObjective.get_health_only_objectives()]
+            
+            return {
+                "universal_objectives": universal_objectives,
+                "health_only_objectives": health_objectives,
+                "descriptions": {
+                    "universal": "Work in both simple and health modes",
+                    "health_only": "Only work in health mode"
+                }
+            }
+        
         # Job management endpoints
         @self.app.post("/optimize", response_model=JobResponse)
         async def start_optimization(request: OptimizationRequest, background_tasks: BackgroundTasks):
@@ -1186,6 +904,8 @@ class OptimizationAPI:
         """
         Start a new hyperparameter optimization job
         
+        UPDATED: Enhanced validation for new optimizer.py parameters
+        
         Validates the request, creates a new job, and starts the optimization
         process in the background. Returns immediately with job information.
         
@@ -1201,8 +921,10 @@ class OptimizationAPI:
         """
         logger.debug(f"running OptimizationAPI._start_optimization ... Starting optimization request")
         logger.debug(f"running OptimizationAPI._start_optimization ... Dataset: {request.dataset_name}")
-        logger.debug(f"running OptimizationAPI._start_optimization ... Optimizer: {request.optimizer}")
+        logger.debug(f"running OptimizationAPI._start_optimization ... Mode: {request.mode}")
+        logger.debug(f"running OptimizationAPI._start_optimization ... Objective: {request.optimize_for}")
         logger.debug(f"running OptimizationAPI._start_optimization ... Trials: {request.trials}")
+        logger.debug(f"running OptimizationAPI._start_optimization ... Health weight: {request.health_weight}")
         
         # Validate dataset
         if request.dataset_name not in self.dataset_manager.get_available_datasets():
@@ -1213,12 +935,35 @@ class OptimizationAPI:
                 detail=f"Dataset '{request.dataset_name}' not supported. Available: {available}"
             )
         
-        # Validate optimizer
-        if request.optimizer not in ["simple", "health"]:
-            logger.error(f"running OptimizationAPI._start_optimization ... Invalid optimizer: {request.optimizer}")
+        # Validate mode
+        try:
+            opt_mode = OptimizationMode(request.mode.lower())
+        except ValueError:
+            available_modes = [mode.value for mode in OptimizationMode]
+            logger.error(f"running OptimizationAPI._start_optimization ... Invalid mode: {request.mode}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Optimizer '{request.optimizer}' not supported. Available: simple, health"
+                detail=f"Mode '{request.mode}' not supported. Available: {available_modes}"
+            )
+        
+        # Validate objective
+        try:
+            opt_objective = OptimizationObjective(request.optimize_for.lower())
+        except ValueError:
+            available_objectives = [obj.value for obj in OptimizationObjective]
+            logger.error(f"running OptimizationAPI._start_optimization ... Invalid objective: {request.optimize_for}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Objective '{request.optimize_for}' not supported. Available: {available_objectives}"
+            )
+        
+        # Validate mode-objective compatibility
+        if opt_mode == OptimizationMode.SIMPLE and OptimizationObjective.is_health_only(opt_objective):
+            universal_objectives = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
+            logger.error(f"running OptimizationAPI._start_optimization ... Invalid mode-objective combination")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot use health-only objective '{request.optimize_for}' in simple mode. Available for simple mode: {universal_objectives}"
             )
         
         # Create new job
@@ -1349,6 +1094,8 @@ class OptimizationAPI:
         """
         Download the trained model from completed optimization job
         
+        UPDATED: Uses new result format
+        
         Args:
             job_id: Unique job identifier
             
@@ -1419,10 +1166,12 @@ class OptimizationAPI:
             )
         
         job = self.jobs[job_id]
+        trial_history = job.get_trial_history()
+        
         return {
             "job_id": job_id,
-            "trials": job.get_trial_history(),
-            "total_trials": len(job.trials)
+            "trials": trial_history,
+            "total_trials": len(trial_history)
         }
     
     async def _get_current_trial(self, job_id: str) -> Dict[str, Any]:
@@ -1446,9 +1195,11 @@ class OptimizationAPI:
             )
         
         job = self.jobs[job_id]
+        current_trial = job.get_current_trial()
+        
         return {
             "job_id": job_id,
-            "current_trial": job.get_current_trial()
+            "current_trial": current_trial
         }
     
     async def _get_best_trial(self, job_id: str) -> Dict[str, Any]:
@@ -1472,9 +1223,11 @@ class OptimizationAPI:
             )
         
         job = self.jobs[job_id]
+        best_trial = job.get_best_trial()
+        
         return {
             "job_id": job_id,
-            "best_trial": job.get_best_trial()
+            "best_trial": best_trial
         }
     
     async def _get_trends(self, job_id: str) -> Dict[str, Any]:
@@ -1498,10 +1251,13 @@ class OptimizationAPI:
             )
         
         job = self.jobs[job_id]
+        architecture_trends = job.get_architecture_trends()
+        health_trends = job.get_health_trends()
+        
         return {
             "job_id": job_id,
-            "architecture_trends": job.get_architecture_trends(),
-            "health_trends": job.get_health_trends()
+            "architecture_trends": architecture_trends,
+            "health_trends": health_trends
         }
 
 

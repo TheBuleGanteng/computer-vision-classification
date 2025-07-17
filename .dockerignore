@@ -1,0 +1,101 @@
+# Git and version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (we'll create these in container)
+logs/
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+
+# Documentation
+README.md
+docs/
+*.md
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Large result directories (we'll mount these as volumes)
+optimization_results/
+datasets/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.local
+
+
+# Streamlit
+.streamlit/secrets.toml
+
+# datasets
+datasets/*
+!datasets/.gitkeep
+
+# datasets
+saved_models/*
+!saved_models/.gitkeep
+
+# datasets
+plots/*
+!plots/.gitkeep
+
+# datasets
+optimization_results/*
+!optimization_results/.gitkeep

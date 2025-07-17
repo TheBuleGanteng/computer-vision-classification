@@ -366,7 +366,6 @@ class TrainingAnimationAnalyzer:
             training_history: Training metrics
             epochs: List of epoch numbers
         """
-        logger.debug("running _setup_animation_axes ... Setting up animation plot axes")
         
         # Setup loss plot (left)
         ax1.set_title('Training Progress - Loss', fontweight='bold', fontsize=14)
