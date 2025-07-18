@@ -1,20 +1,23 @@
-# Production Dockerfile for RunPod with GPU support
-FROM nvidia/cuda:12.1-devel-ubuntu22.04
+# Production Dockerfile for RunPod with CUDA 12.3 + cuDNN support (TensorFlow 2.19.0 compatible)
+FROM nvidia/cuda:12.3.2-devel-ubuntu22.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONPATH=/app
 
-# Install system dependencies
+# Install system dependencies including Python 3.10 and cuDNN
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
     git \
     wget \
     curl \
     build-essential \
     libhdf5-dev \
     pkg-config \
-    libgl1-mesa-glx \
+    libgl1-mesa-dev \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -22,15 +25,26 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Install cuDNN (try to get compatible version with CUDA 12.3)
+RUN apt-get update && apt-cache search libcudnn && \
+    apt-get install -y libcudnn8 libcudnn8-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create symlink for pip3 if needed and verify Python installation
+RUN python3 --version && \
+    python3 -m pip --version && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+
 # Create app directory
 WORKDIR /app
 
 # Copy requirements first (for better Docker layer caching)
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir --upgrade pip
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Fix the scipy version in requirements.txt and install with GPU-enabled TensorFlow
+RUN sed -i 's/scipy==1.16.0/scipy==1.13.1/g' requirements.txt && \
+    sed -i 's/tensorflow==.*/tensorflow[and-cuda]==2.19.0/g' requirements.txt && \
+    python3 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
