@@ -8,6 +8,7 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONPATH=/app
+ENV TZ=Asia/Jakarta
 
 # Install system dependencies (simplified for Python base image)
 RUN apt-get update && apt-get install -y \
@@ -23,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # For CUDA base image, use these dependencies instead:
@@ -37,6 +39,16 @@ RUN apt-get update && apt-get install -y \
 #     libhdf5-dev \
 #     pkg-config \
 #     && rm -rf /var/lib/apt/lists/*
+
+# Set timezone for Jakarta (UTC+7)
+RUN apt-get update && apt-get install -y tzdata && \
+    ln -snf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime && \
+    echo "Asia/Jakarta" > /etc/timezone && \
+    dpkg-reconfigure -f noninteractive tzdata && \
+    # Verify timezone setup worked
+    ls -la /etc/localtime && \
+    cat /etc/timezone && \
+    date
 
 # Create app directory
 WORKDIR /app

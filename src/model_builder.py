@@ -2431,7 +2431,7 @@ def create_and_train_model(
         model_path = builder.save_model(
             test_accuracy=test_accuracy,
             run_timestamp=run_timestamp,
-            run_name=run_name  # NEW: Pass naming_string to save_model
+            run_name=run_name  # Pass naming_string to save_model
             )
         
         logger.debug(f"running create_and_train_model ... Completed with accuracy: {test_accuracy:.4f}")

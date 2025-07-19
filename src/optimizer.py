@@ -214,7 +214,7 @@ class OptimizationConfig:
     # Stability detection parameters
     min_epochs_per_trial: int = 5      # Force longer observation - updated from 15
     enable_stability_checks: bool = True # Monitor for instabilities
-    stability_window: int = 5           # Check stability over last N epochs
+    stability_window: int = 3           # Check stability over last N epochs
     max_bias_change_per_epoch: float = 10.0  # Flag rapid bias changes
     
     # Health analysis settings (always enabled for monitoring)
@@ -248,6 +248,47 @@ class OptimizationConfig:
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
     
+    def _validate_and_fix_epoch_configuration(self) -> None:
+        """
+        FIXED: Validate and auto-correct epoch configuration
+        
+        This prevents the min_epochs > max_epochs issue that was causing trial failures.
+        """
+        original_min = self.min_epochs_per_trial
+        original_max = self.max_epochs_per_trial
+        
+        # Ensure both values are at least 1
+        self.min_epochs_per_trial = max(1, self.min_epochs_per_trial)
+        self.max_epochs_per_trial = max(1, self.max_epochs_per_trial)
+        
+        # Fix the core issue: min > max
+        if self.min_epochs_per_trial > self.max_epochs_per_trial:
+            # Strategy: Use the larger of the two as max, and set min to 80% of max
+            actual_max = max(self.min_epochs_per_trial, self.max_epochs_per_trial)
+            actual_min = max(1, int(actual_max * 0.6))  # 60% of max, minimum 1
+            
+            logger.warning(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
+                          f"Fixing epoch configuration: min_epochs({original_min}) > max_epochs({original_max})")
+            logger.warning(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
+                          f"Auto-correcting to: min_epochs={actual_min}, max_epochs={actual_max}")
+            
+            self.min_epochs_per_trial = actual_min
+            self.max_epochs_per_trial = actual_max
+        
+        # Ensure minimum viable training
+        if self.max_epochs_per_trial < 2:
+            logger.warning(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
+                          f"max_epochs_per_trial too low ({self.max_epochs_per_trial}), setting to 3")
+            self.max_epochs_per_trial = 3
+            self.min_epochs_per_trial = min(self.min_epochs_per_trial, 2)
+        
+        # Final validation
+        assert self.min_epochs_per_trial <= self.max_epochs_per_trial, \
+            f"Internal error: min_epochs({self.min_epochs_per_trial}) > max_epochs({self.max_epochs_per_trial})"
+        
+        logger.debug(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
+                    f"Final epoch configuration: min={self.min_epochs_per_trial}, max={self.max_epochs_per_trial}")   
+    
     def _validate_mode_objective_compatibility(self) -> None:
         """Validate that the objective is compatible with the selected mode"""
         if self.mode == OptimizationMode.SIMPLE:
@@ -258,8 +299,8 @@ class OptimizationConfig:
                     f"Available objectives for SIMPLE mode: {universal_objectives}"
                 )
         
-        # HEALTH mode can use any objective, so no validation needed
-        logger.debug(f"running _validate_mode_objective_compatibility ... Mode '{self.mode.value}' is compatible with objective '{self.objective.value}'")
+        logger.debug(f"running OptimizationConfig._validate_mode_objective_compatibility ... "
+                    f"Mode '{self.mode.value}' is compatible with objective '{self.objective.value}'")
 
 
 @dataclass
@@ -1007,16 +1048,25 @@ class ModelOptimizer:
         # Save optimization results
         self._save_results(results)
         
-        # NEW: Build and save the final best model if save_best_model is enabled
-        if self.config.save_best_model and self.study.best_params:
-            logger.debug(f"running ModelOptimizer.optimize ... Building final model with best hyperparameters")
+        # Check if we have any completed trials before trying to build final model
+        completed_trials = [t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        # Build and save the final best model if save_best_model is enabled AND we have completed trials
+        if self.config.save_best_model and completed_trials:
             try:
-                final_model_path = self._build_and_save_best_model(results)
-                results.best_model_path = final_model_path
-                logger.debug(f"running ModelOptimizer.optimize ... Final model saved to: {final_model_path}")
+                # Additional safety check - verify study has best_params
+                if hasattr(self.study, 'best_params') and self.study.best_params:
+                    logger.debug(f"running ModelOptimizer.optimize ... Building final model with best hyperparameters")
+                    final_model_path = self._build_and_save_best_model(results)
+                    results.best_model_path = final_model_path
+                    logger.debug(f"running ModelOptimizer.optimize ... Final model saved to: {final_model_path}")
+                else:
+                    logger.warning(f"running ModelOptimizer.optimize ... No best parameters available, skipping final model build")
             except Exception as e:
                 logger.error(f"running ModelOptimizer.optimize ... Failed to build final model: {e}")
                 logger.debug(f"running ModelOptimizer.optimize ... Final model error traceback: {traceback.format_exc()}")
+        elif self.config.save_best_model and not completed_trials:
+            logger.warning(f"running ModelOptimizer.optimize ... No completed trials available, skipping final model build")
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
@@ -1120,13 +1170,20 @@ class ModelOptimizer:
                 logger.warning(f"running ModelOptimizer._objective_function ... epochs is not int: {trial_epochs} (type: {type(trial_epochs)}), converting")
                 trial_epochs = int(trial_epochs)
             
+            # Respect the validated configuration
+            min_epochs = self.config.min_epochs_per_trial
             max_epochs = self.config.max_epochs_per_trial
-            if not isinstance(max_epochs, int):
-                logger.warning(f"running ModelOptimizer._objective_function ... max_epochs_per_trial is not int: {max_epochs} (type: {type(max_epochs)}), converting")
-                max_epochs = int(max_epochs)
             
-            final_epochs = min(trial_epochs, max_epochs)
-            logger.debug(f"running ModelOptimizer._objective_function ... Using {final_epochs} epochs (trial={trial_epochs}, max={max_epochs})")
+            # Ensure trial epochs are within the validated range
+            final_epochs = max(min_epochs, min(trial_epochs, max_epochs))
+
+            if final_epochs != trial_epochs:
+                logger.debug(f"running _objective_function ... Trial {trial.number}: "
+                            f"Adjusted epochs from {trial_epochs} to {final_epochs} "
+                            f"(range: {min_epochs}-{max_epochs})")
+        
+            logger.debug(f"running _objective_function ... Trial {trial.number}: "
+                        f"Training for {final_epochs} epochs (min={min_epochs}, max={max_epochs})")
             
             # Train model with validation data
             history = model_builder.model.fit(
@@ -1152,22 +1209,23 @@ class ModelOptimizer:
             
             # Perform stability detection if enabled
             if self.config.enable_stability_checks:
-                logger.debug(f"running ModelOptimizer._objective_function ... Performing stability checks for trial {trial.number}")
+                logger.debug(f"running _objective_function ... Trial {trial.number}: Performing stability checks")
                 
-                # Check if we trained for minimum required epochs
                 epochs_completed = len(history.history.get('loss', []))
-                if epochs_completed < self.config.min_epochs_per_trial:
-                    logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} insufficient epochs: {epochs_completed} < {self.config.min_epochs_per_trial}")
+                required_min_epochs = self.config.min_epochs_per_trial
+                
+                if epochs_completed < required_min_epochs:
+                    logger.warning(f"running _objective_function ... Trial {trial.number}: "
+                                f"Insufficient epochs: {epochs_completed} < {required_min_epochs}")
                                     
-                    # Complete trial with pruning due to insufficient epochs
                     self._complete_trial(
                         trial_id, 
-                        {"error": f"Insufficient epochs: {epochs_completed} < {self.config.min_epochs_per_trial}"}, 
+                        {"error": f"Insufficient epochs: {epochs_completed} < {required_min_epochs}"}, 
                         {}, 
                         "pruned",
                         pruning_info={"reason": "insufficient_epochs", "epochs_completed": epochs_completed}
                     )                    
-                    raise optuna.TrialPruned(f"Trial completed only {epochs_completed} epochs, minimum required: {self.config.min_epochs_per_trial}")
+                    raise optuna.TrialPruned(f"Trial completed only {epochs_completed} epochs, required: {required_min_epochs}")
                 
                 # Detect training instabilities
                 is_stable, stability_issues = self._detect_training_instabilities(
@@ -2016,6 +2074,31 @@ class ModelOptimizer:
         
         optimization_time = time.time() - self.optimization_start_time if self.optimization_start_time else 0.0
         
+        # Check if we have any completed trials
+        completed_trials = [t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        if not completed_trials:
+            logger.warning(f"running ModelOptimizer._compile_results ... No trials completed successfully")
+            # Return a result object with default values when no trials completed
+            return OptimizationResult(
+                best_value=0.0,  # Default value
+                best_params={},  # Empty params
+                total_trials=len(self.study.trials),
+                successful_trials=0,
+                optimization_time_hours=optimization_time / 3600,
+                optimization_mode=self.config.mode.value,
+                health_weight=self.config.health_weight,
+                objective_history=[],
+                parameter_importance={},
+                health_history=self.trial_health_history,
+                best_trial_health=self.best_trial_health,
+                average_health_metrics=self._calculate_average_health_metrics(),
+                dataset_name=self.dataset_name,
+                dataset_config=self.dataset_config,
+                optimization_config=self.config,
+                results_dir=self.results_dir
+            )
+        
         # Calculate parameter importance
         try:
             importance = optuna.importance.get_param_importances(self.study)
@@ -2029,7 +2112,7 @@ class ModelOptimizer:
             best_value=self.study.best_value,
             best_params=self.study.best_params,
             total_trials=len(self.study.trials),
-            successful_trials=len([t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
+            successful_trials=len(completed_trials),
             optimization_time_hours=optimization_time / 3600,
             optimization_mode=self.config.mode.value,
             health_weight=self.config.health_weight,

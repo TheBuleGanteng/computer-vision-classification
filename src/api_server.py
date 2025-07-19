@@ -14,17 +14,20 @@ Designed for deployment on RunPod with GPU acceleration and local development.
 import asyncio
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
+from fastapi import FastAPI, HTTPException, BackgroundTasks, status
+from fastapi.responses import FileResponse, JSONResponse
 import json
+import numpy as np
+import os
+from pathlib import Path
+from pydantic import BaseModel, Field
+import shutil
+import tempfile
 import traceback
 from typing import Dict, Any, List, Optional, Union
 import uuid
-import numpy as np
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
 import uvicorn
+import zipfile
 
 # UPDATED IMPORTS - Fixed compatibility
 from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, TrialProgress
@@ -798,6 +801,8 @@ class OptimizationAPI:
         - Status and progress endpoints
         - Result retrieval endpoints
         - Health check endpoints
+        - File download endpoints
+        - Job control endpoints
         
         Side Effects:
             - Registers all endpoints with self.app
@@ -818,7 +823,7 @@ class OptimizationAPI:
             """Get list of available datasets"""
             return {"datasets": self.dataset_manager.get_available_datasets()}
         
-        # UPDATED: Available modes and objectives endpoints
+        # Available modes and objectives endpoints
         @self.app.get("/modes")
         async def list_modes():
             """Get available optimization modes"""
@@ -898,8 +903,35 @@ class OptimizationAPI:
             """Get architecture and health trends for visualization"""
             return await self._get_trends(job_id)
         
+        # File management endpoints
+        @self.app.get("/jobs/{job_id}/files")
+        async def list_job_files(job_id: str):
+            """List all files in a job's results directory"""
+            return await self._list_job_files(job_id)
+        
+        @self.app.get("/jobs/{job_id}/files/{file_path:path}")
+        async def download_job_file(job_id: str, file_path: str):
+            """Download a specific file from job results"""
+            return await self._download_job_file(job_id, file_path)
+        
+        @self.app.get("/jobs/{job_id}/download")
+        async def download_job_results(job_id: str):
+            """Download entire job results directory as ZIP"""
+            return await self._download_job_results_zip(job_id)
+        
+        # Job control endpoints
+        @self.app.post("/jobs/stop")
+        async def stop_all_jobs():
+            """Stop all running jobs"""
+            return await self._stop_all_jobs()
+        
+        @self.app.post("/jobs/{job_id}/stop")
+        async def stop_job(job_id: str):
+            """Stop a specific running job"""
+            return await self._stop_job(job_id)
+        
         logger.debug("running OptimizationAPI._register_routes ... All API endpoints registered")
-    
+               
     async def _start_optimization(self, request: OptimizationRequest, background_tasks: BackgroundTasks) -> JobResponse:
         """
         Start a new hyperparameter optimization job
@@ -966,14 +998,42 @@ class OptimizationAPI:
                 detail=f"Cannot use health-only objective '{request.optimize_for}' in simple mode. Available for simple mode: {universal_objectives}"
             )
         
-        # Create new job
-        job = OptimizationJob(request)
+        # Ensure epoch configuration is sane BEFORE creating the job
+        config_overrides = request.config_overrides.copy()
+        
+        # Ensure the values for max and min epochs are used configuration issues
+        max_epochs = config_overrides.get('max_epochs_per_trial', 20)  # Default 20
+        min_epochs = 5  # Always use 3 as minimum for API requests
+        
+        # Ensure max_epochs is at least min_epochs
+        if max_epochs < min_epochs:
+            logger.warning(f"running _start_optimization ... max_epochs_per_trial ({max_epochs}) too low, setting to {min_epochs}")
+            max_epochs = min_epochs
+        
+        # Update config overrides with corrected values
+        config_overrides['max_epochs_per_trial'] = max_epochs
+        config_overrides['min_epochs_per_trial'] = min_epochs
+        
+        logger.debug(f"running _start_optimization ... Using epoch configuration: min={min_epochs}, max={max_epochs}")
+        
+        # Create optimization request with fixed config
+        fixed_request = OptimizationRequest(
+            dataset_name=request.dataset_name,
+            mode=request.mode,
+            optimize_for=request.optimize_for,
+            trials=request.trials,
+            health_weight=request.health_weight,
+            config_overrides=config_overrides  # Use the fixed config
+        )
+        
+        # Create new job with the fixed request
+        job = OptimizationJob(fixed_request)
         self.jobs[job.job_id] = job
         
         # Start optimization in background
         background_tasks.add_task(job.start)
         
-        logger.debug(f"running OptimizationAPI._start_optimization ... Created job {job.job_id}")
+        logger.debug(f"running _start_optimization ... Created job {job.job_id} with corrected epoch config")
         return job.get_status()
     
     async def _get_job_status(self, job_id: str) -> JobResponse:
@@ -997,7 +1057,44 @@ class OptimizationAPI:
             )
         
         job = self.jobs[job_id]
-        return job.get_status()
+        job_status = job.get_status()
+    
+        # Enhance job status with actual optimization data when available
+        if job_status.status == JobStatus.COMPLETED and job_status.result:
+            try:
+                # Extract real optimization results for accurate reporting
+                optimization_result = job_status.result.get("optimization_result", {})
+                
+                # FIXED: Update progress with actual results
+                if job_status.progress is None:
+                    job_status.progress = {}
+                
+                # Use actual results to populate progress data
+                job_status.progress.update({
+                    "total_trials": optimization_result.get("total_trials", 0),
+                    "completed_trials": optimization_result.get("successful_trials", 0),
+                    "best_value": optimization_result.get("best_value", 0.0),
+                    "success_rate": (
+                        optimization_result.get("successful_trials", 0) / 
+                        max(optimization_result.get("total_trials", 1), 1)
+                    ),
+                    "status_message": "Optimization completed successfully"
+                })
+                
+                # FIXED: Also update the main result best_value for monitor display
+                if "best_value" in optimization_result:
+                    # Ensure the job result reflects the actual best value
+                    if isinstance(job_status.result, dict):
+                        job_status.result["best_value"] = optimization_result["best_value"]
+                
+                logger.debug(f"running OptimizationAPI._get_job_status ... "
+                            f"Enhanced completed job status: best_value={optimization_result.get('best_value', 'N/A')}")
+                
+            except Exception as e:
+                logger.warning(f"running OptimizationAPI._get_job_status ... "
+                            f"Failed to enhance job status with optimization results: {e}")
+        
+        return job_status
     
     async def _list_jobs(self) -> Dict[str, Any]:
         """
@@ -1259,6 +1356,347 @@ class OptimizationAPI:
             "architecture_trends": architecture_trends,
             "health_trends": health_trends
         }
+
+    async def _list_job_files(self, job_id: str) -> Dict[str, Any]:
+        """
+        List all files in a job's results directory
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with file listing and metadata
+            
+        Raises:
+            HTTPException: If job not found or results directory doesn't exist
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._list_job_files ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        # Find results directory
+        results_dir = self._get_job_results_directory(job)
+        if not results_dir or not results_dir.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Results directory not found for job {job_id}"
+            )
+        
+        # Collect all files recursively
+        files = []
+        total_size = 0
+        
+        for file_path in results_dir.rglob("*"):
+            if file_path.is_file():
+                relative_path = file_path.relative_to(results_dir)
+                file_size = file_path.stat().st_size
+                total_size += file_size
+                
+                files.append({
+                    "path": str(relative_path),
+                    "size_bytes": file_size,
+                    "size_mb": round(file_size / (1024 * 1024), 2),
+                    "modified": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
+                })
+        
+        # Sort by path for consistent ordering
+        files.sort(key=lambda x: x["path"])
+        
+        logger.debug(f"running OptimizationAPI._list_job_files ... Found {len(files)} files for job {job_id}")
+        
+        return {
+            "job_id": job_id,
+            "results_directory": str(results_dir),
+            "total_files": len(files),
+            "total_size_bytes": total_size,
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+            "files": files
+        }  
+    
+    async def _download_job_file(self, job_id: str, file_path: str) -> FileResponse:
+        """
+        Download a specific file from job results
+        
+        Args:
+            job_id: Unique job identifier
+            file_path: Relative path to file within results directory
+            
+        Returns:
+            FileResponse with the requested file
+            
+        Raises:
+            HTTPException: If job/file not found or path is invalid
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._download_job_file ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        # Find results directory
+        results_dir = self._get_job_results_directory(job)
+        if not results_dir or not results_dir.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Results directory not found for job {job_id}"
+            )
+        
+        # Validate and resolve file path
+        try:
+            # Prevent path traversal attacks
+            safe_file_path = results_dir / file_path
+            safe_file_path = safe_file_path.resolve()
+            
+            # Ensure the resolved path is still within results directory
+            if not str(safe_file_path).startswith(str(results_dir.resolve())):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Invalid file path"
+                )
+            
+            if not safe_file_path.exists() or not safe_file_path.is_file():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"File not found: {file_path}"
+                )
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._download_job_file ... Path resolution error: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid file path: {file_path}"
+            )
+        
+        logger.debug(f"running OptimizationAPI._download_job_file ... Serving file: {safe_file_path}")
+        
+        # Determine appropriate media type
+        media_type = "application/octet-stream"
+        if safe_file_path.suffix.lower() in ['.json', '.txt', '.md', '.yaml', '.yml']:
+            media_type = "text/plain"
+        elif safe_file_path.suffix.lower() in ['.html']:
+            media_type = "text/html"
+        elif safe_file_path.suffix.lower() in ['.csv']:
+            media_type = "text/csv"
+        elif safe_file_path.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+            media_type = f"image/{safe_file_path.suffix[1:]}"
+        
+        return FileResponse(
+            path=str(safe_file_path),
+            media_type=media_type,
+            filename=safe_file_path.name
+        )
+
+    async def _download_job_results_zip(self, job_id: str) -> FileResponse:
+        """
+        Download entire job results directory as ZIP
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            FileResponse with ZIP file containing all results
+            
+        Raises:
+            HTTPException: If job not found or results directory doesn't exist
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._download_job_results_zip ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        # Find results directory
+        results_dir = self._get_job_results_directory(job)
+        if not results_dir or not results_dir.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Results directory not found for job {job_id}"
+            )
+        
+        # Create temporary ZIP file
+        try:
+            # Create temporary file for ZIP
+            temp_dir = Path(tempfile.gettempdir())
+            zip_filename = f"optimization_results_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            zip_path = temp_dir / zip_filename
+            
+            logger.debug(f"running OptimizationAPI._download_job_results_zip ... Creating ZIP: {zip_path}")
+            
+            # Create ZIP file with all results
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in results_dir.rglob("*"):
+                    if file_path.is_file():
+                        # Use the results directory name as the root in the ZIP
+                        arcname = results_dir.name / file_path.relative_to(results_dir)
+                        zipf.write(file_path, arcname)
+                        logger.debug(f"running OptimizationAPI._download_job_results_zip ... Added to ZIP: {arcname}")
+            
+            logger.debug(f"running OptimizationAPI._download_job_results_zip ... ZIP created successfully: {zip_path}")
+            
+            return FileResponse(
+                path=str(zip_path),
+                media_type="application/zip",
+                filename=zip_filename,
+                headers={"Content-Disposition": f"attachment; filename={zip_filename}"}
+            )
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._download_job_results_zip ... Failed to create ZIP: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create results archive: {str(e)}"
+            )
+
+    async def _stop_all_jobs(self) -> Dict[str, Any]:
+        """
+        Stop all running optimization jobs
+        
+        Returns:
+            Dictionary with operation results
+        """
+        logger.debug("running OptimizationAPI._stop_all_jobs ... Stopping all running jobs")
+        
+        running_jobs = [job for job in self.jobs.values() if job.status == JobStatus.RUNNING]
+        
+        if not running_jobs:
+            return {
+                "message": "No running jobs to stop",
+                "stopped_jobs": [],
+                "total_stopped": 0
+            }
+        
+        stopped_jobs = []
+        failed_stops = []
+        
+        for job in running_jobs:
+            try:
+                await job.cancel()
+                stopped_jobs.append({
+                    "job_id": job.job_id,
+                    "dataset": job.request.dataset_name,
+                    "mode": job.request.mode,
+                    "stopped_at": datetime.now().isoformat()
+                })
+                logger.debug(f"running OptimizationAPI._stop_all_jobs ... Stopped job {job.job_id}")
+            except Exception as e:
+                failed_stops.append({
+                    "job_id": job.job_id,
+                    "error": str(e)
+                })
+                logger.error(f"running OptimizationAPI._stop_all_jobs ... Failed to stop job {job.job_id}: {e}")
+        
+        result = {
+            "message": f"Stopped {len(stopped_jobs)} jobs",
+            "stopped_jobs": stopped_jobs,
+            "total_stopped": len(stopped_jobs),
+            "failed_stops": failed_stops
+        }
+        
+        if failed_stops:
+            result["message"] += f", {len(failed_stops)} failed to stop"
+        
+        return result
+
+    async def _stop_job(self, job_id: str) -> Dict[str, str]:
+        """
+        Stop a specific running optimization job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Confirmation message
+            
+        Raises:
+            HTTPException: If job not found or not running
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._stop_job ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        if job.status != JobStatus.RUNNING:
+            logger.error(f"running OptimizationAPI._stop_job ... Job {job_id} not running: {job.status}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Job {job_id} is not running. Current status: {job.status}"
+            )
+        
+        try:
+            await job.cancel()
+            logger.debug(f"running OptimizationAPI._stop_job ... Job {job_id} stopped successfully")
+            return {
+                "message": f"Job {job_id} stopped successfully",
+                "job_id": job_id,
+                "stopped_at": datetime.now().isoformat()
+            }
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._stop_job ... Failed to stop job {job_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to stop job {job_id}: {str(e)}"
+            )
+
+    def _get_job_results_directory(self, job: 'OptimizationJob') -> Optional[Path]:
+        """
+        Get the results directory path for a job
+        
+        Args:
+            job: OptimizationJob instance
+            
+        Returns:
+            Path to results directory or None if not available
+        """
+        try:
+            # Check if job has completed results with directory path
+            if job.result and job.result.get("model_result"):
+                results_dir_str = job.result["model_result"].get("results_dir")
+                if results_dir_str:
+                    results_dir = Path(results_dir_str)
+                    if results_dir.exists():
+                        return results_dir
+            
+            # Fallback: Search for directory by pattern
+            optimization_results_dir = Path("/app/optimization_results")
+            if not optimization_results_dir.exists():
+                optimization_results_dir = Path("./optimization_results")
+            
+            if optimization_results_dir.exists():
+                # Look for directories containing the dataset name and mode
+                dataset_name = job.request.dataset_name
+                mode = job.request.mode
+                
+                # Search for matching directory pattern
+                for result_dir in optimization_results_dir.iterdir():
+                    if (result_dir.is_dir() and 
+                        dataset_name in result_dir.name and 
+                        mode in result_dir.name):
+                        logger.debug(f"running OptimizationAPI._get_job_results_directory ... Found results directory: {result_dir}")
+                        return result_dir
+            
+            logger.warning(f"running OptimizationAPI._get_job_results_directory ... No results directory found for job {job.job_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._get_job_results_directory ... Error finding results directory: {e}")
+            return None
+        
+    
 
 
 # Initialize the FastAPI application
