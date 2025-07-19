@@ -208,7 +208,12 @@ class TrainingAnimationAnalyzer:
             insights.append(f"🚀 Biggest breakthrough at epoch {max_drop_epoch}")
             
             # Find convergence point (where improvement slows)
-            recent_improvements = [abs(losses[i-1] - losses[i]) for i in range(-3, 0) if i+len(losses) >= 0]
+            recent_improvements = []
+            if len(losses) >= 4:  # Need at least 4 epochs to calculate 3 recent improvements
+                # Iterate over the last three epochs (or fewer if there are less than three epochs)
+                # to calculate the absolute differences in loss values between consecutive epochs.
+                for i in range(max(1, len(losses)-3), len(losses)):
+                    recent_improvements.append(abs(losses[i-1] - losses[i]))
             if len(recent_improvements) >= 2 and all(imp < 0.01 for imp in recent_improvements):
                 convergence_epoch = len(losses) - 2
                 interesting_epochs.append(('convergence', convergence_epoch))
@@ -363,7 +368,6 @@ class TrainingAnimationAnalyzer:
             training_history: Training metrics
             epochs: List of epoch numbers
         """
-        logger.debug("running _setup_animation_axes ... Setting up animation plot axes")
         
         # Setup loss plot (left)
         ax1.set_title('Training Progress - Loss', fontweight='bold', fontsize=14)
