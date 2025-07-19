@@ -142,7 +142,13 @@ class ModelConfig:
     kernel_initializer: str = "he_normal" # Kernel initializer for conv layers. "he_normal" is good for ReLU-like activations, "glorot_uniform" (Xavier) is good for tanh/sigmoid, "lecun_normal" is good for Leaky ReLU. Default: "he_normal"
     pool_size: Tuple[int, int] = (2, 2) # Pooling: Takes max value from 2x2 areas, reduces spatial dimensions, making features more robust and reduces computation
     batch_normalization: bool = False # Use batch normalization after each conv layer to stabilize learning and improve convergence. Helps with internal covariate shift by normalizing activations across the batch
-    padding: str = "same"  # "same" or "valid" - controls spatial dimension preservation
+    from enum import Enum
+    
+    class PaddingOption(Enum):
+        SAME = "same"
+        VALID = "valid"
+    
+    padding: PaddingOption = PaddingOption.SAME  # Controls spatial dimension preservation
     
     # Text-specific parameters
     """
