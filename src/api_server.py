@@ -1001,7 +1001,7 @@ class OptimizationAPI:
         # Ensure epoch configuration is sane BEFORE creating the job
         config_overrides = request.config_overrides.copy()
         
-        # Ensure the values for max and min epochs are used configuration issues
+        # Ensure the values for max and min epochs are valid to avoid configuration issues
         max_epochs = config_overrides.get('max_epochs_per_trial', 20)  # Default 20
         min_epochs = 5  # Always use 3 as minimum for API requests
         
