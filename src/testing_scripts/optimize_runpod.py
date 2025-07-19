@@ -323,7 +323,11 @@ class OptimizationAPIClient:
             
             # Determine local results directory (project root)
             current_file = Path(__file__).resolve()
-            project_root = current_file.parent.parent.parent  # optimize_runpod.py is in project root
+            project_root = Path.cwd()
+            while not (project_root / ".git").exists() and project_root != project_root.parent:
+                project_root = project_root.parent
+            if not (project_root / ".git").exists():
+                raise FileNotFoundError("Project root not found. Ensure a .git directory exists in the project root.")
             local_results_dir = project_root / "optimization_results"
             
             print(f"📁 Target directory: {local_results_dir}")
