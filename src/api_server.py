@@ -1672,9 +1672,9 @@ class OptimizationAPI:
                         return results_dir
             
             # Fallback: Search for directory by pattern
-            optimization_results_dir = Path("/app/optimization_results")
+            optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "/app/optimization_results"))
             if not optimization_results_dir.exists():
-                optimization_results_dir = Path("./optimization_results")
+                optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_FALLBACK_DIR", "./optimization_results"))
             
             if optimization_results_dir.exists():
                 # Look for directories containing the dataset name and mode
