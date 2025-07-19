@@ -210,6 +210,8 @@ class TrainingAnimationAnalyzer:
             # Find convergence point (where improvement slows)
             recent_improvements = []
             if len(losses) >= 4:  # Need at least 4 epochs to calculate 3 recent improvements
+                # Iterate over the last three epochs (or fewer if there are less than three epochs)
+                # to calculate the absolute differences in loss values between consecutive epochs.
                 for i in range(max(1, len(losses)-3), len(losses)):
                     recent_improvements.append(abs(losses[i-1] - losses[i]))
             if len(recent_improvements) >= 2 and all(imp < 0.01 for imp in recent_improvements):
