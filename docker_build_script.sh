@@ -20,14 +20,18 @@ DOCKER_REPO="${DOCKER_USERNAME}/${REPO_NAME}"
 BUILD_OPTION=${1:-false}
 
 # Validate argument
-if [[ "$BUILD_OPTION" != "true" && "$BUILD_OPTION" != "false" && "$BUILD_OPTION" != "quick" ]]; then
-    echo "❌ Error: Invalid argument. Use 'true', 'false', or 'quick'"
-    echo "Usage: ./docker_build_script.sh [option]"
-    echo "  true: builds both dev and production images (full build)"
-    echo "  false: builds only dev image"
-    echo "  quick: builds only production code update (fast for testing)"
-    exit 1
-fi
+case "$BUILD_OPTION" in
+    true|false|quick)
+        ;; # Valid options, do nothing
+    *)
+        echo "❌ Error: Invalid argument. Use 'true', 'false', or 'quick'"
+        echo "Usage: ./docker_build_script.sh [option]"
+        echo "  true: builds both dev and production images (full build)"
+        echo "  false: builds only dev image"
+        echo "  quick: builds only production code update (fast for testing)"
+        exit 1
+        ;;
+esac
 
 # Get current timestamp for versioning
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
