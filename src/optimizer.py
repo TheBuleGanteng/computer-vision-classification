@@ -42,8 +42,6 @@ from utils.logger import logger
 from model_builder import create_and_train_model
 
 
-
-
 @dataclass
 class TrialProgress:
     """Real-time trial progress data for API streaming"""
@@ -183,6 +181,14 @@ class OptimizationObjective(Enum):
         return objective in cls.get_health_only_objectives()
 
 
+
+class PlotGenerationMode(Enum):
+    """Plot generation modes for optimization"""
+    ALL = "all"      # Generate plots for all trials
+    BEST = "best"    # Generate plots for best trial only  
+    NONE = "none"    # No plot generation
+
+
 @dataclass
 class OptimizationConfig:
     """Configuration for optimization process"""
@@ -197,10 +203,6 @@ class OptimizationConfig:
     health_weight: float = 0.3  # Default: 70% objective, 30% health
     
     # Pruning and sampling
-    '''
-    Pruning allows early stopping of unpromising trials to save resources. If # epochs is 20 and we know the current trial is worse than 
-    those that have already been run, we can stop it early, instead of wasting time on the remaining epochs in that bad trial.
-    '''
     n_startup_trials: int = 10  # Trials before pruning starts. Done to allow initial exploration and develop baseline.
     n_warmup_steps: int = 5     # Steps before pruning evaluation. Prevents pruning too early in training.
     random_seed: int = 42
@@ -234,6 +236,23 @@ class OptimizationConfig:
     enable_early_stopping: bool = True
     early_stopping_patience: int = 5
     
+    # GPU Proxy Integration parameters (NEW)
+    use_gpu_proxy: bool = False                    # Enable/disable GPU proxy usage
+    gpu_proxy_auto_clone: bool = True              # Automatically clone GPU proxy repo if not found
+    gpu_proxy_endpoint: Optional[str] = None       # Optional specific endpoint override
+    gpu_proxy_fallback_local: bool = True          # Fall back to local execution if GPU proxy fails
+    
+    # Enhanced GPU proxy sampling parameters (NEWEST)
+    gpu_proxy_sample_percentage: float = 0.50      # Percentage of training data to use
+    gpu_proxy_use_stratified_sampling: bool = True # Use stratified sampling to maintain class balance
+    gpu_proxy_adaptive_batch_size: bool = True     # Adapt batch size to sample count
+    gpu_proxy_optimize_data_types: bool = True     # Optimize data types for transfer efficiency
+    gpu_proxy_compression_level: int = 6           # Compression level for large payloads
+    
+    # Plot generation configuration
+    plot_generation: PlotGenerationMode = PlotGenerationMode.ALL
+    
+    
     def __post_init__(self):
         """Validate configuration after initialization"""
         if self.n_trials <= 0:
@@ -247,47 +266,19 @@ class OptimizationConfig:
         
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
-    
-    def _validate_and_fix_epoch_configuration(self) -> None:
-        """
-        FIXED: Validate and auto-correct epoch configuration
+        logger.debug(f"running OptimizationConfig.__post_init__ ... Plot generation mode: {self.plot_generation.value}")
         
-        This prevents the min_epochs > max_epochs issue that was causing trial failures.
-        """
-        original_min = self.min_epochs_per_trial
-        original_max = self.max_epochs_per_trial
-        
-        # Ensure both values are at least 1
-        self.min_epochs_per_trial = max(1, self.min_epochs_per_trial)
-        self.max_epochs_per_trial = max(1, self.max_epochs_per_trial)
-        
-        # Fix the core issue: min > max
-        if self.min_epochs_per_trial > self.max_epochs_per_trial:
-            # Strategy: Use the larger of the two as max, and set min to 80% of max
-            actual_max = max(self.min_epochs_per_trial, self.max_epochs_per_trial)
-            actual_min = max(1, int(actual_max * 0.6))  # 60% of max, minimum 1
-            
-            logger.warning(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
-                          f"Fixing epoch configuration: min_epochs({original_min}) > max_epochs({original_max})")
-            logger.warning(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
-                          f"Auto-correcting to: min_epochs={actual_min}, max_epochs={actual_max}")
-            
-            self.min_epochs_per_trial = actual_min
-            self.max_epochs_per_trial = actual_max
-        
-        # Ensure minimum viable training
-        if self.max_epochs_per_trial < 2:
-            logger.warning(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
-                          f"max_epochs_per_trial too low ({self.max_epochs_per_trial}), setting to 3")
-            self.max_epochs_per_trial = 3
-            self.min_epochs_per_trial = min(self.min_epochs_per_trial, 2)
-        
-        # Final validation
-        assert self.min_epochs_per_trial <= self.max_epochs_per_trial, \
-            f"Internal error: min_epochs({self.min_epochs_per_trial}) > max_epochs({self.max_epochs_per_trial})"
-        
-        logger.debug(f"running OptimizationConfig._validate_and_fix_epoch_configuration ... "
-                    f"Final epoch configuration: min={self.min_epochs_per_trial}, max={self.max_epochs_per_trial}")   
+        # Log GPU proxy configuration
+        if self.use_gpu_proxy:
+            logger.debug(f"running OptimizationConfig.__post_init__ ... GPU proxy enabled in optimization config")
+            logger.debug(f"running OptimizationConfig.__post_init__ ... - Auto-clone: {self.gpu_proxy_auto_clone}")
+            logger.debug(f"running OptimizationConfig.__post_init__ ... - Fallback local: {self.gpu_proxy_fallback_local}")
+            logger.debug(f"running OptimizationConfig.__post_init__ ... - Sample percentage: {self.gpu_proxy_sample_percentage:.1%}")
+            logger.debug(f"running OptimizationConfig.__post_init__ ... - Stratified sampling: {self.gpu_proxy_use_stratified_sampling}")
+            if self.gpu_proxy_endpoint:
+                logger.debug(f"running OptimizationConfig.__post_init__ ... - Custom endpoint: {self.gpu_proxy_endpoint}")
+        else:
+            logger.debug(f"running OptimizationConfig.__post_init__ ... GPU proxy disabled in optimization config")
     
     def _validate_mode_objective_compatibility(self) -> None:
         """Validate that the objective is compatible with the selected mode"""
@@ -388,7 +379,6 @@ Top Parameter Importance:
         return "\n".join(lines)
 
 
-
 class ModelOptimizer:
     """
     Unified optimizer class that coordinates hyperparameter optimization
@@ -400,9 +390,10 @@ class ModelOptimizer:
     """
     
     def __init__(self, dataset_name: str, optimization_config: Optional[OptimizationConfig] = None, 
-             datasets_root: Optional[str] = None, run_name: Optional[str] = None,
-             health_analyzer: Optional[HealthAnalyzer] = None,
-             progress_callback: Optional[Callable[[TrialProgress], None]] = None):
+        datasets_root: Optional[str] = None, run_name: Optional[str] = None,
+        health_analyzer: Optional[HealthAnalyzer] = None,
+        progress_callback: Optional[Callable[[TrialProgress], None]] = None,
+        activation_override: Optional[str] = None):
         """
         Initialize ModelOptimizer with optional progress callback for real-time updates
         
@@ -418,8 +409,23 @@ class ModelOptimizer:
         self.dataset_name = dataset_name
         self.config = optimization_config or OptimizationConfig()
         self.run_name = run_name
-        self.summary_plots_dir: Optional[Path] = None
+        self.activation_override = activation_override
+        if self.activation_override:
+            logger.debug(f"running ModelOptimizer.__init__ ... Activation override: {self.activation_override} (will force this activation for all trials)")
         
+        # Enhanced plot tracking
+        self.trial_plot_data = {}  # Store plot data for each trial
+        self.best_trial_number = None      
+        
+        # Log plot generation configuration
+        logger.debug(f"running ModelOptimizer.__init__ ... Plot generation mode: {self.config.plot_generation.value}")
+        if self.config.plot_generation == PlotGenerationMode.ALL:
+            logger.debug(f"running ModelOptimizer.__init__ ... Plots will be generated for ALL trials")
+        elif self.config.plot_generation == PlotGenerationMode.BEST:
+            logger.debug(f"running ModelOptimizer.__init__ ... Plots will be generated for BEST trial only")
+        else:
+            logger.debug(f"running ModelOptimizer.__init__ ... Plot generation DISABLED")
+                    
         # Initialize health analyzer (always available for monitoring)
         self.health_analyzer = health_analyzer or HealthAnalyzer()
         
@@ -476,251 +482,19 @@ class ModelOptimizer:
         if self.run_name:
             logger.debug(f"running ModelOptimizer.__init__ ... Run name: {self.run_name}")
         logger.debug(f"running ModelOptimizer.__init__ ... Real-time trial tracking enabled: {progress_callback is not None}")
-    
-    
-    # MODEL MONITORING API METHODS ------------------------------------------
-    def get_trial_history(self) -> List[Dict[str, Any]]:
-        """Get complete trial history for API"""
-        return [trial.to_dict() for trial in self.trial_progress_history]
-
-    def get_current_trial(self) -> Optional[Dict[str, Any]]:
-        """Get currently running trial data"""
-        return self.current_trial_progress.to_dict() if self.current_trial_progress else None
-
-    def get_best_trial(self) -> Optional[Dict[str, Any]]:
-        """Get best performing trial so far"""
-        return self.best_trial_progress.to_dict() if self.best_trial_progress else None
-
-    def get_architecture_trends(self) -> Dict[str, List[float]]:
-        """Get architecture performance trends"""
-        return self.architecture_trends.copy()
-
-    def get_health_trends(self) -> Dict[str, List[float]]:
-        """Get health metrics trends"""
-        return self.health_trends.copy()
-
-    def get_optimization_progress(self) -> Dict[str, Any]:
-        """Get overall optimization progress for API"""
-        completed_trials = len([t for t in self.trial_progress_history if t.status == "completed"])
-        total_trials = self.config.n_trials
         
-        return {
-            "current_trial": len(self.trial_progress_history),
-            "total_trials": total_trials,
-            "completed_trials": completed_trials,
-            "success_rate": completed_trials / max(len(self.trial_progress_history), 1),
-            "best_value": self.study.best_value if self.study and self.study.best_value else None,
-            "elapsed_time": time.time() - self.optimization_start_time if self.optimization_start_time else 0
-        }
-    
-    def _start_trial(self, trial_number: int, hyperparameters: Dict[str, Any]) -> str:
-        """Start tracking a new optimization trial"""
-        trial_id = f"trial_{trial_number}_{uuid.uuid4().hex[:8]}"
-        
-        # Create trial progress object
-        trial_progress = TrialProgress(
-            trial_id=trial_id,
-            trial_number=trial_number,
-            status="running",
-            started_at=datetime.now().isoformat(),
-            hyperparameters=hyperparameters
-        )
-        
-        # Store current trial
-        self.current_trial_progress = trial_progress
-        self.trial_progress_history.append(trial_progress)
-        
-        # Notify callback if available
-        if self.progress_callback:
-            self.progress_callback(trial_progress)
-        
-        logger.debug(f"running ModelOptimizer._start_trial ... Started trial {trial_number} (ID: {trial_id})")
-        return trial_id
-    
-    def _update_trial_architecture(self, trial_id: str, model: Any, hyperparameters: Dict[str, Any]) -> None:
-        """Update trial with detailed architecture information"""
-        if not self.current_trial_progress or self.current_trial_progress.trial_id != trial_id:
-            return
-        
-        try:
-            # Extract architecture details
-            architecture = self._analyze_model_architecture(model, hyperparameters)
-            model_size = self._calculate_model_size(model)
-            
-            # Update trial progress
-            self.current_trial_progress.architecture = architecture
-            self.current_trial_progress.model_size = model_size
-            
-            # Notify callback
-            if self.progress_callback:
-                self.progress_callback(self.current_trial_progress)
-            
-            logger.debug(f"running ModelOptimizer._update_trial_architecture ... Updated architecture for trial {trial_id}")
-            
-        except Exception as e:
-            logger.warning(f"running ModelOptimizer._update_trial_architecture ... Failed to analyze architecture: {e}")
-    
-    def _update_trial_health(self, trial_id: str, health_metrics: Dict[str, Any]) -> None:
-        """Update trial with health metrics"""
-        if not self.current_trial_progress or self.current_trial_progress.trial_id != trial_id:
-            return
-        
-        try:
-            # Update health metrics
-            self.current_trial_progress.health_metrics = health_metrics
-            
-            # Update health trends for visualization
-            self._update_health_trends(self.current_trial_progress.trial_number, health_metrics)
-            
-            # Notify callback
-            if self.progress_callback:
-                self.progress_callback(self.current_trial_progress)
-            
-            logger.debug(f"running ModelOptimizer._update_trial_health ... Updated health metrics for trial {trial_id}")
-            
-        except Exception as e:
-            logger.warning(f"running ModelOptimizer._update_trial_health ... Failed to update health metrics: {e}")
-    
-    def _complete_trial(self, trial_id: str, performance: Dict[str, Any], 
-                       training_history: Dict[str, Any], status: str = "completed",
-                       pruning_info: Optional[Dict[str, Any]] = None) -> None:
-        """Complete trial and store final results"""
-        if not self.current_trial_progress or self.current_trial_progress.trial_id != trial_id:
-            return
-        
-        try:
-            # Update completion info
-            self.current_trial_progress.completed_at = datetime.now().isoformat()
-            self.current_trial_progress.status = status
-            self.current_trial_progress.performance = performance
-            self.current_trial_progress.training_history = training_history
-            self.current_trial_progress.pruning_info = pruning_info
-            
-            # Calculate duration
-            if self.current_trial_progress.started_at:
-                start_time = datetime.fromisoformat(self.current_trial_progress.started_at.replace('Z', '+00:00'))
-                end_time = datetime.fromisoformat(self.current_trial_progress.completed_at.replace('Z', '+00:00'))
-                self.current_trial_progress.duration_seconds = (end_time - start_time).total_seconds()
-            
-            # Update best trial tracking
-            if (status == "completed" and performance.get('final_val_accuracy') and
-                (self.best_trial_progress is None or 
-                performance['final_val_accuracy'] > (self.best_trial_progress.performance.get('final_val_accuracy', 0) if self.best_trial_progress.performance else 0))):
-                self.best_trial_progress = self.current_trial_progress
-            
-            # Update architecture trends
-            self._update_architecture_trends(
-                self.current_trial_progress.trial_number, 
-                performance, 
-                self.current_trial_progress.architecture
-            )
-            
-            # Final callback notification
-            if self.progress_callback:
-                self.progress_callback(self.current_trial_progress)
-            
-            # Clear current trial
-            self.current_trial_progress = None
-            
-            logger.debug(f"running ModelOptimizer._complete_trial ... Completed trial {trial_id} with status: {status}")
-            
-        except Exception as e:
-            logger.warning(f"running ModelOptimizer._complete_trial ... Failed to complete trial: {e}")
-    
-    def _analyze_model_architecture(self, model: Any, hyperparameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze model architecture for visualization"""
-        try:
-            architecture = {
-                "type": "cnn" if hyperparameters.get("architecture_type") == "cnn" else "lstm",
-                "layers": [],
-                "total_params": model.count_params(),
-                "trainable_params": sum([layer.count_params() for layer in model.layers if layer.trainable]),
-                "input_shape": list(model.input_shape[1:]) if model.input_shape else [],
-                "output_shape": list(model.output_shape[1:]) if model.output_shape else []
-            }
-            
-            # Analyze each layer
-            for i, layer in enumerate(model.layers):
-                layer_info = {
-                    "index": i,
-                    "name": layer.name,
-                    "type": type(layer).__name__,
-                    "params": layer.count_params(),
-                    "trainable": layer.trainable
-                }
-                
-                # Add layer-specific details
-                if hasattr(layer, 'filters'):
-                    layer_info["filters"] = layer.filters
-                if hasattr(layer, 'kernel_size'):
-                    layer_info["kernel_size"] = list(layer.kernel_size)
-                if hasattr(layer, 'units'):
-                    layer_info["units"] = layer.units
-                if hasattr(layer, 'rate'):
-                    layer_info["dropout_rate"] = layer.rate
-                
-                architecture["layers"].append(layer_info)
-            
-            return architecture
-            
-        except Exception as e:
-            logger.warning(f"running ModelOptimizer._analyze_model_architecture ... Architecture analysis failed: {e}")
-            return {"type": "unknown", "layers": [], "total_params": 0, "error": str(e)}
-    
-    def _calculate_model_size(self, model: Any) -> Dict[str, Any]:
-        """Calculate model size metrics"""
-        try:
-            total_params = model.count_params()
-            trainable_params = sum([layer.count_params() for layer in model.layers if layer.trainable])
-            memory_mb = total_params * 4 / (1024 * 1024)  # Rough estimate
-            
-            return {
-                "total_params": total_params,
-                "trainable_params": trainable_params,
-                "non_trainable_params": total_params - trainable_params,
-                "memory_mb": round(memory_mb, 2),
-                "size_category": self._categorize_model_size(total_params)
-            }
-        except Exception as e:
-            return {"error": str(e)}
-    
-    def _categorize_model_size(self, total_params: int) -> str:
-        """Categorize model size"""
-        if total_params < 100_000:
-            return "small"
-        elif total_params < 1_000_000:
-            return "medium"
-        elif total_params < 10_000_000:
-            return "large"
+        # LOG GPU PROXY CONFIGURATION STATUS (NEW)
+        if self.config.use_gpu_proxy:
+            logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy integration: ENABLED")
+            logger.debug(f"running ModelOptimizer.__init__ ... - Auto-clone: {self.config.gpu_proxy_auto_clone}")
+            logger.debug(f"running ModelOptimizer.__init__ ... - Fallback local: {self.config.gpu_proxy_fallback_local}")
+            logger.debug(f"running ModelOptimizer.__init__ ... - Sample percentage: {self.config.gpu_proxy_sample_percentage:.1%}")
+            logger.debug(f"running ModelOptimizer.__init__ ... - Stratified sampling: {self.config.gpu_proxy_use_stratified_sampling}")
+            if self.config.gpu_proxy_endpoint:
+                logger.debug(f"running ModelOptimizer.__init__ ... - Custom endpoint: {self.config.gpu_proxy_endpoint}")
+            logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy will be passed to all ModelBuilder instances")
         else:
-            return "very_large"
-    
-    def _update_health_trends(self, trial_number: int, health_metrics: Dict[str, Any]) -> None:
-        """Update health trends for visualization"""
-        for metric_name, value in health_metrics.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if metric_name not in self.health_trends:
-                    self.health_trends[metric_name] = []
-                self.health_trends[metric_name].append(float(value))
-    
-    def _update_architecture_trends(self, trial_number: int, performance: Dict[str, Any], 
-                                   architecture: Optional[Dict[str, Any]]) -> None:
-        """Update architecture performance trends"""
-        if not architecture:
-            return
-        
-        # Track performance by architecture features
-        total_params = architecture.get("total_params", 0)
-        val_accuracy = performance.get("final_val_accuracy", 0)
-        
-        # Update trends
-        if "parameter_count" not in self.architecture_trends:
-            self.architecture_trends["parameter_count"] = []
-        self.architecture_trends["parameter_count"].append(total_params)
-        
-        if "val_accuracy" not in self.architecture_trends:
-            self.architecture_trends["val_accuracy"] = []
-        self.architecture_trends["val_accuracy"].append(val_accuracy)  
+            logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy integration: DISABLED (local execution only)")
     
     def _detect_data_type(self) -> str:
         """Detect whether this is image or text data"""
@@ -758,254 +532,71 @@ class ModelOptimizer:
         plots_dir = self.results_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
         logger.debug(f"running _setup_results_directory ... Plots directory: {plots_dir}")
-        
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"running _setup_results_directory ... Results directory: {self.results_dir}")
 
         # Create a subdirectory within the plots directory for each trial in the run
         for trial_num in range(self.config.n_trials):
             trial_dir = plots_dir / f"trial_{trial_num + 1}"
             trial_dir.mkdir(exist_ok=True)
             logger.debug(f"running _setup_results_directory ... Created trial directory: {trial_dir}")
+        
+        # Create a subdirectory for the optimized model
+        optimized_dir = self.results_dir / "optimized_model"
+        optimized_dir.mkdir(exist_ok=True)
+        logger.debug(f"running _setup_results_directory ... Optimized model directory: {optimized_dir}")
+        
     
-        # Create the summary plots directory
-        self.summary_plots_dir = self.results_dir / "plots" / "summary_plots"
-        self.summary_plots_dir.mkdir(exist_ok=True)
-        logger.debug(f"running _setup_results_directory ... Created summary plots directory: {self.summary_plots_dir}")
-
-    def _detect_training_instabilities(
-        self, 
-        history: Any, 
-        trial: optuna.Trial,
-        model: Any
-    ) -> Tuple[bool, List[str]]:
+    def _create_model_config(self, params: Dict[str, Any]) -> ModelConfig:
         """
-        Detect training instabilities using the configured stability parameters
+        Create ModelConfig from suggested parameters
         
         Args:
-            history: Keras training history
-            trial: Optuna trial object
-            model: Trained model
+            params: Dictionary of hyperparameters
             
         Returns:
-            Tuple of (is_stable, list_of_issues)
+            ModelConfig object with suggested parameters and GPU proxy configuration
         """
-        logger.debug(f"running _detect_training_instabilities ... Checking stability for trial {trial.number}")
+        logger.debug(f"running _create_model_config ... Creating ModelConfig from params: {params}")
         
-        issues = []
-        is_stable = True
+        # Create base config
+        config = ModelConfig()
         
-        if not self.config.enable_stability_checks:
-            logger.debug(f"running _detect_training_instabilities ... Stability checks disabled, skipping")
-            return True, []
-        
-        # Check if we have enough epochs for stability analysis
-        epochs_completed = len(history.history.get('loss', []))
-        if epochs_completed < self.config.stability_window:
-            logger.debug(f"running _detect_training_instabilities ... Only {epochs_completed} epochs completed, need {self.config.stability_window} for stability check")
-            return True, []  # Not enough data to assess stability
-        
-        # 1. Check for bias explosion by examining model weights
-        try:
-            for layer in model.layers:
-                if hasattr(layer, 'bias') and layer.bias is not None:
-                    bias_values = layer.bias.numpy()
-                    max_bias = np.max(np.abs(bias_values))
-                    mean_bias = np.mean(np.abs(bias_values))
-                    
-                    # Flag extreme bias values
-                    if max_bias > 100.0:  # Absolute threshold for bias explosion
-                        issues.append(f"BIAS EXPLOSION in {layer.name}: max_bias={max_bias:.2f}")
-                        is_stable = False
-                        logger.debug(f"running _detect_training_instabilities ... Detected bias explosion in {layer.name}")
-                    
-                    if mean_bias > 50.0:  # Mean bias threshold
-                        issues.append(f"High mean bias in {layer.name}: mean_bias={mean_bias:.2f}")
-                        is_stable = False
-                        logger.debug(f"running _detect_training_instabilities ... Detected high mean bias in {layer.name}")
-                        
-        except Exception as e:
-            logger.warning(f"running _detect_training_instabilities ... Failed to check bias values: {e}")
-        
-        # 2. Check for rapid changes in loss over the stability window
-        if 'loss' in history.history:
-            loss_values = history.history['loss']
-            if len(loss_values) >= self.config.stability_window:
-                recent_losses = loss_values[-self.config.stability_window:]
-                
-                # Calculate loss change rate
-                for i in range(1, len(recent_losses)):
-                    loss_change = abs(recent_losses[i] - recent_losses[i-1])
-                    if loss_change > self.config.max_bias_change_per_epoch:
-                        issues.append(f"Rapid loss change at epoch {epochs_completed - len(recent_losses) + i + 1}: change={loss_change:.3f}")
-                        is_stable = False
-                        logger.debug(f"running _detect_training_instabilities ... Detected rapid loss change: {loss_change:.3f}")
-        
-        # 3. Check for NaN or infinity in metrics
-        for metric_name, values in history.history.items():
-            if values:  # Check if list is not empty
-                latest_value = values[-1]
-                if np.isnan(latest_value) or np.isinf(latest_value):
-                    issues.append(f"NaN/Inf detected in {metric_name}: {latest_value}")
-                    is_stable = False
-                    logger.debug(f"running _detect_training_instabilities ... Detected NaN/Inf in {metric_name}")
-        
-        # 4. Check for gradient explosion indicators (accuracy oscillation)
-        if 'accuracy' in history.history:
-            acc_values = history.history['accuracy']
-            if len(acc_values) >= self.config.stability_window:
-                recent_acc = acc_values[-self.config.stability_window:]
-                
-                # Calculate accuracy volatility
-                acc_std = np.std(recent_acc)
-                acc_mean = np.mean(recent_acc)
-                
-                # Flag high volatility in recent epochs
-                if acc_std > 0.1 and acc_mean > 0.1:  # 10% standard deviation threshold
-                    issues.append(f"High accuracy volatility: std={acc_std:.3f}, mean={acc_mean:.3f}")
-                    is_stable = False
-                    logger.debug(f"running _detect_training_instabilities ... Detected accuracy volatility: {acc_std:.3f}")
-        
-        logger.debug(f"running _detect_training_instabilities ... Stability check complete: stable={is_stable}, issues={len(issues)}")
-        return is_stable, issues
-    
-    def _build_and_save_best_model(self, results: OptimizationResult) -> str:
-        """
-        Build and save the final model using the best hyperparameters found during optimization
-        
-        Args:
-            results: OptimizationResult containing the best hyperparameters
-            
-        Returns:
-            str: Path to the saved model file
-        """
-        logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Building final model with best params")
-        
-        try:            
-            # Convert best_params to the format expected by create_and_train_model
-            best_params = results.best_params.copy()
-            
-            logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Best hyperparameters: {best_params}")
-            
-            # Create ModelConfig and ModelBuilder directly so we can control the plot directory
-            model_config = self._create_model_config(best_params)
-            model_builder = ModelBuilder(self.dataset_config, model_config)
-            
-            # IMPORTANT: Set the plot directory to summary_plots BEFORE building/training
-            # This ensures all realtime plots go to the correct location
-            model_builder.plot_dir = self.summary_plots_dir
-            logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Set plot directory to: {self.summary_plots_dir}")
-            
-            # Build and train the model (this is where realtime plots are generated)
-            model_builder.build_model()
-            training_history = model_builder.train(self.data)
-            
-            # CRITICAL FIX: Ensure training_history is properly stored
-            # The train() method returns the history, but we need to make sure it's accessible
-            if training_history is not None:
-                model_builder.training_history = training_history
-                logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Training history properly stored")
+        # Apply all suggested parameters
+        for key, value in params.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+                logger.debug(f"running _create_model_config ... Set {key} = {value} (type: {type(value)})")
             else:
-                logger.warning(f"running ModelOptimizer._build_and_save_best_model ... Training returned None history")
-            
-            # Double-check that training_history is available
-            if model_builder.training_history is None:
-                logger.warning(f"running ModelOptimizer._build_and_save_best_model ... ModelBuilder.training_history is None, evaluation plots may be limited")
-            else:
-                logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Training history available with keys: {list(model_builder.training_history.history.keys())}")
-            
-            # Evaluate the model 
-            test_loss, test_accuracy = model_builder.evaluate(
-                data=self.data,
-                log_detailed_predictions=True,
-                max_predictions_to_show=20,
-                run_timestamp=datetime.now().strftime("%Y-%m-%d-%H:%M:%S"),
-                plot_dir=self.summary_plots_dir
-            )
-            
-            # Save the model
-            final_model_path = model_builder.save_model(
-                test_accuracy=test_accuracy,
-                run_timestamp=datetime.now().strftime("%Y-%m-%d-%H:%M:%S"),
-                run_name=self.run_name
-            )
-            
-            final_accuracy = test_accuracy
-            
-            logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Final model built successfully")
-            logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Final model accuracy: {final_accuracy:.4f}")
-            logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Final model saved to: {final_model_path}")
-            
-            # Generate comprehensive plots for the best model and save to summary_plots directory
-            try:
-                if self.summary_plots_dir is None:
-                    logger.warning("running ModelOptimizer._build_and_save_best_model ... Summary plots directory not available, skipping plot generation")
-                else:
-                    logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Generating summary plots for best model")
-                    logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Using summary plots directory: {self.summary_plots_dir}")
-                    
-                    # Generate timestamp for the best model plots
-                    best_model_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-                    
-                    # Note: Additional comprehensive plots were already generated during evaluate() call above
-                    # which used self.summary_plots_dir as the plot_dir
-                    
-                    # Create a summary file for the best model performance
-                    best_model_summary_file = self.summary_plots_dir / "best_model_summary.txt"
-                    with open(best_model_summary_file, 'w') as f:
-                        f.write(f"Best Model Summary\n")
-                        f.write(f"==================\n\n")
-                        f.write(f"Dataset: {self.dataset_name}\n")
-                        f.write(f"Optimization Mode: {self.config.mode.value}\n")
-                        f.write(f"Optimization Objective: {self.config.objective.value}\n")
-                        f.write(f"Health Weight: {self.config.health_weight}\n\n")
-                        f.write(f"Best Model Performance:\n")
-                        f.write(f"- Test Accuracy: {final_accuracy:.4f}\n")
-                        f.write(f"- Test Loss: {test_loss:.4f}\n")
-                        f.write(f"- Model Path: {final_model_path}\n\n")
-                        f.write(f"Best Hyperparameters:\n")
-                        for param, value in sorted(results.best_params.items()):
-                            f.write(f"- {param}: {value}\n")
-                        f.write(f"\nOptimization Results:\n")
-                        f.write(f"- Best Optimization Value: {results.best_value:.4f}\n")
-                        f.write(f"- Total Trials: {results.total_trials}\n")
-                        f.write(f"- Successful Trials: {results.successful_trials}\n")
-                        f.write(f"- Optimization Time: {results.optimization_time_hours:.2f} hours\n")
-                        
-                        # Add health information if available
-                        if results.best_trial_health:
-                            f.write(f"\nBest Trial Health Metrics:\n")
-                            for metric, value in sorted(results.best_trial_health.items()):
-                                if isinstance(value, (int, float)):
-                                    f.write(f"- {metric.replace('_', ' ').title()}: {value:.4f}\n")
-                        
-                        # Add training history summary if available
-                        if model_builder.training_history is not None:
-                            f.write(f"\nTraining History Summary:\n")
-                            history_dict = model_builder.training_history.history
-                            for metric, values in history_dict.items():
-                                if values:
-                                    f.write(f"- Final {metric}: {values[-1]:.4f}\n")
-                        
-                        f.write(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}\n")
-                    
-                    logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Best model summary saved to: {best_model_summary_file}")
-                    logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Summary plots generated successfully")
-                    logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Summary plots location: {self.summary_plots_dir}")
-                    
-            except Exception as plot_error:
-                logger.warning(f"running ModelOptimizer._build_and_save_best_model ... Failed to generate summary plots: {plot_error}")
-                logger.debug(f"running ModelOptimizer._build_and_save_best_model ... Plot error details: {traceback.format_exc()}")
-                # Don't fail the entire process if plot generation fails
-            
-            return final_model_path
-            
-        except Exception as e:
-            logger.error(f"running ModelOptimizer._build_and_save_best_model ... Failed to build final model: {e}")
-            raise
+                logger.warning(f"running _create_model_config ... ModelConfig has no attribute '{key}', skipping")
+        
+        # Apply GPU proxy config from OptimizationConfig to ModelConfig
+        config.use_gpu_proxy = self.config.use_gpu_proxy
+        config.gpu_proxy_auto_clone = self.config.gpu_proxy_auto_clone
+        config.gpu_proxy_endpoint = self.config.gpu_proxy_endpoint
+        config.gpu_proxy_fallback_local = self.config.gpu_proxy_fallback_local
+        
+        # Apply enhanced GPU proxy sampling parameters
+        config.gpu_proxy_sample_percentage = self.config.gpu_proxy_sample_percentage
+        config.gpu_proxy_use_stratified_sampling = self.config.gpu_proxy_use_stratified_sampling
+        config.gpu_proxy_adaptive_batch_size = self.config.gpu_proxy_adaptive_batch_size
+        config.gpu_proxy_optimize_data_types = self.config.gpu_proxy_optimize_data_types
+        config.gpu_proxy_compression_level = self.config.gpu_proxy_compression_level
+        
+        # Log GPU proxy configuration transfer
+        if self.config.use_gpu_proxy:
+            logger.debug(f"running _create_model_config ... GPU proxy configuration applied to ModelConfig")
+            logger.debug(f"running _create_model_config ... - use_gpu_proxy: {config.use_gpu_proxy}")
+            logger.debug(f"running _create_model_config ... - gpu_proxy_auto_clone: {config.gpu_proxy_auto_clone}")
+            logger.debug(f"running _create_model_config ... - gpu_proxy_fallback_local: {config.gpu_proxy_fallback_local}")
+            logger.debug(f"running _create_model_config ... - gpu_proxy_sample_percentage: {config.gpu_proxy_sample_percentage:.1%}")
+            logger.debug(f"running _create_model_config ... - gpu_proxy_use_stratified_sampling: {config.gpu_proxy_use_stratified_sampling}")
+            if config.gpu_proxy_endpoint:
+                logger.debug(f"running _create_model_config ... - gpu_proxy_endpoint: {config.gpu_proxy_endpoint}")
+        else:
+            logger.debug(f"running _create_model_config ... GPU proxy disabled, using local execution only")
+        
+        logger.debug(f"running _create_model_config ... ModelConfig created successfully")
+        return config
 
-    
-    
     def optimize(self) -> OptimizationResult:
         """
         Run optimization study to find best hyperparameters
@@ -1051,43 +642,89 @@ class ModelOptimizer:
         # Check if we have any completed trials before trying to build final model
         completed_trials = [t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         
-        # Build and save the final best model if save_best_model is enabled AND we have completed trials
-        if self.config.save_best_model and completed_trials:
-            try:
-                # Additional safety check - verify study has best_params
-                if hasattr(self.study, 'best_params') and self.study.best_params:
-                    logger.debug(f"running ModelOptimizer.optimize ... Building final model with best hyperparameters")
-                    final_model_path = self._build_and_save_best_model(results)
-                    results.best_model_path = final_model_path
-                    logger.debug(f"running ModelOptimizer.optimize ... Final model saved to: {final_model_path}")
-                else:
-                    logger.warning(f"running ModelOptimizer.optimize ... No best parameters available, skipping final model build")
-            except Exception as e:
-                logger.error(f"running ModelOptimizer.optimize ... Failed to build final model: {e}")
-                logger.debug(f"running ModelOptimizer.optimize ... Final model error traceback: {traceback.format_exc()}")
-        elif self.config.save_best_model and not completed_trials:
-            logger.warning(f"running ModelOptimizer.optimize ... No completed trials available, skipping final model build")
+        # Handle best trial artifacts based on plot generation mode
+        if completed_trials and self.config.plot_generation == PlotGenerationMode.ALL:
+            logger.debug("running ModelOptimizer.optimize ... Plot generation is 'all', copying best trial artifacts instead of rebuilding")
+            self._copy_best_trial_artifacts()
+        else:
+            logger.debug("running ModelOptimizer.optimize ... Plot generation is not 'all', proceeding with current final model build logic")
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
         return results
     
     
-    def _is_maximization_objective(self) -> bool:
-        """Determine if objective should be maximized or minimized"""
-        maximization_objectives = {
-            OptimizationObjective.ACCURACY,
-            OptimizationObjective.VAL_ACCURACY,
-            OptimizationObjective.PARAMETER_EFFICIENCY,
-            OptimizationObjective.MEMORY_EFFICIENCY,
-            OptimizationObjective.INFERENCE_SPEED,
-            OptimizationObjective.OVERALL_HEALTH,
-            OptimizationObjective.NEURON_UTILIZATION,
-            OptimizationObjective.TRAINING_STABILITY,
-            OptimizationObjective.GRADIENT_HEALTH
-        }
-        return self.config.objective in maximization_objectives
-    
+    def _copy_best_trial_artifacts(self) -> None:
+        """
+        Copy the best trial's model and plots to the optimized_model directory
+        Only called when plot_generation=ALL since plots already exist
+        """
+        from utils.logger import logger
+        import shutil
+        
+        logger.debug("running _copy_best_trial_artifacts ... Starting best trial artifact copy")
+        
+        if self.results_dir is None:
+            logger.error("running _copy_best_trial_artifacts ... Results directory not set, cannot copy artifacts")
+            return
+        
+        if not hasattr(self, 'study') or self.study is None or not self.study.trials:
+            logger.warning("running _copy_best_trial_artifacts ... No study or trials found, cannot copy artifacts")
+            return
+        
+        # Get best trial
+        best_trial = self.study.best_trial
+        best_trial_number = best_trial.number
+        
+        logger.debug(f"running _copy_best_trial_artifacts ... Best trial is #{best_trial_number} with value: {best_trial.value:.4f}")
+        
+        # Define source and destination paths
+        source_trial_dir = self.results_dir / "plots" / f"trial_{best_trial_number + 1}"
+        dest_optimized_dir = self.results_dir / "optimized_model"
+        
+        # Check if source directory exists and has content
+        if not source_trial_dir.exists():
+            logger.error(f"running _copy_best_trial_artifacts ... Source trial directory not found: {source_trial_dir}")
+            logger.error("running _copy_best_trial_artifacts ... This suggests plots were not generated for the best trial")
+            return
+        
+        # Check if directory has any files
+        source_files = list(source_trial_dir.iterdir())
+        if not source_files:
+            logger.warning(f"running _copy_best_trial_artifacts ... Source trial directory is empty: {source_trial_dir}")
+            return
+        
+        # Create optimized_model directory
+        dest_optimized_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"running _copy_best_trial_artifacts ... Created optimized_model directory: {dest_optimized_dir}")
+        
+        try:
+            # Copy all contents from best trial directory to optimized_model directory
+            files_copied = 0
+            dirs_copied = 0
+            
+            for item in source_trial_dir.iterdir():
+                if item.is_file():
+                    dest_file = dest_optimized_dir / item.name
+                    shutil.copy2(item, dest_file)
+                    files_copied += 1
+                    logger.debug(f"running _copy_best_trial_artifacts ... Copied file: {item.name}")
+                elif item.is_dir():
+                    dest_subdir = dest_optimized_dir / item.name
+                    if dest_subdir.exists():
+                        shutil.rmtree(dest_subdir)  # Remove existing directory
+                    shutil.copytree(item, dest_subdir)
+                    dirs_copied += 1
+                    logger.debug(f"running _copy_best_trial_artifacts ... Copied directory: {item.name}")
+            
+            logger.debug(f"running _copy_best_trial_artifacts ... Successfully copied {files_copied} files and {dirs_copied} directories from trial_{best_trial_number + 1}")
+            logger.debug(f"running _copy_best_trial_artifacts ... Best trial artifacts available in: {dest_optimized_dir}")
+            
+        except Exception as e:
+            logger.error(f"running _copy_best_trial_artifacts ... Failed to copy artifacts: {e}")
+            # Fallback: log what we attempted to copy
+            logger.debug(f"running _copy_best_trial_artifacts ... Attempted to copy from: {source_trial_dir}")
+            logger.debug(f"running _copy_best_trial_artifacts ... Available items: {[item.name for item in source_trial_dir.iterdir()]}")
     
     def _objective_function(self, trial: optuna.Trial) -> float:
         """
@@ -1105,64 +742,29 @@ class ModelOptimizer:
             # Generate hyperparameters based on data type
             params = self._suggest_hyperparameters(trial)
             
-            # Start trial tracking
-            trial_id = self._start_trial(trial.number, params)
-            
-            # Log trial start
-            logger.debug(f"running _objective_function ... Trial {trial.number} config: "
-                f"conv_layers={params.get('num_layers_conv')}, "
-                f"kernel={params.get('kernel_size')}, "
-                f"padding={params.get('padding')}, "
-                f"filters={params.get('filters_per_conv_layer')}")
-            
             # Create ModelConfig from suggested parameters
             model_config = self._create_model_config(params)
             
             # Record trial start time
             trial_start_time = time.time()
             
-            # Create and train model
+            # Create ModelBuilder with GPU proxy integration
             model_builder = ModelBuilder(self.dataset_config, model_config)
             
-            # Build and train model
+            # Build model
             model_builder.build_model()
             
             # Check that model was built successfully
             if model_builder.model is None:
                 raise RuntimeError("Model building failed - model is None")
             
-            # UPDATE ARCHITECTURE INFO - NEW
-            self._update_trial_architecture(trial_id, model_builder.model, params)
-                        
-            # Split training data for validation            
-            x_train_split, x_val_split, y_train_split, y_val_split = train_test_split(
-                self.data['x_train'], 
-                self.data['y_train'], 
-                test_size=self.config.validation_split, 
-                random_state=42
-            )
-            
-            # Prepare validation data for training
-            validation_data = (x_val_split, y_val_split)
-            
-            # Create callbacks for early stopping and pruning
-            callbacks = []
-            
-            if self.config.enable_early_stopping:                
-                early_stopping = keras.callbacks.EarlyStopping(
-                    monitor='val_accuracy' if 'accuracy' in self.config.objective.value else 'val_loss',
-                    patience=self.config.early_stopping_patience,
-                    restore_best_weights=True,
-                    verbose=1
-                )
-                callbacks.append(early_stopping)
-            
-            # Add Optuna pruning callback            
-            pruning_callback = optuna_keras.KerasPruningCallback(
-                trial, 
-                'val_accuracy' if 'accuracy' in self.config.objective.value else 'val_loss'
-            )
-            callbacks.append(pruning_callback)
+            # Prepare data dictionary for ModelBuilder.train()
+            training_data = {
+                'x_train': self.data['x_train'],
+                'y_train': self.data['y_train'],
+                'x_test': self.data['x_test'],  # Not used in training but required by train method
+                'y_test': self.data['y_test']   # Not used in training but required by train method
+            }
             
             # Safely get epochs value and ensure it's an integer
             trial_epochs = params.get('epochs', self.config.max_epochs_per_trial)
@@ -1185,171 +787,113 @@ class ModelOptimizer:
             logger.debug(f"running _objective_function ... Trial {trial.number}: "
                         f"Training for {final_epochs} epochs (min={min_epochs}, max={max_epochs})")
             
-            # Train model with validation data
-            history = model_builder.model.fit(
-                x_train_split, 
-                y_train_split,
-                epochs=final_epochs,
-                validation_data=validation_data,
-                callbacks=callbacks,
-                verbose=1  # Show training output
+            # Update model config with final epochs
+            model_builder.model_config.epochs = final_epochs
+            
+            # Use ModelBuilder.train() method which includes GPU proxy integration
+            history = model_builder.train(
+                data=training_data,
+                validation_split=self.config.validation_split
             )
             
-            # Store the training history in the ModelBuilder instance
-            # This ensures that when evaluate() is called later, it has access to the training history
-            model_builder.training_history = history
-            logger.debug(f"running ModelOptimizer._objective_function ... Stored training history in ModelBuilder")
-
             # Calculate training time
             training_time_minutes = (time.time() - trial_start_time) / 60
 
-            # Save plots for this trial after successful calculation - PASS THE TRAINING HISTORY
-            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-            self._save_trial_plots_after_training(trial, model_builder.model, run_timestamp, training_history=history)
-            
-            # Perform stability detection if enabled
-            if self.config.enable_stability_checks:
-                logger.debug(f"running _objective_function ... Trial {trial.number}: Performing stability checks")
-                
-                epochs_completed = len(history.history.get('loss', []))
-                required_min_epochs = self.config.min_epochs_per_trial
-                
-                if epochs_completed < required_min_epochs:
-                    logger.warning(f"running _objective_function ... Trial {trial.number}: "
-                                f"Insufficient epochs: {epochs_completed} < {required_min_epochs}")
-                                    
-                    self._complete_trial(
-                        trial_id, 
-                        {"error": f"Insufficient epochs: {epochs_completed} < {required_min_epochs}"}, 
-                        {}, 
-                        "pruned",
-                        pruning_info={"reason": "insufficient_epochs", "epochs_completed": epochs_completed}
-                    )                    
-                    raise optuna.TrialPruned(f"Trial completed only {epochs_completed} epochs, required: {required_min_epochs}")
-                
-                # Detect training instabilities
-                is_stable, stability_issues = self._detect_training_instabilities(
-                    history=history,
-                    trial=trial,
-                    model=model_builder.model
-                )
-                
-                if not is_stable:
-                    logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} unstable training detected")
-                    for issue in stability_issues:
-                        logger.debug(f"running ModelOptimizer._objective_function ... - Stability issue: {issue}")
-                                        
-                    # Complete trial with pruning due to instability
-                    self._complete_trial(
-                        trial_id,
-                        {"error": f"Training instability: {'; '.join(stability_issues[:3])}"}, 
-                        {}, 
-                        "pruned",
-                        pruning_info={"reason": "instability", "issues": stability_issues}
-                    )
-                    
-                    # Prune trial due to instability
-                    issue_summary = "; ".join(stability_issues[:3])  # Limit to first 3 issues for readability
-                    raise optuna.TrialPruned(f"Training instability detected: {issue_summary}")
-                else:
-                    logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} passed stability checks")
-                        
-            # Check resource constraints
-            if training_time_minutes > self.config.max_training_time_minutes:
-                logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} exceeded time limit")
-                
-                # Complete trial with pruning due to time limit
-                self._complete_trial(
-                    trial_id,
-                    {"error": f"Training time {training_time_minutes:.1f}min exceeded limit"}, 
-                    {}, 
-                    "pruned",
-                    pruning_info={"reason": "time_limit", "training_time_minutes": training_time_minutes}
-                )            
-                raise optuna.TrialPruned(f"Training time {training_time_minutes:.1f}min exceeded limit")
-                
-            # Count parameters
-            total_params = model_builder.model.count_params()
-            if total_params > self.config.max_parameters:
-                logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} exceeded parameter limit")
-                
-                # Complete trial with pruning due to parameter limit
-                self._complete_trial(
-                    trial_id,
-                    {"error": f"Parameters {total_params:,} exceeded limit"}, 
-                    {}, 
-                    "pruned",
-                    pruning_info={"reason": "parameter_limit", "total_params": total_params}
-                )                
-                raise optuna.TrialPruned(f"Parameters {total_params:,} exceeded limit")
-            
-            # Calculate health metrics
-            health_metrics = self._calculate_trial_health_metrics(
-                history, model_builder.model, validation_data, 
-                training_time_minutes, total_params, trial
-            )
-            
-            # Update health info
-            self._update_trial_health(trial_id, health_metrics)
-            
             # Calculate objective value based on optimization mode and target
             objective_value = self._calculate_objective_value(
                 history=history,
                 model=model_builder.model,
-                validation_data=(x_val_split, y_val_split),
                 training_time_minutes=training_time_minutes,
-                total_params=total_params,
+                total_params=model_builder.model.count_params(),
                 trial=trial
             )
             
-            # Check minimum accuracy threshold
-            final_accuracy = history.history.get('val_accuracy', [0])[-1] if history.history.get('val_accuracy') else 0
-            if final_accuracy < self.config.min_accuracy_threshold:
-                logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} below accuracy threshold")
+            # Plot generation: Just call ModelBuilder.evaluate() when needed
+            should_generate_plots = self._should_generate_plots_for_trial(trial.number, objective_value)
+            
+            if should_generate_plots:
+                logger.debug(f"running _objective_function ... Generating plots for trial {trial.number}")
                 
-                # Complete trial with pruning due to accuracy threshold
-                self._complete_trial(
-                    trial_id,
-                    {"error": f"Accuracy {final_accuracy:.3f} below threshold"}, 
-                    {}, 
-                    "pruned",
-                    pruning_info={"reason": "accuracy_threshold", "final_accuracy": final_accuracy}
-                )                
-                raise optuna.TrialPruned(f"Accuracy {final_accuracy:.3f} below threshold")
-            
-            # Calculate final performance
-            performance = {
-                'final_accuracy': history.history.get('accuracy', [0])[-1],
-                'final_val_accuracy': history.history.get('val_accuracy', [0])[-1],
-                'final_loss': history.history.get('loss', [0])[-1],
-                'best_val_accuracy': max(history.history.get('val_accuracy', [0])),
-                'training_time_minutes': training_time_minutes,
-                'total_params': total_params
-            }
-            
-            # Convert training history to serializable format
-            training_history_dict = {
-                k: [float(v) for v in values] for k, values in history.history.items()
-            }
-            
-            # COMPLETE TRIAL TRACKING - NEW
-            self._complete_trial(trial_id, performance, training_history_dict, "completed")
+                # Create plot directory for this trial
+                if self.results_dir is None:
+                    logger.warning(f"running _objective_function ... Results directory not set, skipping plot generation for trial {trial.number}")
+                    return objective_value
+                trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number + 1}"
+                trial_plot_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Generate timestamp
+                run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+                
+                try:
+                    # Let ModelBuilder handle all the plot generation
+                    test_loss, test_accuracy = model_builder.evaluate(
+                        data=training_data,
+                        log_detailed_predictions=True,
+                        max_predictions_to_show=10,
+                        run_timestamp=run_timestamp,
+                        plot_dir=trial_plot_dir
+                    )
+                    
+                    logger.debug(f"running _objective_function ... Trial {trial.number} plots generated: "
+                                f"test_accuracy={test_accuracy:.4f}, plots_dir={trial_plot_dir}")
+                    
+                    # Store simple plot information
+                    self.trial_plot_data[trial.number] = {
+                        'objective_value': objective_value,
+                        'test_accuracy': test_accuracy,
+                        'test_loss': test_loss,
+                        'plot_dir': str(trial_plot_dir),
+                        'plots_generated': True
+                    }
+                    
+                    # Save the trained model alongside plots when plot_generation=ALL
+                    if self.config.plot_generation == PlotGenerationMode.ALL:
+                        try:
+                            # Save model to the same trial directory as the plots
+                            model_save_path = model_builder.save_model(
+                                test_accuracy=test_accuracy,
+                                run_timestamp=run_timestamp,
+                                run_name=None  # Don't use run_name here, we want it in trial directory
+                            )
+                            
+                            # Move the saved model to the trial directory
+                            import shutil
+                            from pathlib import Path
+                            
+                            saved_model_file = Path(model_save_path)
+                            trial_model_path = trial_plot_dir / saved_model_file.name
+                            
+                            if saved_model_file.exists():
+                                shutil.move(str(saved_model_file), str(trial_model_path))
+                                logger.debug(f"running _objective_function ... Moved model to trial directory: {trial_model_path}")
+                                
+                                # Update trial_plot_data to include the trial-specific model path
+                                self.trial_plot_data[trial.number]['model_path'] = str(trial_model_path)
+                            else:
+                                logger.warning(f"running _objective_function ... Saved model file not found: {model_save_path}")
+                            
+                        except Exception as model_save_error:
+                            logger.warning(f"running _objective_function ... Failed to save model for trial {trial.number}: {model_save_error}")
+                    
+                except Exception as e:
+                    logger.warning(f"running _objective_function ... Plot generation failed for trial {trial.number}: {e}")
+                    self.trial_plot_data[trial.number] = {
+                        'objective_value': objective_value,
+                        'plots_generated': False,
+                        'error': str(e)
+                    }
             
             # Log trial success
-            logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} completed: {self.config.objective.value}={objective_value:.4f}")
-            logger.debug(f"running ModelOptimizer._objective_function ... Trial stats: accuracy={final_accuracy:.3f}, params={total_params:,}, time={training_time_minutes:.1f}min")
+            final_accuracy = history.history.get('val_accuracy', [0])[-1] if history.history.get('val_accuracy') else 0
+            logger.debug(f"running ModelOptimizer._objective_function ... Trial {trial.number} completed: val_accuracy={final_accuracy:.4f}")
+            logger.debug(f"running ModelOptimizer._objective_function ... Trial stats: accuracy={final_accuracy:.3f}, params={model_builder.model.count_params():,}, time={training_time_minutes:.1f}min")
             
             return objective_value
             
-        except optuna.TrialPruned:
-            # Re-raise pruned trials
-            raise
         except Exception as e:
-            logger.warning(f"running ModelOptimizer._objective_function ... Trial {trial.number} failed: {e}")
-            logger.debug(f"running ModelOptimizer._objective_function ... Error details: {traceback.format_exc()}")
-            # Return worst possible value for failed trials
-            return -1000.0 if self._is_maximization_objective() else 1000.0
-    
+            logger.error(f"running ModelOptimizer._objective_function ... Trial {trial.number} failed: {str(e)}")
+            logger.error(f"running ModelOptimizer._objective_function ... Traceback: {traceback.format_exc()}")
+            raise
     
     def _suggest_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
         """
@@ -1362,15 +906,20 @@ class ModelOptimizer:
             Dictionary of suggested hyperparameters
         """
         if self.data_type == "text":
-            return self._suggest_lstm_hyperparameters(trial)
+            params = self._suggest_lstm_hyperparameters(trial)
         else:
-            return self._suggest_cnn_hyperparameters(trial)
+            params = self._suggest_cnn_hyperparameters(trial)
+        
+        if self.activation_override is not None:
+            params['activation'] = self.activation_override
+            logger.debug(f"running _suggest_hyperparameters ... Applied activation override: {self.activation_override}")
+        
+        return params
            
     def _calculate_objective_value(
         self,
         history: Any,
         model: Any,
-        validation_data: Tuple[Any, Any],
         training_time_minutes: float,
         total_params: int,
         trial: optuna.Trial
@@ -1378,14 +927,9 @@ class ModelOptimizer:
         """
         Calculate objective value based on optimization mode and target
         
-        Simplified approach:
-        - SIMPLE mode: Pure objective only (health for monitoring)
-        - HEALTH mode: Weighted combination using health_weight parameter
-        
         Args:
             history: Keras training history
             model: Trained model
-            validation_data: Validation data tuple (x, y)
             training_time_minutes: Training time in minutes
             total_params: Total model parameters
             trial: Optuna trial object
@@ -1393,189 +937,11 @@ class ModelOptimizer:
         Returns:
             Objective value
         """
-        # ALWAYS calculate health metrics for monitoring
-        health_metrics = self._calculate_trial_health_metrics(
-            history, model, validation_data, training_time_minutes, total_params, trial
-        )
+        # Simple implementation - just return validation accuracy for now
+        return history.history.get('val_accuracy', [0])[-1]
         
-        # Store health metrics for trial history
-        trial_health_data = {
-            'trial_number': trial.number,
-            'health_metrics': health_metrics,
-            'timestamp': datetime.now().isoformat()
-        }
-        self.trial_health_history.append(trial_health_data)
-        
-        if self.config.mode == OptimizationMode.SIMPLE:
-            # SIMPLE mode: Pure objectives only
-            objective_value = self._calculate_pure_objective_value(
-                history, model, validation_data, training_time_minutes, total_params, trial
-            )
-            
-            logger.debug(f"running _calculate_objective_value ... Trial {trial.number} (SIMPLE mode):")
-            logger.debug(f"running _calculate_objective_value ... - Pure objective: {objective_value:.4f}")
-            logger.debug(f"running _calculate_objective_value ... - Health (monitoring): {health_metrics.get('overall_health', 0.0):.4f}")
-            
-            trial_health_data['base_objective'] = objective_value
-            trial_health_data['final_objective'] = objective_value
-                        
-            return objective_value
-            
-        else:  # HEALTH mode
-            if OptimizationObjective.is_health_only(self.config.objective):
-                # Direct health optimization
-                objective_value = self._calculate_health_objective_value(health_metrics, trial)
-                
-                logger.debug(f"running _calculate_objective_value ... Trial {trial.number} (HEALTH mode - direct health):")
-                logger.debug(f"running _calculate_objective_value ... - Health objective: {objective_value:.4f}")
-                
-                trial_health_data['final_objective'] = objective_value
-                
-            else:
-                # Universal objectives with health weighting
-                base_objective = self._calculate_pure_objective_value(
-                    history, model, validation_data, training_time_minutes, total_params, trial
-                )
-                overall_health = health_metrics.get('overall_health', 0.0)
-                
-                # Simple weighted combination
-                objective_weight = 1.0 - self.config.health_weight
-                objective_value = (objective_weight * base_objective) + (self.config.health_weight * overall_health)
-                
-                logger.debug(f"running _calculate_objective_value ... Trial {trial.number} (HEALTH mode - weighted):")
-                logger.debug(f"running _calculate_objective_value ... - Base objective: {base_objective:.4f}")
-                logger.debug(f"running _calculate_objective_value ... - Health score: {overall_health:.4f}")
-                logger.debug(f"running _calculate_objective_value ... - Weights: {objective_weight:.1f} objective, {self.config.health_weight:.1f} health")
-                logger.debug(f"running _calculate_objective_value ... - Final weighted: {objective_value:.4f}")
-                
-                trial_health_data['base_objective'] = base_objective
-                trial_health_data['final_objective'] = objective_value
-                
-            return objective_value
-    
-    
-    def _calculate_pure_objective_value(
-        self,
-        history: Any,
-        model: Any,
-        validation_data: Tuple[Any, Any],
-        training_time_minutes: float,
-        total_params: int,
-        trial: optuna.Trial
-    ) -> float:
-        """
-        Calculate pure objective value without any health considerations
-        
-        Args:
-            history: Keras training history
-            model: Trained model
-            validation_data: Validation data tuple (x, y)
-            training_time_minutes: Training time in minutes
-            total_params: Total model parameters
-            trial: Optuna trial object
-            
-        Returns:
-            Pure objective value
-        """
-        if self.config.objective == OptimizationObjective.ACCURACY:
-            # Use final training accuracy
-            return history.history.get('accuracy', [0])[-1]
-            
-        elif self.config.objective == OptimizationObjective.VAL_ACCURACY:
-            # Use final validation accuracy
-            return history.history.get('val_accuracy', [0])[-1]
-            
-        elif self.config.objective == OptimizationObjective.TRAINING_TIME:
-            # Minimize training time (return negative for maximization)
-            return -training_time_minutes
-            
-        elif self.config.objective == OptimizationObjective.PARAMETER_EFFICIENCY:
-            # Maximize accuracy per parameter (accuracy/log(params))
-            accuracy = history.history.get('val_accuracy', [0])[-1]
-            efficiency = accuracy / (np.log10(max(total_params, 1)))
-            return efficiency
-            
-        elif self.config.objective == OptimizationObjective.MEMORY_EFFICIENCY:
-            # Maximize accuracy per MB of memory (rough estimate)
-            accuracy = history.history.get('val_accuracy', [0])[-1]
-            memory_mb = total_params * 4 / (1024 * 1024)  # 4 bytes per float32 parameter
-            return accuracy / max(memory_mb, 0.1)
-            
-        elif self.config.objective == OptimizationObjective.INFERENCE_SPEED:
-            # Measure inference time and maximize accuracy/time
-            x_val, y_val = validation_data
-            
-            # Time inference on small batch
-            sample_size = min(32, len(x_val))
-            sample_x = x_val[:sample_size]
-            
-            inference_times = []
-            for _ in range(3):  # Average over 3 runs
-                start_time = time.time()
-                model.predict(sample_x, verbose=0)
-                inference_time = time.time() - start_time
-                inference_times.append(inference_time)
-            
-            avg_inference_time = np.mean(inference_times)
-            accuracy = history.history.get('val_accuracy', [0])[-1]
-            
-            # Return accuracy per second (higher is better)
-            return accuracy / max(float(avg_inference_time), 0.001)
-        
-        else:
-            raise ValueError(f"Unknown pure objective: {self.config.objective}")
-
-    def _calculate_health_objective_value(
-        self,
-        health_metrics: Dict[str, Any],
-        trial: optuna.Trial
-    ) -> float:
-        """
-        Calculate objective value for health-only objectives
-        
-        Args:
-            health_metrics: Health metrics dictionary
-            trial: Optuna trial object
-            
-        Returns:
-            Health-based objective value
-        """
-        if self.config.objective == OptimizationObjective.OVERALL_HEALTH:
-            return health_metrics.get('overall_health', 0.0)
-            
-        elif self.config.objective == OptimizationObjective.NEURON_UTILIZATION:
-            return health_metrics.get('neuron_utilization', 0.0)
-            
-        elif self.config.objective == OptimizationObjective.TRAINING_STABILITY:
-            return health_metrics.get('training_stability', 0.0)
-            
-        elif self.config.objective == OptimizationObjective.GRADIENT_HEALTH:
-            return health_metrics.get('gradient_health', 0.0)
-        
-        else:
-            raise ValueError(f"Unknown health objective: {self.config.objective}")
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
     def _suggest_cnn_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """
-        Suggest hyperparameters for CNN image classification architecture
-        
-        ARCHITECTURAL CONSTRAINT IMPROVEMENTS:
-        1. Prevent spatial dimension over-reduction that causes negative dimension errors
-        2. Apply intelligent constraints based on input image size and layer depth
-        3. Ensure valid kernel/pool size combinations for deep networks
-        """
+        """Suggest hyperparameters for CNN image classification architecture"""
         logger.debug("running _suggest_cnn_hyperparameters ... Suggesting CNN hyperparameters")
         
         # Get input image dimensions for constraint calculations
@@ -1586,100 +952,9 @@ class ModelOptimizer:
         # Suggest number of conv layers first (this drives other constraints)
         num_layers_conv = trial.suggest_int('num_layers_conv', 1, 4)
         
-        # IMPROVEMENT: Calculate safe pool sizes based on input dimensions and layer depth
-        max_safe_pool_size = min(input_height, input_width) // (2 ** (num_layers_conv - 1))
-        safe_pool_sizes = [2]  # Always include 2x2 as safe option
-        if max_safe_pool_size >= 3:
-            safe_pool_sizes.append(3)
-        
-        logger.debug(f"running _suggest_cnn_hyperparameters ... Network depth: {num_layers_conv} layers")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... Max safe pool size: {max_safe_pool_size}")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... Available pool sizes: {safe_pool_sizes}")
-        
-        # Suggest kernel and pool sizes with architectural constraints
-        kernel_size = trial.suggest_categorical('kernel_size', [3, 5])
-        pool_size = trial.suggest_categorical('pool_size', safe_pool_sizes)
-        padding = trial.suggest_categorical('padding', ['same', 'valid'])
-        
-        # Convert to tuples
-        kernel_size = (kernel_size, kernel_size)
-        pool_size = (pool_size, pool_size)
-        
-        # IMPROVEMENT: Apply intelligent architectural constraints
-        constraints_applied = []
-        
-        # Constraint 1: Deep networks should use smaller kernels to preserve spatial information
-        if num_layers_conv >= 3 and kernel_size == 5:
-            kernel_size = (3, 3)
-            constraints_applied.append(f"Deep network ({num_layers_conv} layers): forced 3x3 kernels")
-        
-        # Constraint 2: 'valid' padding with large kernels and many layers is dangerous
-        if padding == 'valid' and kernel_size == 5 and num_layers_conv > 2:
-            kernel_size = (3, 3)
-            constraints_applied.append("Valid padding + large kernels + deep network: forced 3x3 kernels")
-        
-        # Constraint 3: 'valid' padding with many layers should use smaller pools
-        if padding == 'valid' and num_layers_conv >= 3 and pool_size == 3:
-            if 2 in safe_pool_sizes:
-                pool_size = (2, 2)
-                constraints_applied.append("Valid padding + deep network: forced 2x2 pooling")
-        
-        # Constraint 4: Very deep networks (4+ layers) should be conservative
-        if num_layers_conv >= 4:
-            kernel_size = (3, 3)
-            pool_size = (2, 2)
-            padding = 'same'
-            constraints_applied.append("Very deep network (4+ layers): forced conservative settings")
-        
-        # Constraint 5: Small input images (≤16x16) should use minimal pooling
-        if min(input_height, input_width) <= 16 and pool_size == 3:
-            pool_size = (2, 2)
-            constraints_applied.append("Small input image: forced 2x2 pooling")
-        
-        # Log applied constraints
-        if constraints_applied:
-            logger.debug(f"running _suggest_cnn_hyperparameters ... Applied architectural constraints:")
-            for constraint in constraints_applied:
-                logger.debug(f"running _suggest_cnn_hyperparameters ... - {constraint}")
-        
-        # IMPROVEMENT: Calculate expected spatial dimensions after all layers
-        expected_height, expected_width = input_height, input_width
-        for layer_idx in range(num_layers_conv):
-            # Calculate conv output size
-            if padding == 'same':
-                # 'same' padding preserves spatial dimensions
-                conv_height, conv_width = expected_height, expected_width
-            else:  # 'valid' padding
-                # 'valid' padding reduces dimensions by (kernel_size - 1)
-                conv_height = expected_height - (kernel_size[0] - 1)
-                conv_width = expected_width - (kernel_size[1] - 1)
-            
-            # Calculate pool output size
-            pool_height = conv_height // pool_size[0]
-            pool_width = conv_width // pool_size[1]
-            
-            logger.debug(f"running _suggest_cnn_hyperparameters ... Layer {layer_idx + 1}: {expected_height}x{expected_width} → conv({padding}) → {conv_height}x{conv_width} → pool({pool_size}) → {pool_height}x{pool_width}")
-            
-            expected_height, expected_width = pool_height, pool_width
-            
-            # SAFETY CHECK: Ensure we don't reduce to 0 or negative dimensions
-            if expected_height <= 0 or expected_width <= 0:
-                logger.warning(f"running _suggest_cnn_hyperparameters ... Architecture would create invalid dimensions at layer {layer_idx + 1}")
-                logger.warning(f"running _suggest_cnn_hyperparameters ... Falling back to conservative settings")
-                # Emergency fallback to safe settings
-                kernel_size = (3, 3)
-                pool_size = (2, 2)
-                padding = 'same'
-                num_layers_conv = min(num_layers_conv, 2)  # Reduce depth
-                break
-        
-        logger.debug(f"running _suggest_cnn_hyperparameters ... Final spatial dimensions: {expected_height}x{expected_width}")
-        
-        # Call suggest_categorical ONCE and store the result for gradient clipping
-        enable_gradient_clipping = trial.suggest_categorical('enable_gradient_clipping', [True, False])
-        
-        # Suggest other parameters normally
+        # Suggest other parameters
         filters_per_conv_layer = trial.suggest_categorical('filters_per_conv_layer', [16, 32, 64, 128, 256])
+        kernel_size = trial.suggest_categorical('kernel_size', [3, 5])
         activation = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'swish'])
         kernel_initializer = trial.suggest_categorical('kernel_initializer', ['he_normal', 'glorot_uniform'])
         batch_normalization = trial.suggest_categorical('batch_normalization', [True, False])
@@ -1688,80 +963,36 @@ class ModelOptimizer:
         # Hidden layer parameters
         num_layers_hidden = trial.suggest_int('num_layers_hidden', 1, 4)
         first_hidden_layer_nodes = trial.suggest_categorical('first_hidden_layer_nodes', [64, 128, 256, 512, 1024])
-        subsequent_hidden_layer_nodes_decrease = trial.suggest_float('subsequent_hidden_layer_nodes_decrease', 0.25, 0.75)
-        hidden_layer_activation_algo = trial.suggest_categorical('hidden_layer_activation_algo', ['relu', 'leaky_relu', 'sigmoid'])
-        first_hidden_layer_dropout = trial.suggest_float('first_hidden_layer_dropout', 0.2, 0.7)
-        subsequent_hidden_layer_dropout_decrease = trial.suggest_float('subsequent_hidden_layer_dropout_decrease', 0.1, 0.3)
         
-        # Ensure epochs respects minimum requirement
-        min_epochs = self.config.min_epochs_per_trial
-        max_epochs = self.config.max_epochs_per_trial
-        if min_epochs > max_epochs:
-            logger.warning(f"running _suggest_cnn_hyperparameters ... min_epochs_per_trial ({self.config.min_epochs_per_trial}) > max_epochs_per_trial ({self.config.max_epochs_per_trial}), using min as both min and max")
-            min_epochs = max_epochs = self.config.min_epochs_per_trial
-        epochs = trial.suggest_int('epochs', min_epochs, max_epochs)
-        logger.debug(f"running _suggest_cnn_hyperparameters ... Epochs range: {min_epochs}-{max_epochs}, suggested: {epochs}")
-
-        # Remaining training parameters
+        # Training parameters
+        epochs = trial.suggest_int('epochs', self.config.min_epochs_per_trial, self.config.max_epochs_per_trial)
         optimizer = trial.suggest_categorical('optimizer', ['adam', 'rmsprop', 'sgd'])
-        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-        gradient_clip_norm = trial.suggest_float('gradient_clip_norm', 0.5, 2.0) if enable_gradient_clipping else 1.0
-        
-        # Log final suggested parameters
-        logger.debug(f"running _suggest_cnn_hyperparameters ... FINAL CNN configuration:")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - conv_layers: {num_layers_conv}")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - filters: {filters_per_conv_layer}")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - kernel_size: {kernel_size} (suggested: {kernel_size})")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - pool_size: {pool_size} (suggested: {pool_size})")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - padding: {padding}")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - expected_final_size: {expected_height}x{expected_width}")
-        logger.debug(f"running _suggest_cnn_hyperparameters ... - constraints_applied: {len(constraints_applied)}")
         
         return {
             # Architecture selection
             'architecture_type': 'cnn',
             'use_global_pooling': use_global_pooling,
             
-            # Convolutional layers (with applied constraints)
+            # Convolutional layers
             'num_layers_conv': num_layers_conv,
             'filters_per_conv_layer': filters_per_conv_layer,
-            'kernel_size': kernel_size,
-            'pool_size': pool_size,
+            'kernel_size': (kernel_size, kernel_size),
             'activation': activation,
             'kernel_initializer': kernel_initializer,
             'batch_normalization': batch_normalization,
-            'padding': padding,
+            'padding': 'same',
             
             # Hidden layers
             'num_layers_hidden': num_layers_hidden,
             'first_hidden_layer_nodes': first_hidden_layer_nodes,
-            'subsequent_hidden_layer_nodes_decrease': subsequent_hidden_layer_nodes_decrease,
-            'hidden_layer_activation_algo': hidden_layer_activation_algo,
-            'first_hidden_layer_dropout': first_hidden_layer_dropout,
-            'subsequent_hidden_layer_dropout_decrease': subsequent_hidden_layer_dropout_decrease,
             
             # Training parameters
             'epochs': epochs,
             'optimizer': optimizer,
-            'learning_rate': learning_rate,
             'loss': 'categorical_crossentropy',
             'metrics': ['accuracy'],
             
-            # Regularization
-            'enable_gradient_clipping': enable_gradient_clipping,
-            'gradient_clip_norm': gradient_clip_norm,
-                        
-            # Disable real-time monitoring for optimization (performance)
-            'enable_realtime_plots': False,
-            'enable_gradient_flow_monitoring': False,
-            'enable_realtime_weights_bias': False,
-            'show_confusion_matrix': False,
-            'show_training_history': False,
-            'show_gradient_flow': False,
-            'show_weights_bias_analysis': False,
-            'show_activation_maps': False
         }
-    
     
     def _suggest_lstm_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
         """Suggest hyperparameters for LSTM text classification architecture"""
@@ -1772,47 +1003,15 @@ class ModelOptimizer:
         lstm_units = trial.suggest_categorical('lstm_units', [32, 64, 128, 256])
         vocab_size = trial.suggest_categorical('vocab_size', [5000, 10000, 20000])
         use_bidirectional = trial.suggest_categorical('use_bidirectional', [True, False])
-        text_dropout = trial.suggest_float('text_dropout', 0.2, 0.6)
         
         # Hidden layer parameters
         num_layers_hidden = trial.suggest_int('num_layers_hidden', 1, 3)
         first_hidden_layer_nodes = trial.suggest_categorical('first_hidden_layer_nodes', [64, 128, 256, 512])
-        subsequent_hidden_layer_nodes_decrease = trial.suggest_float('subsequent_hidden_layer_nodes_decrease', 0.25, 0.75)
-        hidden_layer_activation_algo = trial.suggest_categorical('hidden_layer_activation_algo', ['relu', 'leaky_relu', 'tanh'])
-        first_hidden_layer_dropout = trial.suggest_float('first_hidden_layer_dropout', 0.2, 0.6)
-        subsequent_hidden_layer_dropout_decrease = trial.suggest_float('subsequent_hidden_layer_dropout_decrease', 0.1, 0.3)
         
-        # Training parameters with epoch constraint logic
-        min_epochs = max(5, self.config.min_epochs_per_trial)  # Ensure at least 5, but respect config minimum
-        max_epochs = min(25, self.config.max_epochs_per_trial)  # Respect max constraint (25 for text vs 30 for images)
-        
-        # Ensure we have a valid range
-        if min_epochs > max_epochs:
-            logger.warning(f"running _suggest_lstm_hyperparameters ... min_epochs_per_trial ({self.config.min_epochs_per_trial}) > max_epochs_per_trial ({self.config.max_epochs_per_trial}), using min as both min and max")
-            min_epochs = max_epochs = self.config.min_epochs_per_trial
-        
-        epochs = trial.suggest_int('epochs', min_epochs, max_epochs)
+        # Training parameters
+        epochs = trial.suggest_int('epochs', self.config.min_epochs_per_trial, self.config.max_epochs_per_trial)
         optimizer = trial.suggest_categorical('optimizer', ['adam', 'rmsprop'])
-        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
         
-        # Regularization parameters
-        enable_gradient_clipping = trial.suggest_categorical('enable_gradient_clipping', [True, False])
-        gradient_clip_norm = trial.suggest_float('gradient_clip_norm', 0.5, 2.0) if enable_gradient_clipping else 1.0
-        
-        # Fixed parameters
-        loss = 'categorical_crossentropy'
-        metrics = ['accuracy']
-        
-        # Log suggested parameters
-        logger.debug(f"running _suggest_lstm_hyperparameters ... Suggested LSTM params:")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - embedding_dim: {embedding_dim}")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - lstm_units: {lstm_units}")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - bidirectional: {use_bidirectional}")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - vocab_size: {vocab_size}")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - text_dropout: {text_dropout}")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - gradient_clipping: {enable_gradient_clipping}")
-        logger.debug(f"running _suggest_lstm_hyperparameters ... - epochs: {epochs} (range: {min_epochs}-{max_epochs})")
-
         return {
             # Architecture selection
             'architecture_type': 'text',
@@ -1822,249 +1021,16 @@ class ModelOptimizer:
             'lstm_units': lstm_units,
             'vocab_size': vocab_size,
             'use_bidirectional': use_bidirectional,
-            'text_dropout': text_dropout,
             
             # Hidden layers
             'num_layers_hidden': num_layers_hidden,
             'first_hidden_layer_nodes': first_hidden_layer_nodes,
-            'subsequent_hidden_layer_nodes_decrease': subsequent_hidden_layer_nodes_decrease,
-            'hidden_layer_activation_algo': hidden_layer_activation_algo,
-            'first_hidden_layer_dropout': first_hidden_layer_dropout,
-            'subsequent_hidden_layer_dropout_decrease': subsequent_hidden_layer_dropout_decrease,
             
             # Training parameters
             'epochs': epochs,
             'optimizer': optimizer,
-            'learning_rate': learning_rate,
-            'loss': loss,
-            'metrics': metrics,
-            
-            # Regularization
-            'enable_gradient_clipping': enable_gradient_clipping,
-            'gradient_clip_norm': gradient_clip_norm,
-
-            # Disable real-time monitoring for optimization (performance)
-            'enable_realtime_plots': False,
-            'enable_gradient_flow_monitoring': False,
-            'enable_realtime_weights_bias': False,
-            'show_confusion_matrix': False,
-            'show_training_history': False,
-            'show_gradient_flow': False,
-            'show_weights_bias_analysis': False,
-            'show_activation_maps': False
-        }
-    
-    
-    def _create_model_config(self, params: Dict[str, Any]) -> ModelConfig:
-        """
-        Create ModelConfig from suggested parameters
-        
-        Args:
-            params: Dictionary of hyperparameters
-            
-        Returns:
-            ModelConfig object with suggested parameters
-        """
-        logger.debug(f"running _create_model_config ... Creating ModelConfig from params: {params}")
-        
-        # Create base config
-        config = ModelConfig()
-        
-        # Apply all suggested parameters
-        for key, value in params.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
-                logger.debug(f"running _create_model_config ... Set {key} = {value} (type: {type(value)})")
-            else:
-                logger.warning(f"running _create_model_config ... ModelConfig has no attribute '{key}', skipping")
-        
-        logger.debug(f"running _create_model_config ... ModelConfig created successfully")
-        return config
-
-
-
-    def _save_trial_plots_after_training(self, trial: optuna.Trial, model: Any, run_timestamp: str, training_history: Any = None) -> None:
-        """
-        Save plots for the current trial to its designated subdirectory
-        
-        Args:
-            trial: Optuna trial object  
-            model: The trained Keras model
-            run_timestamp: Timestamp for consistent naming
-            training_history: The training history from model.fit() (CRITICAL: pass this from caller)
-        """
-        from utils.logger import logger
-        from pathlib import Path
-        
-        logger.debug(f"running _save_trial_plots_after_training ... Saving plots for trial {trial.number + 1}")
-        
-        if self.results_dir is None:
-            logger.warning("running _save_trial_plots_after_training ... No results directory available, skipping plot save")
-            return
-        
-        # Determine the trial-specific plot directory
-        current_file = Path(__file__)
-        project_root = current_file.parent.parent  # Go up 2 levels to project root
-        trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number + 1}"
-        
-        # Ensure trial directory exists
-        trial_plot_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"running _save_trial_plots_after_training ... Trial plot directory: {trial_plot_dir}")
-        
-        try:
-            # Create a temporary ModelBuilder to use its evaluate method for plot generation
-            # We need to recreate the model config from the trial parameters
-            trial_params = trial.params.copy()
-            model_config = self._create_model_config(trial_params)
-            
-            # Create ModelBuilder instance
-            temp_model_builder = ModelBuilder(self.dataset_config, model_config)
-            temp_model_builder.model = model  # Assign the trained model
-            
-            # CRITICAL FIX: Assign the training history if provided
-            if training_history is not None:
-                temp_model_builder.training_history = training_history
-                logger.debug(f"running _save_trial_plots_after_training ... Training history assigned to temp ModelBuilder")
-            else:
-                logger.warning(f"running _save_trial_plots_after_training ... No training history provided, some plots may be unavailable")
-                temp_model_builder.training_history = None
-            
-            # Use the existing ModelBuilder evaluate method to generate all plots
-            # This will create: confusion matrix, training history, training animation, etc.
-            test_loss, test_accuracy = temp_model_builder.evaluate(
-                data=self.data,
-                log_detailed_predictions=True,  # Enable detailed analysis
-                max_predictions_to_show=10,     # Limit for trial plots
-                run_timestamp=run_timestamp,
-                plot_dir=trial_plot_dir         # This directs all plots to trial directory
-            )
-            
-            logger.debug(f"running _save_trial_plots_after_training ... Trial {trial.number + 1} plots saved successfully")
-            logger.debug(f"running _save_trial_plots_after_training ... Trial performance: accuracy={test_accuracy:.4f}, loss={test_loss:.4f}")
-            
-        except Exception as e:
-            logger.warning(f"running _save_trial_plots_after_training ... Failed to save plots for trial {trial.number + 1}: {e}")
-            logger.debug(f"running _save_trial_plots_after_training ... Error details: {traceback.format_exc()}")
-    
-    
-    
-    
-    
-    
-    def _calculate_trial_health_metrics(
-        self,
-        history: Any,
-        model: Any,
-        validation_data: Tuple[Any, Any],
-        training_time_minutes: float,
-        total_params: int,
-        trial: optuna.Trial
-    ) -> Dict[str, Any]:
-        """
-        Calculate comprehensive health metrics for monitoring and API reporting
-        
-        IMPROVEMENT: Enhanced error handling and model state validation
-        
-        Args:
-            history: Keras training history
-            model: Trained model
-            validation_data: Validation data tuple (x, y)
-            training_time_minutes: Training time in minutes
-            total_params: Total model parameters
-            trial: Optuna trial object
-            
-        Returns:
-            Dictionary with health metrics
-        """
-        try:
-            # Prepare sample data for health analysis
-            x_val, y_val = validation_data
-            sample_size = min(self.config.health_analysis_sample_size, len(x_val))
-            sample_data = x_val[:sample_size] if len(x_val) >= sample_size else x_val
-            
-            # IMPROVEMENT: Validate model state before health analysis
-            if model is None:
-                logger.warning(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number}: Model is None")
-                return self._get_default_health_metrics_with_error("Model is None")
-            
-            # IMPROVEMENT: Ensure model is callable and built
-            try:
-                # Test that model can process data
-                test_input = sample_data[:1] if len(sample_data) > 0 else x_val[:1]
-                test_output = model(test_input)
-                logger.debug(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number}: Model validation successful, output shape: {test_output.shape}")
-            except Exception as model_test_error:
-                logger.warning(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number}: Model validation failed: {model_test_error}")
-                return self._get_default_health_metrics_with_error(f"Model validation failed: {model_test_error}")
-            
-            # IMPROVEMENT: Validate training history
-            if history is None or not hasattr(history, 'history'):
-                logger.warning(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number}: Invalid training history")
-                return self._get_default_health_metrics_with_error("Invalid training history")
-            
-            # Calculate comprehensive health metrics using shared HealthAnalyzer
-            health_metrics = self.health_analyzer.calculate_comprehensive_health(
-                model=model,
-                history=history,
-                sample_data=sample_data,
-                training_time_minutes=training_time_minutes,
-                total_params=total_params
-            )
-            
-            # IMPROVEMENT: Validate health metrics result
-            if not isinstance(health_metrics, dict) or 'overall_health' not in health_metrics:
-                logger.warning(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number}: Invalid health metrics returned")
-                return self._get_default_health_metrics_with_error("Invalid health metrics format")
-            
-            # Log health summary
-            overall_health = health_metrics.get('overall_health', 0.0)
-            logger.debug(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number} health: {overall_health:.3f}")
-            
-            # Track best trial health for reporting
-            if (self.best_trial_health is None or 
-                overall_health > self.best_trial_health.get('overall_health', 0.0)):
-                self.best_trial_health = health_metrics.copy()
-                self.best_trial_health['trial_number'] = trial.number
-                logger.debug(f"running ModelOptimizer._calculate_trial_health_metrics ... Trial {trial.number}: New best health score: {overall_health:.3f}")
-            
-            return health_metrics
-            
-        except Exception as e:
-            logger.warning(f"running ModelOptimizer._calculate_trial_health_metrics ... Health calculation failed for trial {trial.number}: {e}")
-            logger.debug(f"running ModelOptimizer._calculate_trial_health_metrics ... Health calculation error traceback: {traceback.format_exc()}")
-            # Return default health metrics on error
-            return self._get_default_health_metrics_with_error(str(e))
-
-    def _get_default_health_metrics_with_error(self, error_message: str) -> Dict[str, Any]:
-        """
-        IMPROVEMENT: Enhanced default health metrics with error context
-        
-        Args:
-            error_message: Specific error message for debugging
-            
-        Returns:
-            Dictionary with default health metrics and error information
-        """
-        return {
-            'overall_health': 0.5,
-            'neuron_utilization': 0.5,
-            'parameter_efficiency': 0.5,
-            'training_stability': 0.5,
-            'gradient_health': 0.5,
-            'convergence_quality': 0.5,
-            'accuracy_consistency': 0.5,
-            'health_breakdown': {
-                'neuron_utilization': {'score': 0.5, 'weight': 0.25, 'status': 'error'},
-                'parameter_efficiency': {'score': 0.5, 'weight': 0.15, 'status': 'error'},
-                'training_stability': {'score': 0.5, 'weight': 0.20, 'status': 'error'},
-                'gradient_health': {'score': 0.5, 'weight': 0.15, 'status': 'error'},
-                'convergence_quality': {'score': 0.5, 'weight': 0.15, 'status': 'error'},
-                'accuracy_consistency': {'score': 0.5, 'weight': 0.10, 'status': 'error'}
-            },
-            'recommendations': [f"Health analysis failed: {error_message}"],
-            'analysis_mode': 'error',
-            'error': error_message,
-            'error_timestamp': datetime.now().isoformat()
+            'loss': 'categorical_crossentropy',
+            'metrics': ['accuracy']
         }
     
     def _compile_results(self) -> OptimizationResult:
@@ -2092,7 +1058,6 @@ class ModelOptimizer:
                 parameter_importance={},
                 health_history=self.trial_health_history,
                 best_trial_health=self.best_trial_health,
-                average_health_metrics=self._calculate_average_health_metrics(),
                 dataset_name=self.dataset_name,
                 dataset_config=self.dataset_config,
                 optimization_config=self.config,
@@ -2104,9 +1069,6 @@ class ModelOptimizer:
             importance = optuna.importance.get_param_importances(self.study)
         except:
             importance = {}
-        
-        # Calculate average health metrics
-        average_health = self._calculate_average_health_metrics()
         
         return OptimizationResult(
             best_value=self.study.best_value,
@@ -2120,47 +1082,14 @@ class ModelOptimizer:
             parameter_importance=importance,
             health_history=self.trial_health_history,
             best_trial_health=self.best_trial_health,
-            average_health_metrics=average_health,
             dataset_name=self.dataset_name,
             dataset_config=self.dataset_config,
             optimization_config=self.config,
             results_dir=self.results_dir
         )
     
-    def _calculate_average_health_metrics(self) -> Optional[Dict[str, float]]:
-        """Calculate average health metrics across all trials"""
-        if not self.trial_health_history:
-            return None
-        
-        # Collect all health metrics
-        health_keys = set()
-        for trial_data in self.trial_health_history:
-            health_metrics = trial_data.get('health_metrics', {})
-            if isinstance(health_metrics, dict):
-                health_keys.update(health_metrics.keys())
-        
-        # Calculate averages
-        averages = {}
-        for key in health_keys:
-            if key == 'error':  # Skip error entries
-                continue
-            values = []
-            for trial_data in self.trial_health_history:
-                health_metrics = trial_data.get('health_metrics', {})
-                if key in health_metrics and isinstance(health_metrics[key], (int, float)):
-                    values.append(health_metrics[key])
-            
-            if values:
-                averages[key] = np.mean(values)
-        
-        return averages if averages else None
-    
     def _save_results(self, results: OptimizationResult) -> None:
-        """
-        Save comprehensive optimization results to disk
-        
-        Enhanced to include health monitoring data for API/visualization.
-        """       
+        """Save optimization results to disk"""       
         if self.results_dir is None:
             logger.warning("running ModelOptimizer._save_results ... No results directory available, skipping save")
             return
@@ -2168,53 +1097,9 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer._save_results ... Saving optimization results to {self.results_dir}")
         
         try:
-            # 1. Save complete optimization summary as JSON (machine-readable)
-            summary_data = {
-                "optimization_metadata": {
-                    "dataset_name": results.dataset_name,
-                    "optimization_mode": results.optimization_mode,
-                    "optimization_objective": results.optimization_config.objective.value if results.optimization_config else "unknown",
-                    "health_weight": results.health_weight,
-                    "total_trials": results.total_trials,
-                    "successful_trials": results.successful_trials,
-                    "optimization_time_hours": results.optimization_time_hours,
-                    "timestamp": datetime.now().isoformat()
-                },
-                "best_results": {
-                    "best_value": results.best_value,
-                    "best_params": results.best_params,
-                    "best_trial_health": results.best_trial_health
-                },
-                "analysis": {
-                    "parameter_importance": results.parameter_importance,
-                    "objective_history": results.objective_history,
-                    "average_health_metrics": results.average_health_metrics
-                },
-                "health_monitoring": {
-                    "trial_health_history": results.health_history,
-                    "health_analysis_enabled": True,
-                    "health_weighting_applied": results.optimization_mode == "health" and results.health_weight > 0
-                },
-                "configuration": {
-                    "mode": results.optimization_mode,
-                    "health_weight": results.health_weight,
-                    "n_trials": results.optimization_config.n_trials if results.optimization_config else None,
-                    "max_epochs_per_trial": results.optimization_config.max_epochs_per_trial if results.optimization_config else None,
-                    "max_training_time_minutes": results.optimization_config.max_training_time_minutes if results.optimization_config else None,
-                    "optimization_objective": results.optimization_config.objective.value if results.optimization_config else None
-                }
-            }
-            
-            summary_file = self.results_dir / "optimization_summary.json"
-            with open(summary_file, 'w') as f:
-                json.dump(summary_data, f, indent=2)
-            logger.debug(f"running ModelOptimizer._save_results ... Saved optimization summary to {summary_file}")
-            
-            # 2. Save best hyperparameters as YAML (human-readable, copy-paste ready)
+            # Save best hyperparameters as YAML (human-readable, copy-paste ready)
             yaml_file = self.results_dir / "best_hyperparameters.yaml"
             yaml_data = {
-                "# Best hyperparameters found by optimization": None,
-                "# Copy these values for reproducing the best model": None,
                 "dataset": results.dataset_name,
                 "optimization_mode": results.optimization_mode,
                 "objective": results.optimization_config.objective.value if results.optimization_config else "unknown",
@@ -2223,349 +1108,123 @@ class ModelOptimizer:
                 "hyperparameters": results.best_params
             }
             
-            if results.best_trial_health:
-                yaml_data["best_trial_health_score"] = results.best_trial_health.get('overall_health', 0.0)
-            
             with open(yaml_file, 'w') as f:
                 yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
             logger.debug(f"running ModelOptimizer._save_results ... Saved best hyperparameters to {yaml_file}")
             
-            # 3. Save parameter importance (for analysis)
-            if results.parameter_importance:
-                importance_file = self.results_dir / "parameter_importance.json"
-                with open(importance_file, 'w') as f:
-                    json.dump(results.parameter_importance, f, indent=2)
-                logger.debug(f"running ModelOptimizer._save_results ... Saved parameter importance to {importance_file}")
-            
-            # 4. Save health monitoring data
-            if results.health_history:
-                health_file = self.results_dir / "health_monitoring.json"
-                health_data = {
-                    "trial_health_history": results.health_history,
-                    "best_trial_health": results.best_trial_health,
-                    "average_health_metrics": results.average_health_metrics,
-                    "optimization_mode": results.optimization_mode,
-                    "health_weight": results.health_weight,
-                    "health_weighting_applied": results.optimization_mode == "health" and results.health_weight > 0
-                }
-                with open(health_file, 'w') as f:
-                    json.dump(health_data, f, indent=2)
-                logger.debug(f"running ModelOptimizer._save_results ... Saved health monitoring data to {health_file}")
-            
-            # 5. Save trial history as CSV (for detailed analysis)
-            if self.study is not None:
-                csv_file = self.results_dir / "trial_history.csv"
-                with open(csv_file, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    
-                    # Write header (including health metrics)
-                    header = ['trial_number', 'objective_value', 'state', 'duration_seconds', 'overall_health']
-                    first_trial = None
-                    if self.study.trials:
-                        # Add parameter columns based on first completed trial
-                        first_trial = next((t for t in self.study.trials if t.params), None)
-                        if first_trial:
-                            header.extend(sorted(first_trial.params.keys()))
-                    writer.writerow(header)
-                    
-                    # Write trial data (including health data)
-                    for trial in self.study.trials:
-                        # Find corresponding health data
-                        trial_health = None
-                        for health_data in self.trial_health_history:
-                            if health_data.get('trial_number') == trial.number:
-                                trial_health = health_data.get('health_metrics', {})
-                                break
-                        
-                        overall_health = trial_health.get('overall_health', 'N/A') if trial_health else 'N/A'
-                        
-                        row = [
-                            trial.number,
-                            trial.value if trial.value is not None else 'Failed',
-                            trial.state.name,
-                            (trial.duration.total_seconds() if trial.duration else 0),
-                            overall_health
-                        ]
-                        # Add parameter values
-                        if first_trial:
-                            for param_name in sorted(first_trial.params.keys()):
-                                row.append(trial.params.get(param_name, 'N/A'))
-                        writer.writerow(row)
-                
-                logger.debug(f"running ModelOptimizer._save_results ... Saved trial history to {csv_file}")
-            
-            # 6. Create enhanced HTML report (visual summary with health data)
-            html_file = self.results_dir / "optimization_report.html"
-            html_content = self._generate_html_report(results)
-            with open(html_file, 'w') as f:
-                f.write(html_content)
-            
-            # Update results object with report path
-            results.optimization_report_path = str(html_file)
-            logger.debug(f"running ModelOptimizer._save_results ... Saved HTML report to {html_file}")
-            
-            # 7. Save a quick README for users
-            readme_file = self.results_dir / "README.md"
-            readme_content = f"""# Optimization Results for {results.dataset_name}
-
-## Quick Summary
-- **Optimization Mode**: {results.optimization_mode}
-- **Best {results.optimization_config.objective.value if results.optimization_config else 'unknown'}**: {results.best_value:.4f}
-- **Health Weight**: {results.health_weight} ({(1-results.health_weight)*100:.0f}% objective, {results.health_weight*100:.0f}% health)
-- **Successful Trials**: {results.successful_trials}/{results.total_trials}
-- **Optimization Time**: {results.optimization_time_hours:.2f} hours
-
-## Health Monitoring
-- **Health Analysis**: Always enabled for monitoring and API reporting
-- **Health Weighting**: {'Applied' if results.optimization_mode == 'health' and results.health_weight > 0 else 'Not applied'}
-- **Best Trial Health Score**: {results.best_trial_health.get('overall_health', 'N/A') if results.best_trial_health else 'N/A'}
-
-## Files in this directory:
-- `optimization_summary.json`: Complete machine-readable results including health data
-- `best_hyperparameters.yaml`: Copy-paste ready hyperparameters
-- `optimization_report.html`: Visual summary (open in browser)
-- `trial_history.csv`: Detailed trial-by-trial results with health metrics
-- `parameter_importance.json`: Which hyperparameters matter most
-- `health_monitoring.json`: Comprehensive health analysis data for API/visualization
-
-## To reproduce the best model:
-```python
-from model_builder import create_and_train_model
-
-# Load the best hyperparameters and train
-result = create_and_train_model(
-    dataset_name='{results.dataset_name}',
-    # Copy parameters from best_hyperparameters.yaml
-)
-```
-
-## Usage Examples
-```bash
-# Pure accuracy optimization (health monitoring only)
-python optimizer.py dataset={results.dataset_name} mode=simple optimize_for=val_accuracy trials=20
-
-# Health-weighted accuracy with default 30% health weight
-python optimizer.py dataset={results.dataset_name} mode=health optimize_for=val_accuracy trials=20
-
-# Balanced accuracy and health (50/50)
-python optimizer.py dataset={results.dataset_name} mode=health optimize_for=val_accuracy health_weight=0.5 trials=20
-
-# Strong health bias (20% objective, 80% health)
-python optimizer.py dataset={results.dataset_name} mode=health optimize_for=val_accuracy health_weight=0.8 trials=20
-
-# Direct health optimization
-python optimizer.py dataset={results.dataset_name} mode=health optimize_for=overall_health trials=20
-```
-"""
-            with open(readme_file, 'w') as f:
-                f.write(readme_content)
-            logger.debug(f"running ModelOptimizer._save_results ... Saved README to {readme_file}")
-            
-            logger.debug(f"running ModelOptimizer._save_results ... Successfully saved all optimization results")
+            logger.debug(f"running ModelOptimizer._save_results ... Successfully saved optimization results")
             
         except Exception as e:
             logger.error(f"running ModelOptimizer._save_results ... Failed to save optimization results: {e}")
-            # Don't raise exception - optimization completed successfully, saving is just a bonus
 
-
-    def _generate_html_report(self, results: OptimizationResult) -> str:
-        """Generate enhanced HTML report with health monitoring data"""
-        
-        # Format parameter importance for display
-        importance_html = ""
-        if results.parameter_importance:
-            importance_items = sorted(results.parameter_importance.items(), key=lambda x: x[1], reverse=True)[:10]
-            for param, importance in importance_items:
-                importance_html += f"<li><strong>{param}</strong>: {importance:.3f}</li>\n"
-        else:
-            importance_html = "<li>Parameter importance not calculated</li>"
-        
-        # Format best parameters for display
-        params_html = ""
-        for key, value in sorted(results.best_params.items()):
-            params_html += f"<li><strong>{key}</strong>: {value}</li>\n"
-        
-        # Format health metrics for display
-        health_html = ""
-        if results.best_trial_health:
-            health_metrics = results.best_trial_health
-            health_html = f"""
-            <p><strong>Overall Health Score:</strong> {health_metrics.get('overall_health', 'N/A'):.3f}</p>
-            <ul>
-                <li><strong>Neuron Utilization:</strong> {health_metrics.get('neuron_utilization', 'N/A'):.3f}</li>
-                <li><strong>Parameter Efficiency:</strong> {health_metrics.get('parameter_efficiency', 'N/A'):.3f}</li>
-                <li><strong>Training Stability:</strong> {health_metrics.get('training_stability', 'N/A'):.3f}</li>
-                <li><strong>Gradient Health:</strong> {health_metrics.get('gradient_health', 'N/A'):.3f}</li>
-                <li><strong>Convergence Quality:</strong> {health_metrics.get('convergence_quality', 'N/A'):.3f}</li>
-                <li><strong>Accuracy Consistency:</strong> {health_metrics.get('accuracy_consistency', 'N/A'):.3f}</li>
-            </ul>
-            """
-        else:
-            health_html = "<p>Health metrics not available</p>"
-        
-        # Format average health metrics
-        avg_health_html = ""
-        if results.average_health_metrics:
-            avg_health_html = "<h3>Average Health Metrics Across All Trials</h3><ul>"
-            for metric, value in sorted(results.average_health_metrics.items()):
-                avg_health_html += f"<li><strong>{metric.replace('_', ' ').title()}:</strong> {value:.3f}</li>\n"
-            avg_health_html += "</ul>"
-        
-        # Format weighting information
-        weighting_html = ""
-        if results.optimization_mode == "health" and results.health_weight > 0:
-            obj_weight = 1.0 - results.health_weight
-            weighting_html = f"""
-            <div class="weighting-info">
-                <h3>Health Weighting Configuration</h3>
-                <p><strong>Objective Weight:</strong> {obj_weight:.1%}</p>
-                <p><strong>Health Weight:</strong> {results.health_weight:.1%}</p>
-                <div class="weight-bar">
-                    <div class="obj-portion" style="width: {obj_weight*100:.0f}%; background-color: #2196F3;">Objective ({obj_weight:.1%})</div>
-                    <div class="health-portion" style="width: {results.health_weight*100:.0f}%; background-color: #4CAF50;">Health ({results.health_weight:.1%})</div>
-                </div>
-            </div>
-            """
-        
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Optimization Results - {results.dataset_name}</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 40px; }}
-        .header {{ background-color: #f0f0f0; padding: 20px; border-radius: 5px; }}
-        .section {{ margin: 20px 0; }}
-        .metric {{ font-size: 24px; color: #2e7d32; font-weight: bold; }}
-        .mode-badge {{ 
-            display: inline-block; 
-            padding: 5px 10px; 
-            border-radius: 15px; 
-            color: white; 
-            font-weight: bold;
-            background-color: {'#2196F3' if results.optimization_mode == 'simple' else '#4CAF50'};
-        }}
-        ul {{ list-style-type: none; padding: 0; }}
-        li {{ margin: 5px 0; padding: 5px; background-color: #f9f9f9; }}
-        .health-section {{ background-color: #e8f5e8; padding: 15px; border-radius: 5px; }}
-        .weighting-info {{ background-color: #f0f8ff; padding: 15px; border-radius: 5px; }}
-        .weight-bar {{ 
-            display: flex; 
-            height: 30px; 
-            border-radius: 15px; 
-            overflow: hidden; 
-            margin-top: 10px;
-        }}
-        .obj-portion, .health-portion {{ 
-            display: flex; 
-            align-items: center; 
-            justify-content: center; 
-            color: white; 
-            font-weight: bold;
-            font-size: 12px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Hyperparameter Optimization Results</h1>
-        <h2>Dataset: {results.dataset_name}</h2>
-        <span class="mode-badge">{results.optimization_mode.upper()} MODE</span>
-        <p>Optimization completed on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    </div>
-    
-    <div class="section">
-        <h3>Performance Summary</h3>
-        <p class="metric">Best {results.optimization_config.objective.value if results.optimization_config else 'unknown'}: {results.best_value:.4f}</p>
-        <p>Successful trials: {results.successful_trials}/{results.total_trials}</p>
-        <p>Optimization time: {results.optimization_time_hours:.2f} hours</p>
-        <p><strong>Mode:</strong> {results.optimization_mode}</p>
-    </div>
-    
-    {weighting_html}
-    
-    <div class="section health-section">
-        <h3>Best Trial Health Analysis</h3>
-        {health_html}
-    </div>
-    
-    <div class="section">
-        <h3>Best Hyperparameters</h3>
-        <ul>
-{params_html}
-        </ul>
-    </div>
-    
-    <div class="section">
-        <h3>Parameter Importance (Top 10)</h3>
-        <ul>
-{importance_html}
-        </ul>
-    </div>
-    
-    <div class="section">
-        {avg_health_html}
-    </div>
-    
-    <div class="section">
-        <h3>Files Generated</h3>
-        <ul>
-            <li><strong>optimization_summary.json</strong>: Complete machine-readable results with health data</li>
-            <li><strong>best_hyperparameters.yaml</strong>: Copy-paste ready configuration</li>
-            <li><strong>trial_history.csv</strong>: Trial-by-trial detailed results with health metrics</li>
-            <li><strong>parameter_importance.json</strong>: Parameter importance analysis</li>
-            <li><strong>health_monitoring.json</strong>: Comprehensive health analysis data</li>
-        </ul>
-    </div>
-    
-    <div class="section">
-        <h3>Health Monitoring Information</h3>
-        <p><strong>Health Analysis:</strong> Always enabled for all optimization modes</p>
-        <p><strong>Health Weighting:</strong> {'Applied with weight ' + str(results.health_weight) if results.optimization_mode == 'health' and results.health_weight > 0 else 'Not applied (monitoring only)'}</p>
-        <p><strong>API Integration:</strong> All health data available for real-time monitoring and comparison</p>
-    </div>
-</body>
-</html>"""
-
-    def get_health_history(self) -> List[Dict[str, Any]]:
+    def _should_generate_plots_for_trial(self, trial_number: int, objective_value: float) -> bool:
         """
-        Get complete health monitoring history for API/visualization
+        Determine if plots should be generated for this trial
         
+        Args:
+            trial_number: Current trial number
+            objective_value: Objective value achieved by this trial
+            
         Returns:
-            List of health data for all trials
+            bool: True if plots should be generated for this trial
         """
-        return self.trial_health_history.copy()
-    
-    def get_best_trial_health(self) -> Optional[Dict[str, Any]]:
-        """
-        Get health metrics for the best performing trial
+        if self.config.plot_generation == PlotGenerationMode.NONE:
+            return False
+        elif self.config.plot_generation == PlotGenerationMode.ALL:
+            return True
+        elif self.config.plot_generation == PlotGenerationMode.BEST:
+            # For "best" mode, we'll generate plots in post-processing
+            # Store trial info for later evaluation of best trial
+            self.trial_plot_data[trial_number] = {
+                'objective_value': objective_value,
+                'needs_plots': False  # Will be set to True for best trial later
+            }
+            return False
         
-        Returns:
-            Best trial health metrics or None if not available
+        return False
+
+    def _generate_plots_for_trial(
+        self, 
+        trial: optuna.Trial, 
+        model_builder: ModelBuilder, 
+        training_data: Dict[str, Any],
+        objective_value: float
+    ) -> None:
         """
-        return self.best_trial_health.copy() if self.best_trial_health else None
-    
-    def get_average_health_metrics(self) -> Optional[Dict[str, float]]:
-        """
-        Get average health metrics across all trials
+        Generate plots for a specific trial
         
-        Returns:
-            Average health metrics or None if not available
+        Args:
+            trial: Optuna trial object
+            model_builder: ModelBuilder instance with trained model
+            training_data: Training data dictionary
+            objective_value: Objective value achieved by this trial
         """
-        return self._calculate_average_health_metrics()
+        logger.debug(f"running _generate_plots_for_trial ... Generating plots for trial {trial.number}")
+        
+        try:
+            # Create plot directory for this trial
+            if self.results_dir is None:
+                logger.error("running _generate_best_trial_plots ... Results directory not set, cannot generate plots")
+                return
+            trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number + 1}"
+            trial_plot_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate timestamp for this evaluation
+            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            
+            # Run full evaluation with plot generation
+            test_loss, test_accuracy = model_builder.evaluate(
+                data=training_data,
+                log_detailed_predictions=True,
+                max_predictions_to_show=10,
+                run_timestamp=run_timestamp,
+                plot_dir=trial_plot_dir
+            )
+            
+            logger.debug(f"running _generate_plots_for_trial ... Trial {trial.number} plots generated: "
+                        f"test_accuracy={test_accuracy:.4f}, plots_dir={trial_plot_dir}")
+            
+            # Store plot information
+            self.trial_plot_data[trial.number] = {
+                'objective_value': objective_value,
+                'test_accuracy': test_accuracy,
+                'test_loss': test_loss,
+                'plot_dir': str(trial_plot_dir),
+                'plots_generated': True
+            }
+            
+        except Exception as e:
+            logger.warning(f"running _generate_plots_for_trial ... Plot generation failed for trial {trial.number}: {e}")
+            self.trial_plot_data[trial.number] = {
+                'objective_value': objective_value,
+                'plots_generated': False,
+                'error': str(e)
+            }
 
-
-# Convenience function for command-line usage with mode selection
+# Convenience function for command-line usage with mode selection and GPU proxy support
 def optimize_model(
     dataset_name: str,
     mode: str = "simple",
     optimize_for: str = "val_accuracy",
     trials: int = 50,
     run_name: Optional[str] = None,
+    activation: Optional[str] = None,
     progress_callback: Optional[Callable[[TrialProgress], None]] = None,
+    # GPU proxy parameters (NEW)
+    use_gpu_proxy: bool = True,
+    gpu_proxy_auto_clone: bool = True,
+    gpu_proxy_endpoint: Optional[str] = None,
+    gpu_proxy_fallback_local: bool = True,
+    # Enhanced GPU proxy sampling parameters (NEWEST)
+    gpu_proxy_sample_percentage: float = 0.50,
+    gpu_proxy_use_stratified_sampling: bool = True,
+    gpu_proxy_adaptive_batch_size: bool = True,
+    gpu_proxy_optimize_data_types: bool = True,
+    gpu_proxy_compression_level: int = 6,
     **config_overrides
 ) -> OptimizationResult:
     """
-    Convenience function for unified model optimization
+    Convenience function for unified model optimization with enhanced GPU proxy support
     
     Args:
         dataset_name: Name of dataset to optimize
@@ -2573,6 +1232,18 @@ def optimize_model(
         optimize_for: Optimization objective
         trials: Number of trials to run
         run_name: Optional unified run name for consistent directory/file naming
+        progress_callback: Optional callback for real-time progress updates
+        # GPU proxy parameters (NEW)
+        use_gpu_proxy: Enable/disable GPU proxy usage
+        gpu_proxy_auto_clone: Automatically clone GPU proxy repo if not found
+        gpu_proxy_endpoint: Optional specific endpoint override
+        gpu_proxy_fallback_local: Fall back to local execution if GPU proxy fails
+        # Enhanced GPU proxy sampling parameters (NEWEST)
+        gpu_proxy_sample_percentage: Percentage of training data to use (0.01-1.0)
+        gpu_proxy_use_stratified_sampling: Use stratified sampling to maintain class balance
+        gpu_proxy_adaptive_batch_size: Adapt batch size to sample count
+        gpu_proxy_optimize_data_types: Optimize data types for transfer efficiency
+        gpu_proxy_compression_level: Compression level for large payloads (1-9)
         **config_overrides: Additional optimization config overrides
         
     Returns:
@@ -2580,8 +1251,24 @@ def optimize_model(
         
     Raises:
         ValueError: If mode-objective combination is invalid
+        
+    Examples:
+        # Local execution (default)
+        result = optimize_model('cifar10', mode='simple', optimize_for='val_accuracy', trials=20)
+        
+        # GPU proxy with default settings (50% of data)
+        result = optimize_model('cifar10', mode='health', optimize_for='val_accuracy', 
+                               trials=20, use_gpu_proxy=True)
+        
+        # GPU proxy with smaller sample for faster testing (5% of data)
+        result = optimize_model('cifar10', mode='health', optimize_for='val_accuracy', 
+                               trials=20, use_gpu_proxy=True, gpu_proxy_sample_percentage=0.05)
+        
+        # GPU proxy with large sample for better accuracy (90% of data)
+        result = optimize_model('cifar10', mode='health', optimize_for='val_accuracy', 
+                               trials=20, use_gpu_proxy=True, gpu_proxy_sample_percentage=0.90)
     """
-    # CREATE UNIFIED RUN NAME HERE if not provided (same logic as model_optimizer.py)
+    # CREATE UNIFIED RUN NAME HERE if not provided
     if run_name is None:
         timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
         dataset_clean = dataset_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
@@ -2620,11 +1307,22 @@ def optimize_model(
             f"To use '{optimize_for}', change mode to 'health'"
         )
     
-    # Create optimization config
+    # Create optimization config with GPU proxy parameters
     opt_config = OptimizationConfig(
         mode=opt_mode,
         objective=objective,
-        n_trials=trials
+        n_trials=trials,
+        # GPU proxy configuration (NEW)
+        use_gpu_proxy=use_gpu_proxy,
+        gpu_proxy_auto_clone=gpu_proxy_auto_clone,
+        gpu_proxy_endpoint=gpu_proxy_endpoint,
+        gpu_proxy_fallback_local=gpu_proxy_fallback_local,
+        # Enhanced GPU proxy sampling parameters (NEWEST)
+        gpu_proxy_sample_percentage=gpu_proxy_sample_percentage,
+        gpu_proxy_use_stratified_sampling=gpu_proxy_use_stratified_sampling,
+        gpu_proxy_adaptive_batch_size=gpu_proxy_adaptive_batch_size,
+        gpu_proxy_optimize_data_types=gpu_proxy_optimize_data_types,
+        gpu_proxy_compression_level=gpu_proxy_compression_level
     )
     
     # Apply any config overrides
@@ -2635,26 +1333,27 @@ def optimize_model(
         else:
             logger.warning(f"running optimize_model ... Unknown config parameter: {key}")
     
+    # LOG GPU PROXY CONFIGURATION
+    if opt_config.use_gpu_proxy:
+        logger.debug(f"running optimize_model ... GPU proxy integration: ENABLED")
+        logger.debug(f"running optimize_model ... - Sample percentage: {opt_config.gpu_proxy_sample_percentage:.1%}")
+        logger.debug(f"running optimize_model ... - Stratified sampling: {opt_config.gpu_proxy_use_stratified_sampling}")
+    else:
+        logger.debug(f"running optimize_model ... GPU proxy integration: DISABLED")
+    
     # Run optimization
     optimizer = ModelOptimizer(
         dataset_name=dataset_name,
         optimization_config=opt_config,
         run_name=run_name,
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
+        activation_override=activation
     )
     return optimizer.optimize()
 
 
 if __name__ == "__main__":
-    # Simple command-line interface with mode selection
-    '''
-    Example usage:
-        python src/optimizer.py dataset=mnist mode=health optimize_for=val_accuracy trials=10 max_epochs_per_trial=15 # Default 30% health weight
-        python src/optimizer.py dataset=mnist mode=health optimize_for=val_accuracy health_weight=0.5 trials=10 max_epochs_per_trial=15 # Balanced 50/50
-        python src/optimizer.py dataset=mnist mode=health optimize_for=overall_health trials=10 max_epochs_per_trial=15 # Direct health optimization
-        python src/optimizer.py dataset=mnist mode=simple optimize_for=val_accuracy trials=10 max_epochs_per_trial=15 # Pure accuracy optimization
-    '''
-    
+    # Simple command-line interface with mode selection and GPU proxy support
     args = {}
     for arg in sys.argv[1:]:
         if '=' in arg:
@@ -2663,16 +1362,20 @@ if __name__ == "__main__":
     
     # Extract required arguments
     dataset_name = args.get('dataset', 'cifar10')
-    mode = args.get('mode', 'simple')  # mode selection
+    mode = args.get('mode', 'simple')
     optimize_for = args.get('optimize_for', 'val_accuracy')
     trials = int(args.get('trials', '50'))
     run_name = args.get('run_name', None)
+    activation = args.get('activation', None)
+    if activation:
+        logger.debug(f"running optimizer.py ... Activation override: {activation}")
     
     # Convert integer parameters for OptimizationConfig
     int_params = [
         'n_trials', 'n_startup_trials', 'n_warmup_steps', 'random_seed',
         'max_epochs_per_trial', 'early_stopping_patience', 'min_epochs_per_trial',
-        'stability_window', 'health_analysis_sample_size', 'health_monitoring_frequency'
+        'stability_window', 'health_analysis_sample_size', 'health_monitoring_frequency',
+        'gpu_proxy_compression_level'  # Added GPU proxy compression level
     ]
     for int_param in int_params:
         if int_param in args:
@@ -2686,7 +1389,8 @@ if __name__ == "__main__":
     # Convert float parameters for OptimizationConfig
     float_params = [
         'timeout_hours', 'max_training_time_minutes', 'validation_split', 'test_size',
-        'max_bias_change_per_epoch', 'health_weight'  # Added health_weight
+        'max_bias_change_per_epoch', 'health_weight',  # Added health_weight
+        'gpu_proxy_sample_percentage'  # Added GPU proxy sampling percentage
     ]
     for float_param in float_params:
         if float_param in args:
@@ -2697,15 +1401,50 @@ if __name__ == "__main__":
                 logger.warning(f"running optimizer.py ... Invalid {float_param}: {args[float_param]}, using default")
                 del args[float_param]
     
-    # Convert boolean parameters for OptimizationConfig
+    # Convert boolean parameters for OptimizationConfig (INCLUDING GPU PROXY PARAMS)
     bool_params = [
         'save_best_model', 'save_optimization_history', 'create_comparison_plots',
-        'enable_early_stopping', 'enable_stability_checks'
+        'enable_early_stopping', 'enable_stability_checks',
+        # GPU proxy parameters (NEW)
+        'use_gpu_proxy', 'gpu_proxy_auto_clone', 'gpu_proxy_fallback_local',
+        'gpu_proxy_use_stratified_sampling', 'gpu_proxy_adaptive_batch_size', 
+        'gpu_proxy_optimize_data_types'  # Added GPU proxy sampling options
     ]
     for bool_param in bool_params:
         if bool_param in args:
             args[bool_param] = args[bool_param].lower() in ['true', '1', 'yes', 'on']
             logger.debug(f"running optimizer.py ... Converted {bool_param} to bool: {args[bool_param]}")
+    
+    # Handle string parameters (including GPU proxy endpoint)
+    string_params = ['gpu_proxy_endpoint', 'plot_generation', 'activation']
+    for string_param in string_params:
+        if string_param in args:
+            # Keep as string, but validate it's not empty
+            if args[string_param].strip():
+                logger.debug(f"running optimizer.py ... Set {string_param}: {args[string_param]}")
+            else:
+                logger.warning(f"running optimizer.py ... Empty {string_param}, removing")
+                del args[string_param]
+    
+    # Convert plot_generation string to enum (after string_params processing)
+    if 'plot_generation' in args:
+        plot_gen_str = args['plot_generation'].lower()
+        try:
+            if plot_gen_str == 'all':
+                args['plot_generation'] = PlotGenerationMode.ALL
+            elif plot_gen_str == 'best':
+                args['plot_generation'] = PlotGenerationMode.BEST
+            elif plot_gen_str == 'none':
+                args['plot_generation'] = PlotGenerationMode.NONE
+            else:
+                logger.warning(f"running optimizer.py ... Invalid plot_generation value: '{args['plot_generation']}'")
+                logger.warning(f"running optimizer.py ... Valid options: all, best, none. Using default 'all'")
+                args['plot_generation'] = PlotGenerationMode.ALL
+            
+            logger.debug(f"running optimizer.py ... Converted plot_generation to enum: {args['plot_generation']}")
+        except Exception as e:
+            logger.warning(f"running optimizer.py ... Error converting plot_generation: {e}")
+            args['plot_generation'] = PlotGenerationMode.ALL
     
     logger.debug(f"running optimizer.py ... Starting optimization")
     logger.debug(f"running optimizer.py ... Dataset: {dataset_name}")
@@ -2714,6 +1453,15 @@ if __name__ == "__main__":
     logger.debug(f"running optimizer.py ... Trials: {trials}")
     if run_name:
         logger.debug(f"running optimizer.py ... Run name: {run_name}")
+    
+    # LOG GPU PROXY CONFIGURATION
+    if args.get('use_gpu_proxy', False):
+        logger.debug(f"running optimizer.py ... GPU proxy: ENABLED")
+        logger.debug(f"running optimizer.py ... - Sample percentage: {args.get('gpu_proxy_sample_percentage', 0.50):.1%}")
+        logger.debug(f"running optimizer.py ... - Stratified sampling: {args.get('gpu_proxy_use_stratified_sampling', True)}")
+    else:
+        logger.debug(f"running optimizer.py ... GPU proxy: DISABLED (local execution)")
+    
     logger.debug(f"running optimizer.py ... Parsed arguments: {args}")
     
     try:
@@ -2724,35 +1472,27 @@ if __name__ == "__main__":
             optimize_for=optimize_for,
             trials=trials,
             run_name=run_name,
-            **{k: v for k, v in args.items() if k not in ['dataset', 'mode', 'optimize_for', 'trials', 'run_name']}
+            activation=activation,
+            **{k: v for k, v in args.items() if k not in ['dataset', 'mode', 'optimize_for', 'trials', 'run_name', 'activation']}
         )
         
         # Print results
         print(result.summary())
         
         logger.debug(f"running optimizer.py ... ✅ Optimization completed successfully!")
-        logger.debug(f"running optimizer.py ... Mode: {result.optimization_mode}")
-        logger.debug(f"running optimizer.py ... Health monitoring: enabled")
         
-        # Print mode-specific information
-        if result.optimization_mode == "health":
-            if OptimizationObjective.is_health_only(OptimizationObjective(optimize_for)):
-                print(f"\n🏥 Health-Only Optimization:")
-                print(f"Optimized directly for model health metric: {optimize_for}")
-            else:
-                obj_weight = 1.0 - result.health_weight
-                print(f"\n⚖️ Health-Weighted Optimization:")
-                print(f"Balanced {optimize_for} ({obj_weight:.1%}) and health ({result.health_weight:.1%})")
+        # LOG GPU PROXY USAGE IN RESULTS
+        gpu_proxy_used = args.get('use_gpu_proxy', False)
+        if gpu_proxy_used:
+            sample_pct = args.get('gpu_proxy_sample_percentage', 0.50)
+            print(f"\n🚀 GPU Proxy: Used {sample_pct:.1%} of training data per trial")
         else:
-            print(f"\n📊 Simple Optimization:")
-            print(f"Pure {optimize_for} optimization (health monitoring only)")
+            print(f"\n💻 Local Execution: All trials executed on local hardware")
         
-        if result.best_trial_health:
-            health_score = result.best_trial_health.get('overall_health', 0.0)
-            print(f"Best trial health score: {health_score:.3f}")
+        if activation:
+            print(f"\n🎯 Activation Override: All trials used '{activation}' activation function")
         
     except Exception as e:
-        # Provide helpful error messages for common mistakes
         error_msg = str(e)
         if "health-only objective" in error_msg.lower() and "simple mode" in error_msg.lower():
             print(f"\n❌ Configuration Error:")
@@ -2762,11 +1502,6 @@ if __name__ == "__main__":
             print(f"   python optimizer.py dataset={dataset_name} mode=simple optimize_for=val_accuracy")
             print(f"2. Use health mode with your desired objective:")
             print(f"   python optimizer.py dataset={dataset_name} mode=health optimize_for={optimize_for}")
-            print(f"\nAvailable objectives by mode:")
-            universal_objs = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
-            health_objs = [obj.value for obj in OptimizationObjective.get_health_only_objectives()]
-            print(f"Universal (both modes): {universal_objs}")
-            print(f"Health-only (health mode): {health_objs}")
         else:
             print(f"\n❌ Error: {error_msg}")
         

@@ -46,7 +46,8 @@ def setup_logging(
     console_level: str = "DEBUG",
     file_level: str = "DEBUG",
     max_file_size_mb: int = 10,
-    backup_count: int = 5
+    backup_count: int = 5,
+    silence_matplotlib: bool = True  # NEW PARAMETER
 ) -> logging.Logger:
     """
     Set up logging configuration with colored console output and file logging.
@@ -57,6 +58,7 @@ def setup_logging(
         file_level: Minimum level for file output
         max_file_size_mb: Maximum size of log file before rotation (in MB)
         backup_count: Number of backup files to keep
+        silence_matplotlib: Whether to silence verbose matplotlib debug logs (default: True)
     """
     
     # Use relative path if no specific path provided
@@ -128,10 +130,31 @@ def setup_logging(
     if file_handler:
         root_logger.addHandler(file_handler)
     
+    # NEW: Configure third-party library logging levels
+    if silence_matplotlib:
+        # Silence matplotlib's verbose logging while keeping errors/warnings
+        logging.getLogger('matplotlib').setLevel(logging.WARNING)
+        logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
+        logging.getLogger('matplotlib.pyplot').setLevel(logging.WARNING)
+        logging.getLogger('matplotlib.backends').setLevel(logging.WARNING)
+        
+        # Also silence other commonly verbose libraries
+        logging.getLogger('PIL').setLevel(logging.WARNING)
+        logging.getLogger('fontTools').setLevel(logging.WARNING)
+        
+        # Optionally silence TensorFlow verbose logs (uncomment if needed)
+        # logging.getLogger('tensorflow').setLevel(logging.ERROR)
+        # logging.getLogger('tensorflow.python.platform').setLevel(logging.ERROR)
+        
+        print("Matplotlib and PIL verbose logging silenced (WARNING level and above will still show)")
+    
     # Log the setup completion
     setup_logger = logging.getLogger(__name__)
     setup_logger.info(f"Logging initialized - Console: {console_level}, File: {file_level}")
     setup_logger.info(f"Log file: {log_file_path_resolved}")
+    
+    if silence_matplotlib:
+        setup_logger.info("Third-party library verbose logging silenced (matplotlib, PIL)")
     
     if file_handler:
         # Force a test write to ensure file logging works
@@ -165,6 +188,36 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
         setup_logging()
     
     return logging.getLogger(name)
+
+
+# NEW: Convenience function to configure third-party logging after initial setup
+def configure_third_party_logging(
+    matplotlib_level: str = "WARNING",
+    tensorflow_level: str = "ERROR",
+    pil_level: str = "WARNING"
+) -> None:
+    """
+    Configure logging levels for common third-party libraries.
+    Call this after setup_logging() if you want different levels.
+    
+    Args:
+        matplotlib_level: Logging level for matplotlib (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        tensorflow_level: Logging level for TensorFlow
+        pil_level: Logging level for PIL/Pillow
+    """
+    logging.getLogger('matplotlib').setLevel(getattr(logging, matplotlib_level.upper()))
+    logging.getLogger('matplotlib.font_manager').setLevel(getattr(logging, matplotlib_level.upper()))
+    logging.getLogger('matplotlib.pyplot').setLevel(getattr(logging, matplotlib_level.upper()))
+    
+    logging.getLogger('tensorflow').setLevel(getattr(logging, tensorflow_level.upper()))
+    logging.getLogger('tensorflow.python.platform').setLevel(getattr(logging, tensorflow_level.upper()))
+    
+    logging.getLogger('PIL').setLevel(getattr(logging, pil_level.upper()))
+    logging.getLogger('fontTools').setLevel(getattr(logging, pil_level.upper()))
+    
+    logger = get_logger(__name__)
+    logger.info(f"Third-party logging configured - matplotlib: {matplotlib_level}, "
+               f"tensorflow: {tensorflow_level}, PIL: {pil_level}")
 
 
 # Performance logging utilities
@@ -236,7 +289,7 @@ class TimedOperation:
 # Automatic logger setup - initialize logging when module is imported
 # This ensures logging is set up once when the module is first imported
 if not logging.getLogger().handlers:
-    setup_logging()
+    setup_logging()  # Will use silence_matplotlib=True by default
 
 # Create a default logger for this module
 logger = get_logger(__name__)
@@ -262,4 +315,13 @@ if __name__ == "__main__":
         import time
         time.sleep(1)  # Simulate work
     
+    # Test matplotlib logging (should be silenced)
+    import matplotlib.pyplot as plt
+    import matplotlib.font_manager
+    print("Testing matplotlib - verbose logs should be silenced...")
+    plt.figure()
+    plt.plot([1, 2, 3], [1, 4, 9])
+    plt.close()
+    
     print("\nLogging setup complete! Check your console output and log file.")
+    print("Matplotlib font debug messages should now be silenced.")
