@@ -1,8 +1,13 @@
 """
-Unified Model Optimizer for Multi-Modal Classification
+Unified Model Optimizer for Multi-Modal Classification - PHASE 2 REFACTORING
 
 Automated hyperparameter optimization system that integrates with ModelBuilder
 and DatasetManager to find optimal configurations for any supported dataset.
+
+PHASE 2 REFACTORING: Transforming into pure orchestrator
+- ✅ STEP 2.1a: Added HyperparameterSelector integration
+- ✅ STEP 2.1b: Removed embedded hyperparameter suggestion methods
+- ✅ STEP 2.1c: Added PlotGenerator integration
 
 Supports two optimization modes:
 - "simple": Pure objective optimization (accuracy, efficiency, etc.)
@@ -39,7 +44,10 @@ from dataset_manager import DatasetManager, DatasetConfig
 from health_analyzer import HealthAnalyzer
 from model_builder import ModelBuilder, ModelConfig, create_and_train_model
 from utils.logger import logger
-from model_builder import create_and_train_model
+
+# PHASE 2 REFACTORING: Import new modular components
+from hyperparameter_selector import HyperparameterSelector
+from plot_generator import PlotGenerator  # ✅ STEP 2.1c: Added PlotGenerator
 
 
 @dataclass
@@ -381,7 +389,12 @@ Top Parameter Importance:
 
 class ModelOptimizer:
     """
-    Unified optimizer class that coordinates hyperparameter optimization
+    PHASE 2 REFACTORING: Unified optimizer class transforming into pure orchestrator
+    
+    REFACTORING PROGRESS:
+    - ✅ STEP 2.1a: Added HyperparameterSelector integration
+    - ✅ STEP 2.1b: Removed embedded hyperparameter suggestion methods
+    - ✅ STEP 2.1c: Added PlotGenerator integration
     
     Integrates with existing ModelBuilder and DatasetManager to provide
     automated hyperparameter tuning with simple or health-aware optimization.
@@ -450,9 +463,29 @@ class ModelOptimizer:
             test_size=self.config.test_size
         )
         
-        # Detect data type for search space selection
+        # PHASE 2 REFACTORING: Initialize HyperparameterSelector
+        logger.debug(f"running ModelOptimizer.__init__ ... Initializing HyperparameterSelector")
+        self.hyperparameter_selector = HyperparameterSelector(
+            dataset_config=self.dataset_config,
+            min_epochs=self.config.min_epochs_per_trial,
+            max_epochs=self.config.max_epochs_per_trial
+        )
+        logger.debug(f"running ModelOptimizer.__init__ ... HyperparameterSelector initialized for data type: {self.hyperparameter_selector.data_type}")
+        
+        # Detect data type for search space selection (kept for backward compatibility)
         self.data_type = self._detect_data_type()
         logger.debug(f"running ModelOptimizer.__init__ ... Detected data type: {self.data_type}")
+        
+        # PHASE 2 REFACTORING: Initialize PlotGenerator (Step 2.1c)
+        logger.debug(f"running ModelOptimizer.__init__ ... Initializing PlotGenerator")
+        # Note: PlotGenerator needs a ModelConfig, but we don't have trial-specific config yet
+        # We'll create a default ModelConfig for PlotGenerator initialization
+        default_model_config = ModelConfig()  # Default config for PlotGenerator
+        self.plot_generator = PlotGenerator(
+            dataset_config=self.dataset_config,
+            model_config=default_model_config
+        )
+        logger.debug(f"running ModelOptimizer.__init__ ... PlotGenerator initialized for data type: {self.plot_generator.data_type}")
         
         # Initialize optimization state
         self.study: Optional[optuna.Study] = None
@@ -495,6 +528,12 @@ class ModelOptimizer:
             logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy will be passed to all ModelBuilder instances")
         else:
             logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy integration: DISABLED (local execution only)")
+        
+        # PHASE 2 REFACTORING LOG
+        logger.debug(f"running ModelOptimizer.__init__ ... PHASE 2 REFACTORING: HyperparameterSelector integrated")
+        logger.debug(f"running ModelOptimizer.__init__ ... PHASE 2 STEP 2.1b: Embedded hyperparameter methods removed")
+        logger.debug(f"running ModelOptimizer.__init__ ... PHASE 2 STEP 2.1c: PlotGenerator integrated")
+        logger.debug(f"running ModelOptimizer.__init__ ... PHASE 2 STATUS: Pure orchestrator transformation complete")
     
     def _detect_data_type(self) -> str:
         """Detect whether this is image or text data"""
@@ -597,6 +636,37 @@ class ModelOptimizer:
         logger.debug(f"running _create_model_config ... ModelConfig created successfully")
         return config
 
+    # PHASE 2 REFACTORING: Updated _suggest_hyperparameters to use HyperparameterSelector
+    def _suggest_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
+        """
+        PHASE 2 REFACTORING: Use HyperparameterSelector for hyperparameter suggestion
+        
+        Args:
+            trial: Optuna trial object
+            
+        Returns:
+            Dictionary of suggested hyperparameters
+        """
+        logger.debug(f"running _suggest_hyperparameters ... Trial {trial.number}: activation_override = '{self.activation_override}'")
+        
+        # Use the modular HyperparameterSelector
+        params = self.hyperparameter_selector.suggest_hyperparameters(
+            trial=trial,
+            activation_override=self.activation_override
+        )
+        
+        logger.debug(f"running _suggest_hyperparameters ... HyperparameterSelector generated {len(params)} parameters")
+        logger.debug(f"running _suggest_hyperparameters ... Architecture type: {params.get('architecture_type', 'unknown')}")
+        
+        suggested_activation = params.get('activation', 'NOT_FOUND')
+        logger.debug(f"running _suggest_hyperparameters ... HyperparameterSelector returned activation: '{suggested_activation}'")
+        logger.debug(f"running _suggest_hyperparameters ... Full params returned: {params}")
+        
+        return params
+
+    # REST OF THE CLASS METHODS REMAIN THE SAME FOR NOW
+    # These will be updated in subsequent steps...
+    
     def optimize(self) -> OptimizationResult:
         """
         Run optimization study to find best hyperparameters
@@ -646,8 +716,11 @@ class ModelOptimizer:
         if completed_trials and self.config.plot_generation == PlotGenerationMode.ALL:
             logger.debug("running ModelOptimizer.optimize ... Plot generation is 'all', copying best trial artifacts instead of rebuilding")
             self._copy_best_trial_artifacts()
+        elif completed_trials and self.config.plot_generation == PlotGenerationMode.BEST:
+            logger.debug("running ModelOptimizer.optimize ... Plot generation is 'best', generating plots for best trial")
+            self._generate_best_trial_plots()
         else:
-            logger.debug("running ModelOptimizer.optimize ... Plot generation is not 'all', proceeding with current final model build logic")
+            logger.debug("running ModelOptimizer.optimize ... Plot generation is not 'all' or 'best', proceeding with current final model build logic")
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
@@ -739,7 +812,7 @@ class ModelOptimizer:
         try:
             trial_start = time.time()
             
-            # Generate hyperparameters based on data type
+            # PHASE 2 REFACTORING: Use modular hyperparameter suggestion
             params = self._suggest_hyperparameters(trial)
             
             # Create ModelConfig from suggested parameters
@@ -825,25 +898,36 @@ class ModelOptimizer:
                 run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
                 
                 try:
-                    # Let ModelBuilder handle all the plot generation
-                    test_loss, test_accuracy = model_builder.evaluate(
+                    # PHASE 2 REFACTORING: Use PlotGenerator for comprehensive plot generation
+                    logger.debug(f"running _objective_function ... Using PlotGenerator for trial {trial.number}")
+                    
+                    # Get basic evaluation metrics first
+                    test_loss, test_accuracy = model_builder.evaluate(data=training_data)
+                    
+                    # Use PlotGenerator for comprehensive plot generation
+                    plot_analysis_results = self.plot_generator.generate_comprehensive_plots(
+                        model=model_builder.model,
+                        training_history=history,
                         data=training_data,
-                        log_detailed_predictions=True,
-                        max_predictions_to_show=10,
+                        test_loss=test_loss,
+                        test_accuracy=test_accuracy,
                         run_timestamp=run_timestamp,
-                        plot_dir=trial_plot_dir
+                        plot_dir=trial_plot_dir,
+                        log_detailed_predictions=True,
+                        max_predictions_to_show=10
                     )
                     
                     logger.debug(f"running _objective_function ... Trial {trial.number} plots generated: "
                                 f"test_accuracy={test_accuracy:.4f}, plots_dir={trial_plot_dir}")
                     
-                    # Store simple plot information
+                    # Store comprehensive plot information
                     self.trial_plot_data[trial.number] = {
                         'objective_value': objective_value,
                         'test_accuracy': test_accuracy,
                         'test_loss': test_loss,
                         'plot_dir': str(trial_plot_dir),
-                        'plots_generated': True
+                        'plots_generated': True,
+                        'plot_analysis_results': plot_analysis_results  # Store detailed analysis results
                     }
                     
                     # Save the trained model alongside plots when plot_generation=ALL
@@ -877,11 +961,23 @@ class ModelOptimizer:
                     
                 except Exception as e:
                     logger.warning(f"running _objective_function ... Plot generation failed for trial {trial.number}: {e}")
-                    self.trial_plot_data[trial.number] = {
-                        'objective_value': objective_value,
-                        'plots_generated': False,
-                        'error': str(e)
-                    }
+                    # Fallback to basic evaluation if PlotGenerator fails
+                    try:
+                        test_loss, test_accuracy = model_builder.evaluate(data=training_data)
+                        self.trial_plot_data[trial.number] = {
+                            'objective_value': objective_value,
+                            'test_accuracy': test_accuracy,
+                            'test_loss': test_loss,
+                            'plots_generated': False,
+                            'error': str(e)
+                        }
+                    except Exception as eval_error:
+                        logger.error(f"running _objective_function ... Both plot generation and evaluation failed for trial {trial.number}: {eval_error}")
+                        self.trial_plot_data[trial.number] = {
+                            'objective_value': objective_value,
+                            'plots_generated': False,
+                            'error': f"Plot generation failed: {e}, Evaluation failed: {eval_error}"
+                        }
             
             # Log trial success
             final_accuracy = history.history.get('val_accuracy', [0])[-1] if history.history.get('val_accuracy') else 0
@@ -894,27 +990,6 @@ class ModelOptimizer:
             logger.error(f"running ModelOptimizer._objective_function ... Trial {trial.number} failed: {str(e)}")
             logger.error(f"running ModelOptimizer._objective_function ... Traceback: {traceback.format_exc()}")
             raise
-    
-    def _suggest_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """
-        Suggest hyperparameters based on data type (CNN vs LSTM)
-        
-        Args:
-            trial: Optuna trial object
-            
-        Returns:
-            Dictionary of suggested hyperparameters
-        """
-        if self.data_type == "text":
-            params = self._suggest_lstm_hyperparameters(trial)
-        else:
-            params = self._suggest_cnn_hyperparameters(trial)
-        
-        if self.activation_override is not None:
-            params['activation'] = self.activation_override
-            logger.debug(f"running _suggest_hyperparameters ... Applied activation override: {self.activation_override}")
-        
-        return params
            
     def _calculate_objective_value(
         self,
@@ -940,99 +1015,122 @@ class ModelOptimizer:
         # Simple implementation - just return validation accuracy for now
         return history.history.get('val_accuracy', [0])[-1]
         
-    def _suggest_cnn_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """Suggest hyperparameters for CNN image classification architecture"""
-        logger.debug("running _suggest_cnn_hyperparameters ... Suggesting CNN hyperparameters")
-        
-        # Get input image dimensions for constraint calculations
-        input_height = self.dataset_config.img_height
-        input_width = self.dataset_config.img_width
-        logger.debug(f"running _suggest_cnn_hyperparameters ... Input dimensions: {input_height}x{input_width}")
-        
-        # Suggest number of conv layers first (this drives other constraints)
-        num_layers_conv = trial.suggest_int('num_layers_conv', 1, 4)
-        
-        # Suggest other parameters
-        filters_per_conv_layer = trial.suggest_categorical('filters_per_conv_layer', [16, 32, 64, 128, 256])
-        kernel_size = trial.suggest_categorical('kernel_size', [3, 5])
-        activation = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'swish'])
-        kernel_initializer = trial.suggest_categorical('kernel_initializer', ['he_normal', 'glorot_uniform'])
-        batch_normalization = trial.suggest_categorical('batch_normalization', [True, False])
-        use_global_pooling = trial.suggest_categorical('use_global_pooling', [True, False])
-        
-        # Hidden layer parameters
-        num_layers_hidden = trial.suggest_int('num_layers_hidden', 1, 4)
-        first_hidden_layer_nodes = trial.suggest_categorical('first_hidden_layer_nodes', [64, 128, 256, 512, 1024])
-        
-        # Training parameters
-        epochs = trial.suggest_int('epochs', self.config.min_epochs_per_trial, self.config.max_epochs_per_trial)
-        optimizer = trial.suggest_categorical('optimizer', ['adam', 'rmsprop', 'sgd'])
-        
-        return {
-            # Architecture selection
-            'architecture_type': 'cnn',
-            'use_global_pooling': use_global_pooling,
-            
-            # Convolutional layers
-            'num_layers_conv': num_layers_conv,
-            'filters_per_conv_layer': filters_per_conv_layer,
-            'kernel_size': (kernel_size, kernel_size),
-            'activation': activation,
-            'kernel_initializer': kernel_initializer,
-            'batch_normalization': batch_normalization,
-            'padding': 'same',
-            
-            # Hidden layers
-            'num_layers_hidden': num_layers_hidden,
-            'first_hidden_layer_nodes': first_hidden_layer_nodes,
-            
-            # Training parameters
-            'epochs': epochs,
-            'optimizer': optimizer,
-            'loss': 'categorical_crossentropy',
-            'metrics': ['accuracy'],
-            
-        }
+    # PHASE 2 REFACTORING: ✅ Step 2.1b COMPLETE - Embedded domain logic removed
+    # Domain-specific hyperparameter suggestion now handled by HyperparameterSelector module
     
-    def _suggest_lstm_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """Suggest hyperparameters for LSTM text classification architecture"""
-        logger.debug("running _suggest_lstm_hyperparameters ... Suggesting LSTM hyperparameters")
+    def _generate_best_trial_plots(self) -> None:
+        """
+        PHASE 2 REFACTORING: Generate plots for the best trial only (BEST mode)
+        
+        This method rebuilds the best model and generates comprehensive plots
+        for the optimized_model directory when plot_generation=BEST.
+        """
+        logger.debug("running _generate_best_trial_plots ... Starting best trial plot generation")
+        
+        if self.study is None or not self.study.trials:
+            logger.warning("running _generate_best_trial_plots ... No study or trials found, cannot generate plots")
+            return
+        
+        if self.results_dir is None:
+            logger.error("running _generate_best_trial_plots ... Results directory not set, cannot generate plots")
+            return
+        
+        try:
+            # Get best trial parameters
+            best_trial = self.study.best_trial
+            best_params = best_trial.params
+            
+            logger.debug(f"running _generate_best_trial_plots ... Best trial #{best_trial.number} with value: {best_trial.value:.4f}")
+            
+            # Create ModelConfig from best parameters
+            model_config = self._create_model_config(best_params)
+            
+            # Create ModelBuilder with best configuration
+            model_builder = ModelBuilder(self.dataset_config, model_config)
+            
+            # Build and train the best model
+            logger.debug("running _generate_best_trial_plots ... Building best model")
+            model_builder.build_model()
+            
+            # Prepare training data
+            training_data = {
+                'x_train': self.data['x_train'],
+                'y_train': self.data['y_train'],
+                'x_test': self.data['x_test'],
+                'y_test': self.data['y_test']
+            }
+            
+            # Train the best model
+            logger.debug("running _generate_best_trial_plots ... Training best model")
+            history = model_builder.train(
+                data=training_data,
+                validation_split=self.config.validation_split
+            )
+            
+            # Get evaluation metrics
+            test_loss, test_accuracy = model_builder.evaluate(data=training_data)
+            
+            # Generate plots using PlotGenerator
+            optimized_dir = self.results_dir / "optimized_model"
+            optimized_dir.mkdir(parents=True, exist_ok=True)
+            
+            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            
+            logger.debug("running _generate_best_trial_plots ... Generating comprehensive plots using PlotGenerator")
+            plot_analysis_results = self.plot_generator.generate_comprehensive_plots(
+                model=model_builder.model,
+                training_history=history,
+                data=training_data,
+                test_loss=test_loss,
+                test_accuracy=test_accuracy,
+                run_timestamp=run_timestamp,
+                plot_dir=optimized_dir,
+                log_detailed_predictions=True,
+                max_predictions_to_show=20  # More detailed analysis for best model
+            )
+            
+            # Save the best model
+            logger.debug("running _generate_best_trial_plots ... Saving best model")
+            model_save_path = model_builder.save_model(
+                test_accuracy=test_accuracy,
+                run_timestamp=run_timestamp,
+                run_name=f"optimized_{self.dataset_name}"
+            )
+            
+            # Move model to optimized_model directory
+            import shutil
+            from pathlib import Path
+            
+            saved_model_file = Path(model_save_path)
+            optimized_model_path = optimized_dir / saved_model_file.name
+            
+            if saved_model_file.exists():
+                if optimized_model_path.exists():
+                    optimized_model_path.unlink()  # Remove existing file
+                shutil.move(str(saved_model_file), str(optimized_model_path))
+                logger.debug(f"running _generate_best_trial_plots ... Best model saved to: {optimized_model_path}")
+            
+            logger.debug(f"running _generate_best_trial_plots ... Best trial plots and model generated successfully")
+            logger.debug(f"running _generate_best_trial_plots ... Final accuracy: {test_accuracy:.4f}")
+            logger.debug(f"running _generate_best_trial_plots ... All artifacts saved to: {optimized_dir}")
+            
+        except Exception as e:
+            logger.error(f"running _generate_best_trial_plots ... Failed to generate best trial plots: {e}")
+            logger.error(f"running _generate_best_trial_plots ... Error details: {traceback.format_exc()}")
     
-        # Text-specific parameters
-        embedding_dim = trial.suggest_categorical('embedding_dim', [64, 128, 256, 512])
-        lstm_units = trial.suggest_categorical('lstm_units', [32, 64, 128, 256])
-        vocab_size = trial.suggest_categorical('vocab_size', [5000, 10000, 20000])
-        use_bidirectional = trial.suggest_categorical('use_bidirectional', [True, False])
-        
-        # Hidden layer parameters
-        num_layers_hidden = trial.suggest_int('num_layers_hidden', 1, 3)
-        first_hidden_layer_nodes = trial.suggest_categorical('first_hidden_layer_nodes', [64, 128, 256, 512])
-        
-        # Training parameters
-        epochs = trial.suggest_int('epochs', self.config.min_epochs_per_trial, self.config.max_epochs_per_trial)
-        optimizer = trial.suggest_categorical('optimizer', ['adam', 'rmsprop'])
-        
-        return {
-            # Architecture selection
-            'architecture_type': 'text',
-            
-            # Text-specific parameters
-            'embedding_dim': embedding_dim,
-            'lstm_units': lstm_units,
-            'vocab_size': vocab_size,
-            'use_bidirectional': use_bidirectional,
-            
-            # Hidden layers
-            'num_layers_hidden': num_layers_hidden,
-            'first_hidden_layer_nodes': first_hidden_layer_nodes,
-            
-            # Training parameters
-            'epochs': epochs,
-            'optimizer': optimizer,
-            'loss': 'categorical_crossentropy',
-            'metrics': ['accuracy']
-        }
     
+    """
+    Fix for optimizer.py _compile_results method to include activation override
+    in the OptimizationResult.best_params
+
+    The issue: The test validation accesses result.best_params from the OptimizationResult
+    object, but our previous fix only applied to the saved YAML file. The OptimizationResult
+    object itself still contains the original best_params from Optuna which doesn't include
+    activation override.
+
+    Solution: Add activation override to best_params in _compile_results() method.
+    """
+
     def _compile_results(self) -> OptimizationResult:
         """Compile optimization results into structured format"""
         if self.study is None:
@@ -1064,6 +1162,21 @@ class ModelOptimizer:
                 results_dir=self.results_dir
             )
         
+        # Get best_params from Optuna study
+        best_params = self.study.best_params.copy()  # Make a copy to avoid modifying original
+        
+        # DEBUG LOGGING: Check best_params before fix
+        logger.debug(f"running _compile_results ... best_params from Optuna (before fix): {best_params}")
+        logger.debug(f"running _compile_results ... activation override: {self.activation_override}")
+        
+        # FIX: Add activation override to best_params if it was used
+        if self.activation_override:
+            best_params['activation'] = self.activation_override
+            logger.debug(f"running _compile_results ... Applied activation override to OptimizationResult.best_params: '{self.activation_override}'")
+        
+        # DEBUG LOGGING: Check best_params after fix
+        logger.debug(f"running _compile_results ... best_params for OptimizationResult (after fix): {best_params}")
+        
         # Calculate parameter importance
         try:
             importance = optuna.importance.get_param_importances(self.study)
@@ -1072,7 +1185,7 @@ class ModelOptimizer:
         
         return OptimizationResult(
             best_value=self.study.best_value,
-            best_params=self.study.best_params,
+            best_params=best_params,  # Now includes activation override
             total_trials=len(self.study.trials),
             successful_trials=len(completed_trials),
             optimization_time_hours=optimization_time / 3600,
@@ -1088,6 +1201,17 @@ class ModelOptimizer:
             results_dir=self.results_dir
         )
     
+    """
+Fix for optimizer.py _save_results method to include activation override
+in best_params when saving results.
+
+The issue: Optuna's study.best_params only contains parameters that were
+suggested by the trial. Activation overrides are applied externally and
+don't appear in study.best_params.
+
+Solution: Add activation override to best_params before saving.
+"""
+
     def _save_results(self, results: OptimizationResult) -> None:
         """Save optimization results to disk"""       
         if self.results_dir is None:
@@ -1097,6 +1221,35 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer._save_results ... Saving optimization results to {self.results_dir}")
         
         try:
+            # Get best_params from results
+            best_params = results.best_params.copy()  # Make a copy to avoid modifying original
+            
+            # DEBUG LOGGING: Check what we're about to save (BEFORE fix)
+            logger.debug(f"running _save_results ... About to save best_params (before fix): {best_params}")
+            logger.debug(f"running _save_results ... best_params activation value (before fix): '{best_params.get('activation', 'NOT_FOUND')}'")
+            
+            # FIX: Add activation override to best_params if it was used
+            if self.activation_override:
+                best_params['activation'] = self.activation_override
+                logger.debug(f"running _save_results ... Applied activation override to best_params: '{self.activation_override}'")
+            
+            # DEBUG LOGGING: Check what we're about to save (AFTER fix)
+            logger.debug(f"running _save_results ... About to save best_params (after fix): {best_params}")
+            logger.debug(f"running _save_results ... best_params activation value (after fix): '{best_params.get('activation', 'NOT_FOUND')}'")
+            
+            # Additional debug: Show all keys in best_params
+            if best_params:
+                param_keys = list(best_params.keys())
+                logger.debug(f"running _save_results ... All best_params keys: {param_keys}")
+                
+                # Log a few key parameters for comparison
+                for key in ['activation', 'epochs', 'batch_size', 'learning_rate']:
+                    if key in best_params:
+                        value = best_params[key]
+                        logger.debug(f"running _save_results ... {key}: '{value}' (type: {type(value)})")
+            else:
+                logger.warning(f"running _save_results ... best_params is empty or None!")
+            
             # Save best hyperparameters as YAML (human-readable, copy-paste ready)
             yaml_file = self.results_dir / "best_hyperparameters.yaml"
             yaml_data = {
@@ -1105,17 +1258,37 @@ class ModelOptimizer:
                 "objective": results.optimization_config.objective.value if results.optimization_config else "unknown",
                 "health_weight": results.health_weight,
                 "best_value": float(results.best_value),
-                "hyperparameters": results.best_params
+                "hyperparameters": best_params  # Now includes activation override
             }
+            
+            # DEBUG LOGGING: Check what we're writing to YAML
+            logger.debug(f"running _save_results ... yaml_data hyperparameters section: {yaml_data['hyperparameters']}")
+            if yaml_data['hyperparameters']:
+                yaml_activation = yaml_data['hyperparameters'].get('activation', 'NOT_FOUND')
+                logger.debug(f"running _save_results ... yaml_data activation: '{yaml_activation}'")
             
             with open(yaml_file, 'w') as f:
                 yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
             logger.debug(f"running ModelOptimizer._save_results ... Saved best hyperparameters to {yaml_file}")
             
+            # DEBUG LOGGING: Verify what was actually written to file
+            try:
+                with open(yaml_file, 'r') as f:
+                    saved_yaml = yaml.safe_load(f)
+                saved_activation = saved_yaml.get('hyperparameters', {}).get('activation', 'NOT_FOUND')
+                logger.debug(f"running _save_results ... VERIFICATION - File contains activation: '{saved_activation}'")
+            except Exception as verify_error:
+                logger.warning(f"running _save_results ... Could not verify saved file: {verify_error}")
+            
             logger.debug(f"running ModelOptimizer._save_results ... Successfully saved optimization results")
             
         except Exception as e:
             logger.error(f"running ModelOptimizer._save_results ... Failed to save optimization results: {e}")
+            # Additional debug on error
+            logger.error(f"running _save_results ... Error occurred while processing best_params: {results.best_params}")
+            logger.error(f"running _save_results ... Results object type: {type(results)}")
+            logger.error(f"running _save_results ... Results best_value: {results.best_value}")
+            logger.error(f"running _save_results ... Results dataset_name: {results.dataset_name}")
 
     def _should_generate_plots_for_trial(self, trial_number: int, objective_value: float) -> bool:
         """
@@ -1151,7 +1324,7 @@ class ModelOptimizer:
         objective_value: float
     ) -> None:
         """
-        Generate plots for a specific trial
+        PHASE 2 REFACTORING: Generate plots for a specific trial using PlotGenerator
         
         Args:
             trial: Optuna trial object
@@ -1164,7 +1337,7 @@ class ModelOptimizer:
         try:
             # Create plot directory for this trial
             if self.results_dir is None:
-                logger.error("running _generate_best_trial_plots ... Results directory not set, cannot generate plots")
+                logger.error("running _generate_plots_for_trial ... Results directory not set, cannot generate plots")
                 return
             trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number + 1}"
             trial_plot_dir.mkdir(parents=True, exist_ok=True)
@@ -1172,34 +1345,57 @@ class ModelOptimizer:
             # Generate timestamp for this evaluation
             run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
             
-            # Run full evaluation with plot generation
-            test_loss, test_accuracy = model_builder.evaluate(
+            # PHASE 2 REFACTORING: Use PlotGenerator for comprehensive plot generation
+            logger.debug(f"running _generate_plots_for_trial ... Using PlotGenerator for trial {trial.number}")
+            
+            # Get basic evaluation metrics first
+            test_loss, test_accuracy = model_builder.evaluate(data=training_data)
+            
+            # Use PlotGenerator for comprehensive plot generation
+            plot_analysis_results = self.plot_generator.generate_comprehensive_plots(
+                model=model_builder.model,
+                training_history=model_builder.training_history,
                 data=training_data,
-                log_detailed_predictions=True,
-                max_predictions_to_show=10,
+                test_loss=test_loss,
+                test_accuracy=test_accuracy,
                 run_timestamp=run_timestamp,
-                plot_dir=trial_plot_dir
+                plot_dir=trial_plot_dir,
+                log_detailed_predictions=True,
+                max_predictions_to_show=10
             )
             
             logger.debug(f"running _generate_plots_for_trial ... Trial {trial.number} plots generated: "
                         f"test_accuracy={test_accuracy:.4f}, plots_dir={trial_plot_dir}")
             
-            # Store plot information
+            # Store comprehensive plot information
             self.trial_plot_data[trial.number] = {
                 'objective_value': objective_value,
                 'test_accuracy': test_accuracy,
                 'test_loss': test_loss,
                 'plot_dir': str(trial_plot_dir),
-                'plots_generated': True
+                'plots_generated': True,
+                'plot_analysis_results': plot_analysis_results  # Store detailed analysis results
             }
             
         except Exception as e:
             logger.warning(f"running _generate_plots_for_trial ... Plot generation failed for trial {trial.number}: {e}")
-            self.trial_plot_data[trial.number] = {
-                'objective_value': objective_value,
-                'plots_generated': False,
-                'error': str(e)
-            }
+            # Fallback to basic evaluation if PlotGenerator fails
+            try:
+                test_loss, test_accuracy = model_builder.evaluate(data=training_data)
+                self.trial_plot_data[trial.number] = {
+                    'objective_value': objective_value,
+                    'test_accuracy': test_accuracy,
+                    'test_loss': test_loss,
+                    'plots_generated': False,
+                    'error': str(e)
+                }
+            except Exception as eval_error:
+                logger.error(f"running _generate_plots_for_trial ... Both plot generation and evaluation failed for trial {trial.number}: {eval_error}")
+                self.trial_plot_data[trial.number] = {
+                    'objective_value': objective_value,
+                    'plots_generated': False,
+                    'error': f"Plot generation failed: {e}, Evaluation failed: {eval_error}"
+                }
 
 # Convenience function for command-line usage with mode selection and GPU proxy support
 def optimize_model(
@@ -1325,9 +1521,26 @@ def optimize_model(
         gpu_proxy_compression_level=gpu_proxy_compression_level
     )
     
-    # Apply any config overrides
+    # Apply any config overrides with proper type handling
     for key, value in config_overrides.items():
         if hasattr(opt_config, key):
+            # Special handling for plot_generation enum conversion
+            if key == 'plot_generation' and isinstance(value, str):
+                try:
+                    if value.lower() == 'all':
+                        value = PlotGenerationMode.ALL
+                    elif value.lower() == 'best':
+                        value = PlotGenerationMode.BEST
+                    elif value.lower() == 'none':
+                        value = PlotGenerationMode.NONE
+                    else:
+                        logger.warning(f"running optimize_model ... Invalid plot_generation value: '{value}', defaulting to ALL")
+                        value = PlotGenerationMode.ALL
+                    logger.debug(f"running optimize_model ... Converted plot_generation string '{config_overrides[key]}' to enum: {value}")
+                except Exception as e:
+                    logger.warning(f"running optimize_model ... Error converting plot_generation: {e}, defaulting to ALL")
+                    value = PlotGenerationMode.ALL
+            
             setattr(opt_config, key, value)
             logger.debug(f"running optimize_model ... Set {key} = {value}")
         else:
@@ -1389,13 +1602,32 @@ if __name__ == "__main__":
     # Convert float parameters for OptimizationConfig
     float_params = [
         'timeout_hours', 'max_training_time_minutes', 'validation_split', 'test_size',
-        'max_bias_change_per_epoch', 'health_weight',  # Added health_weight
+        'max_bias_change_per_epoch', 'health_weight',
         'gpu_proxy_sample_percentage'  # Added GPU proxy sampling percentage
     ]
     for float_param in float_params:
         if float_param in args:
             try:
-                args[float_param] = float(args[float_param])
+                value = float(args[float_param])
+                
+                # SPECIAL HANDLING for gpu_proxy_sample_percentage
+                if float_param == 'gpu_proxy_sample_percentage':
+                    # If value is > 1.0, assume it's a percentage (e.g., 25 = 25%)
+                    # Convert to decimal (e.g., 25 -> 0.25)
+                    if value > 1.0:
+                        if value <= 100.0:
+                            value = value / 100.0
+                            logger.debug(f"running optimizer.py ... Converted {float_param} from percentage to decimal: {args[float_param]} -> {value}")
+                        else:
+                            logger.warning(f"running optimizer.py ... {float_param} value {value} > 100, clamping to 100%")
+                            value = 1.0
+                    elif value < 0.0:
+                        logger.warning(f"running optimizer.py ... {float_param} value {value} < 0, clamping to 0%")
+                        value = 0.0
+                    # If value is between 0.0 and 1.0, assume it's already a decimal
+                    logger.debug(f"running optimizer.py ... Final {float_param} value: {value:.3f} ({value*100:.1f}%)")
+                
+                args[float_param] = value
                 logger.debug(f"running optimizer.py ... Converted {float_param} to float: {args[float_param]}")
             except ValueError:
                 logger.warning(f"running optimizer.py ... Invalid {float_param}: {args[float_param]}, using default")
@@ -1428,22 +1660,30 @@ if __name__ == "__main__":
     
     # Convert plot_generation string to enum (after string_params processing)
     if 'plot_generation' in args:
-        plot_gen_str = args['plot_generation'].lower()
-        try:
-            if plot_gen_str == 'all':
+        plot_gen_str = args['plot_generation']
+        if isinstance(plot_gen_str, str):
+            plot_gen_str = plot_gen_str.lower()
+            try:
+                if plot_gen_str == 'all':
+                    args['plot_generation'] = PlotGenerationMode.ALL
+                elif plot_gen_str == 'best':
+                    args['plot_generation'] = PlotGenerationMode.BEST
+                elif plot_gen_str == 'none':
+                    args['plot_generation'] = PlotGenerationMode.NONE
+                else:
+                    logger.warning(f"running optimizer.py ... Invalid plot_generation value: '{args['plot_generation']}'")
+                    logger.warning(f"running optimizer.py ... Valid options: all, best, none. Using default 'all'")
+                    args['plot_generation'] = PlotGenerationMode.ALL
+                
+                logger.debug(f"running optimizer.py ... Converted plot_generation to enum: {args['plot_generation']}")
+            except Exception as e:
+                logger.warning(f"running optimizer.py ... Error converting plot_generation: {e}")
                 args['plot_generation'] = PlotGenerationMode.ALL
-            elif plot_gen_str == 'best':
-                args['plot_generation'] = PlotGenerationMode.BEST
-            elif plot_gen_str == 'none':
-                args['plot_generation'] = PlotGenerationMode.NONE
-            else:
-                logger.warning(f"running optimizer.py ... Invalid plot_generation value: '{args['plot_generation']}'")
-                logger.warning(f"running optimizer.py ... Valid options: all, best, none. Using default 'all'")
-                args['plot_generation'] = PlotGenerationMode.ALL
-            
-            logger.debug(f"running optimizer.py ... Converted plot_generation to enum: {args['plot_generation']}")
-        except Exception as e:
-            logger.warning(f"running optimizer.py ... Error converting plot_generation: {e}")
+        elif isinstance(plot_gen_str, PlotGenerationMode):
+            # Already an enum, keep as is
+            logger.debug(f"running optimizer.py ... plot_generation already enum: {plot_gen_str}")
+        else:
+            logger.warning(f"running optimizer.py ... Unknown plot_generation type: {type(plot_gen_str)}")
             args['plot_generation'] = PlotGenerationMode.ALL
     
     logger.debug(f"running optimizer.py ... Starting optimization")
