@@ -148,7 +148,7 @@ class HyperparameterSelector:
             'epochs': epochs,
             'optimizer': optimizer,
             'loss': 'categorical_crossentropy',
-            'metrics': ['accuracy'],
+            'metrics': ['categorical_accuracy'],
         }
         
         logger.debug(f"running suggest_cnn_hyperparameters ... Generated {len(params)} CNN parameters")
@@ -201,7 +201,7 @@ class HyperparameterSelector:
             'epochs': epochs,
             'optimizer': optimizer,
             'loss': 'categorical_crossentropy',
-            'metrics': ['accuracy']
+            'metrics': ['categorical_accuracy']
         }
         
         # Add activation parameter if override is provided (for consistency)
@@ -336,7 +336,7 @@ class HyperparameterSelector:
                 'epochs': self.min_epochs,
                 'optimizer': 'adam',
                 'loss': 'categorical_crossentropy',
-                'metrics': ['accuracy']
+                'metrics': ['categorical_accuracy']
             }
         else:
             return {
@@ -354,7 +354,7 @@ class HyperparameterSelector:
                 'epochs': self.min_epochs,
                 'optimizer': 'adam',
                 'loss': 'categorical_crossentropy',
-                'metrics': ['accuracy']
+                'metrics': ['categorical_accuracy']
             }
     
     def get_search_space_info(self) -> Dict[str, Any]:

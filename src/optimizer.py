@@ -1000,20 +1000,48 @@ class ModelOptimizer:
         trial: optuna.Trial
     ) -> float:
         """
-        Calculate objective value based on optimization mode and target
-        
-        Args:
-            history: Keras training history
-            model: Trained model
-            training_time_minutes: Training time in minutes
-            total_params: Total model parameters
-            trial: Optuna trial object
-            
-        Returns:
-            Objective value
+        Calculate objective value with robust error handling for empty val_accuracy
         """
-        # Simple implementation - just return validation accuracy for now
-        return history.history.get('val_accuracy', [0])[-1]
+        logger.debug(f"running _calculate_objective_value ... Calculating objective for trial {trial.number}")
+        logger.debug(f"running _calculate_objective_value ... history.history is: {history.history}")
+        
+        try:
+            # Validate history object
+            if not history or not hasattr(history, 'history'):
+                logger.error(f"running _calculate_objective_value ... Invalid history object")
+                return 0.0
+            
+            history_dict = history.history
+            if not history_dict:
+                logger.error(f"running _calculate_objective_value ... Empty history dictionary")
+                return 0.0
+            
+            # Try validation accuracy first
+            # Try validation accuracy first (check both names for compatibility)
+            val_accuracy = history_dict.get('val_categorical_accuracy', history_dict.get('val_accuracy', []))
+            if val_accuracy and len(val_accuracy) > 0:
+                final_val_accuracy = val_accuracy[-1]
+                # Check if validation accuracy is meaningful (> 0)
+                if final_val_accuracy > 0.0:
+                    logger.debug(f"running _calculate_objective_value ... Using val_accuracy: {final_val_accuracy:.4f}")
+                    return float(final_val_accuracy)
+                else:
+                    logger.warning(f"running _calculate_objective_value ... val_accuracy is {final_val_accuracy} (all zeros), falling back to training accuracy")
+            
+            # Fallback to training accuracy
+            accuracy = history_dict.get('categorical_accuracy', history_dict.get('accuracy', []))
+            if accuracy and len(accuracy) > 0:
+                final_accuracy = accuracy[-1]
+                logger.debug(f"running _calculate_objective_value ... Using training accuracy: {final_accuracy:.4f}")
+                return float(final_accuracy)
+            
+            # No accuracy found
+            logger.error(f"running _calculate_objective_value ... No accuracy metrics found")
+            return 0.0
+            
+        except Exception as e:
+            logger.error(f"running _calculate_objective_value ... Error: {e}")
+            return 0.0
         
     # PHASE 2 REFACTORING: ✅ Step 2.1b COMPLETE - Embedded domain logic removed
     # Domain-specific hyperparameter suggestion now handled by HyperparameterSelector module

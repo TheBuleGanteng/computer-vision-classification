@@ -30,6 +30,7 @@ import datetime
 from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
 from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
 from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
+from gpu_proxy_code import get_gpu_proxy_training_code
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -99,7 +100,7 @@ class ModelConfig:
     optimizer: str = "adam"
     learning_rate: float = 0.001
     loss: str = "categorical_crossentropy"
-    metrics: List[str] = field(default_factory=lambda: ["accuracy"])
+    metrics: List[str] = field(default_factory=lambda: ["categorical_accuracy"])
     validation_split: float = 0.2
     
     # Real-time visualization parameters (kept for training callbacks)
@@ -155,7 +156,7 @@ class ModelConfig:
     
     def __post_init__(self) -> None:
         if not self.metrics:
-            self.metrics = ["accuracy"]
+            self.metrics = ["categorical_accuracy"]
         
         # Handle padding conversion if it comes in as a string
         if isinstance(self.padding, str):
@@ -280,7 +281,6 @@ class ModelBuilder:
                 else:
                     logger.debug(f"running _setup_gpu_proxy_with_retry ... Directory not found: {gpu_proxy_path}")
             
-            # Import and let auto_setup handle all infrastructure
             # Import and let auto_setup handle all infrastructure
             try:
                 logger.debug("running _setup_gpu_proxy_with_retry ... Attempting to import GPUProxyClient")
@@ -580,11 +580,14 @@ class ModelBuilder:
             optimizer = self.model_config.optimizer
         
         # Compile model
+        # 🎯 PHASE 3 FIX: Ensure consistent metric names
+        fixed_metrics = ['categorical_accuracy' if m == 'accuracy' else m for m in self.model_config.metrics]
         self.model.compile(
             optimizer=optimizer,
             loss=self.model_config.loss,
-            metrics=self.model_config.metrics
+            metrics=fixed_metrics
         )
+        logger.debug(f"running _compile_model_optimized ... Using fixed metrics: {fixed_metrics}")
         
         logger.debug("running _compile_model_optimized ... Model compiled successfully")
     
@@ -658,167 +661,123 @@ class ModelBuilder:
         )
     
     
+    # Replace the existing _generate_gpu_proxy_training_code_enhanced method with:
     def _generate_gpu_proxy_training_code_enhanced(self, validation_split: Optional[float] = None) -> str:
-        """Generate training code for GPU proxy execution with enhanced debugging"""
-        logger.debug("running _generate_gpu_proxy_training_code_enhanced ... generating training code")
+        logger.debug("running _generate_gpu_proxy_training_code_enhanced ... Generating GPU proxy training code")
         
         validation_split_value = validation_split or self.model_config.validation_split
+        logger.debug(f"running _generate_gpu_proxy_training_code_enhanced ... validation_split_value is: {validation_split_value}")
         
-        # ENHANCED: Add comprehensive debugging and error handling
-        training_code = f"""
-import sys
-import traceback
-print("=== STARTING REMOTE EXECUTION ===")
-print(f"Python version: {{sys.version}}")
-
-try:
-    import tensorflow as tf
-    print(f"TensorFlow version: {{tf.__version__}}")
-    
-    from tensorflow import keras
-    import numpy as np
-    import json
-    
-    print("=== IMPORTS SUCCESSFUL ===")
-    
-    # Debug context data
-    print(f"Context keys: {{list(context.keys())}}")
-    print(f"Model config keys: {{list(context.get('model_config', {{}}).keys())}}")
-    print(f"Dataset config keys: {{list(context.get('dataset_config', {{}}).keys())}}")
-    
-    # Get context data with validation
-    if 'x_train' not in context:
-        raise ValueError("Missing x_train in context")
-    if 'y_train' not in context:
-        raise ValueError("Missing y_train in context")
+        gpu_proxy_training_code = get_gpu_proxy_training_code(validation_split_value)
+        logger.debug("running _generate_gpu_proxy_training_code_enhanced ... gpu_proxy__training_code is: {gpu_proxy_training_code}")
         
-    x_train = np.array(context['x_train'])
-    y_train = np.array(context['y_train'])
+        return gpu_proxy_training_code
     
-    print(f"Training data shape: x_train={{x_train.shape}}, y_train={{y_train.shape}}")
     
-    # Build model architecture with detailed logging
-    def build_model():
-        print("=== BUILDING MODEL ===")
+    def _estimate_payload_size(self, x_train: np.ndarray, y_train: np.ndarray) -> float:
+        """Estimate payload size in MB"""
+        # Rough estimation based on array sizes and JSON overhead
+        x_size = x_train.nbytes
+        y_size = y_train.nbytes
         
-        if context['model_config']['data_type'] == 'text':
-            print("Building text model...")
-            model = keras.Sequential([
-                keras.layers.Input(shape=(context['model_config']['sequence_length'],)),
-                keras.layers.Embedding(
-                    context['model_config']['vocab_size'],
-                    context['model_config']['embedding_dim']
-                ),
-                keras.layers.LSTM(context['model_config']['lstm_units']),
-                keras.layers.Dense(context['model_config']['first_hidden_layer_nodes'], activation='relu'),
-                keras.layers.Dropout(context['model_config']['first_hidden_layer_dropout']),
-                keras.layers.Dense(context['dataset_config']['num_classes'], activation='softmax')
-            ])
-        else:
-            print("Building CNN model...")
-            layers = []
-            layers.append(keras.layers.Input(shape=context['dataset_config']['input_shape']))
+        # JSON overhead (roughly 2-3x for nested arrays)
+        json_overhead_factor = 2.5
+        
+        total_size_mb = (x_size + y_size) * json_overhead_factor / (1024 * 1024)
+        
+        return total_size_mb
+    
+    
+    def _compress_context_data(
+        self,
+        model_config_dict: Dict[str, Any],
+        dataset_config_dict: Dict[str, Any], 
+        x_train: np.ndarray,
+        y_train: np.ndarray
+    ) -> Dict[str, Any]:
+        """Compress training data for large payload transmission with improved error handling"""
+        import gzip
+        import base64
+        
+        logger.debug("running _compress_context_data ... compressing training data with improved handling")
+        
+        try:
+            # Convert arrays to JSON with optimized serialization
+            logger.debug(f"running _compress_context_data ... x_train shape: {x_train.shape}, dtype: {x_train.dtype}")
+            logger.debug(f"running _compress_context_data ... y_train shape: {y_train.shape}, dtype: {y_train.dtype}")
             
-            for i in range(context['model_config']['num_layers_conv']):
-                print(f"Adding conv layer {{i+1}}")
-                layers.append(keras.layers.Conv2D(
-                    context['model_config']['filters_per_conv_layer'],
-                    context['model_config']['kernel_size'],
-                    activation=context['model_config']['activation'],
-                    padding='same'
-                ))
-                layers.append(keras.layers.MaxPooling2D((2, 2)))
+            # Optimize data types before compression
+            if x_train.dtype == np.float64:
+                x_train = x_train.astype(np.float32)
+                logger.debug("running _compress_context_data ... converted x_train from float64 to float32")
             
-            layers.append(keras.layers.Flatten())
-            layers.append(keras.layers.Dense(
-                context['model_config']['first_hidden_layer_nodes'],
-                activation='relu'
-            ))
-            layers.append(keras.layers.Dropout(context['model_config']['first_hidden_layer_dropout']))
-            layers.append(keras.layers.Dense(
-                context['dataset_config']['num_classes'],
-                activation='softmax'
-            ))
+            if y_train.dtype == np.float64:
+                y_train = y_train.astype(np.float32)
+                logger.debug("running _compress_context_data ... converted y_train from float64 to float32")
             
-            model = keras.Sequential(layers)
-        
-        print(f"Model built with {{len(model.layers)}} layers")
-        return model
-
-    # Build and compile model
-    print("=== COMPILING MODEL ===")
-    model = build_model()
-    model.compile(
-        optimizer=context['model_config']['optimizer'],
-        loss=context['model_config']['loss'],
-        metrics=context['model_config']['metrics']
-    )
-    
-    print(f"Model compiled - Total params: {{model.count_params()}}")
-    
-    # Train model with detailed progress
-    print("=== STARTING TRAINING ===")
-    print(f"Training for {{context['model_config']['epochs']}} epochs")
-    print(f"Validation split: {validation_split_value}")
-    
-    history = model.fit(
-        x_train, y_train,
-        epochs=context['model_config']['epochs'],
-        validation_split={validation_split_value},
-        verbose=1
-    )
-    
-    print("=== TRAINING COMPLETED ===")
-    print(f"Final training loss: {{history.history['loss'][-1]:.4f}}")
-    if 'val_loss' in history.history:
-        print(f"Final validation loss: {{history.history['val_loss'][-1]:.4f}}")
-    
-    # Create comprehensive result
-    result = {{
-        'success': True,
-        'history': {{
-            'loss': [float(x) for x in history.history['loss']],
-            'accuracy': [float(x) for x in history.history.get('accuracy', [])],
-            'val_loss': [float(x) for x in history.history.get('val_loss', [])],
-            'val_accuracy': [float(x) for x in history.history.get('val_accuracy', [])]
-        }},
-        'final_loss': float(history.history['loss'][-1]),
-        'final_accuracy': float(history.history.get('accuracy', [0])[-1]),
-        'final_val_loss': float(history.history.get('val_loss', [0])[-1]),
-        'final_val_accuracy': float(history.history.get('val_accuracy', [0])[-1]),
-        'model_params': int(model.count_params()),
-        'epochs_completed': len(history.history['loss'])
-    }}
-    
-    print("=== RESULT PREPARED ===")
-    print(f"Result keys: {{list(result.keys())}}")
-    print(f"Success: {{result['success']}}")
-    print(f"Epochs completed: {{result['epochs_completed']}}")
-    
-except Exception as e:
-    print("=== ERROR OCCURRED ===")
-    print(f"Error type: {{type(e).__name__}}")
-    print(f"Error message: {{str(e)}}")
-    print("=== FULL TRACEBACK ===")
-    traceback.print_exc()
-    
-    # Return error result
-    result = {{
-        'success': False,
-        'error': str(e),
-        'error_type': type(e).__name__,
-        'traceback': traceback.format_exc()
-    }}
-    
-    print("=== ERROR RESULT PREPARED ===")
-
-print("=== EXECUTION COMPLETE ===")
-print(f"Final result type: {{type(result)}}")
-print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) else 'Not a dict'}}")
-"""
-        
-        logger.debug("running _generate_gpu_proxy_training_code_enhanced ... enhanced debugging training code generated")
-        return training_code
+            # Convert to JSON strings
+            logger.debug("running _compress_context_data ... converting arrays to JSON...")
+            x_train_json = json.dumps(x_train.tolist())
+            y_train_json = json.dumps(y_train.tolist())
+            
+            logger.debug(f"running _compress_context_data ... JSON lengths: x={len(x_train_json)}, y={len(y_train_json)}")
+            
+            # Compress with high compression level
+            logger.debug("running _compress_context_data ... compressing JSON data...")
+            x_train_compressed = gzip.compress(x_train_json.encode('utf-8'), compresslevel=9)
+            y_train_compressed = gzip.compress(y_train_json.encode('utf-8'), compresslevel=9)
+            
+            logger.debug(f"running _compress_context_data ... compressed lengths: x={len(x_train_compressed)}, y={len(y_train_compressed)}")
+            
+            # Encode as base64 for JSON transmission
+            logger.debug("running _compress_context_data ... encoding to base64...")
+            x_train_b64 = base64.b64encode(x_train_compressed).decode('utf-8')
+            y_train_b64 = base64.b64encode(y_train_compressed).decode('utf-8')
+            
+            # Calculate compression statistics
+            original_size = len(x_train_json) + len(y_train_json)
+            compressed_size = len(x_train_b64) + len(y_train_b64)
+            compression_ratio = compressed_size / original_size if original_size > 0 else 1.0
+            
+            original_size_mb = original_size / (1024 * 1024)
+            compressed_size_mb = compressed_size / (1024 * 1024)
+            
+            logger.debug(f"running _compress_context_data ... compression statistics:")
+            logger.debug(f"running _compress_context_data ... - original size: {original_size_mb:.2f} MB")
+            logger.debug(f"running _compress_context_data ... - compressed size: {compressed_size_mb:.2f} MB")
+            logger.debug(f"running _compress_context_data ... - compression ratio: {compression_ratio:.3f}")
+            logger.debug(f"running _compress_context_data ... - space saved: {(1-compression_ratio)*100:.1f}%")
+            
+            # Check if compression is effective
+            if compression_ratio > 0.9:
+                logger.warning(f"running _compress_context_data ... poor compression ratio: {compression_ratio:.3f}")
+                logger.warning("running _compress_context_data ... consider reducing sample size further")
+            
+            return {
+                'model_config': model_config_dict,
+                'dataset_config': dataset_config_dict,
+                'x_train_compressed': x_train_b64,
+                'y_train_compressed': y_train_b64,
+                'compressed': True,
+                'original_size_mb': round(original_size_mb, 2),
+                'compressed_size_mb': round(compressed_size_mb, 2),
+                'compression_ratio': round(compression_ratio, 3),
+                'space_saved_percent': round((1-compression_ratio)*100, 1)
+            }
+            
+        except Exception as e:
+            logger.error(f"running _compress_context_data ... compression failed: {e}")
+            logger.error("running _compress_context_data ... falling back to uncompressed format")
+            
+            # Fallback to uncompressed format
+            return {
+                'model_config': model_config_dict,
+                'dataset_config': dataset_config_dict,
+                'x_train': x_train.tolist(),
+                'y_train': y_train.tolist(),
+                'compressed': False,
+                'compression_error': str(e)
+            }
     
     
     def _prepare_gpu_proxy_context_enhanced(
@@ -826,8 +785,8 @@ print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) els
         data: Dict[str, Any], 
         validation_split: Optional[float] = None
     ) -> Dict[str, Any]:
-        """Prepare context data for GPU proxy execution with intelligent sampling"""
-        logger.debug("running _prepare_gpu_proxy_context_enhanced ... preparing context data")
+        """Prepare context data for GPU proxy execution with adaptive payload management"""
+        logger.debug("running _prepare_gpu_proxy_context_enhanced ... preparing context with adaptive payload management")
         
         # Apply intelligent sampling to reduce payload size
         x_train, y_train = self._apply_intelligent_sampling(
@@ -865,22 +824,66 @@ print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) els
                 'activation': self.model_config.activation
             })
         
-        # Prepare dataset configuration
+        # FIXED: Define dataset_config_dict
         dataset_config_dict = {
-            'input_shape': list(self.dataset_config.input_shape),
+            'name': self.dataset_config.name,
             'num_classes': self.dataset_config.num_classes,
-            'name': self.dataset_config.name
+            'input_shape': list(self.dataset_config.input_shape) if hasattr(self.dataset_config, 'input_shape') else [self.dataset_config.img_height, self.dataset_config.img_width, self.dataset_config.channels]
         }
         
-        # Convert data to lists for JSON serialization
-        context_data = {
-            'model_config': model_config_dict,
-            'dataset_config': dataset_config_dict,
-            'x_train': x_train.tolist(),
-            'y_train': y_train.tolist()
-        }
+        # ENHANCED: Adaptive payload size management
+        sample_percentage = self.model_config.gpu_proxy_sample_percentage
         
-        logger.debug(f"running _prepare_gpu_proxy_context_enhanced ... context prepared with {len(x_train)} samples")
+        # Estimate uncompressed payload size
+        estimated_size_mb = self._estimate_payload_size(x_train, y_train)
+        logger.debug(f"running _prepare_gpu_proxy_context_enhanced ... estimated payload size: {estimated_size_mb:.2f} MB")
+        
+        # Adaptive strategy based on size
+        if estimated_size_mb > 50:  # Very large payload
+            logger.warning(f"running _prepare_gpu_proxy_context_enhanced ... payload too large ({estimated_size_mb:.1f} MB), reducing sample size")
+            # Reduce sample size automatically
+            target_size_mb = 30
+            reduction_factor = target_size_mb / estimated_size_mb
+            new_sample_count = max(100, int(len(x_train) * reduction_factor))
+            
+            indices = np.random.choice(len(x_train), new_sample_count, replace=False)
+            x_train = x_train[indices]
+            y_train = y_train[indices]
+            
+            logger.debug(f"running _prepare_gpu_proxy_context_enhanced ... reduced to {len(x_train)} samples")
+            estimated_size_mb = self._estimate_payload_size(x_train, y_train)
+        
+        # Use compression for payloads > 5MB or > 15% sample size
+        if estimated_size_mb > 5.0 or sample_percentage > 0.15:
+            logger.debug(f"running _prepare_gpu_proxy_context_enhanced ... using compression (size: {estimated_size_mb:.2f} MB, sample: {sample_percentage*100:.1f}%)")
+            context_data = self._compress_context_data(
+                model_config_dict, dataset_config_dict, x_train, y_train
+            )
+            
+            # Check if compression was effective
+            if context_data.get('compressed', False):
+                compressed_size = context_data.get('compressed_size_mb', estimated_size_mb)
+                if compressed_size > 25:  # Still too large even after compression
+                    logger.error(f"running _prepare_gpu_proxy_context_enhanced ... payload still too large after compression: {compressed_size:.1f} MB")
+                    raise ValueError(f"Payload too large even with compression: {compressed_size:.1f} MB. Try reducing gpu_proxy_sample_percentage below {sample_percentage*100:.0f}%")
+            else:
+                logger.warning("running _prepare_gpu_proxy_context_enhanced ... compression failed, using uncompressed format")
+                
+        else:
+            logger.debug(f"running _prepare_gpu_proxy_context_enhanced ... using uncompressed format (size: {estimated_size_mb:.2f} MB)")
+            # Original uncompressed format for small payloads
+            context_data = {
+                'model_config': model_config_dict,
+                'dataset_config': dataset_config_dict,
+                'x_train': x_train.tolist(),
+                'y_train': y_train.tolist(),
+                'compressed': False,
+                'payload_size_mb': round(estimated_size_mb, 2)
+            }
+        
+        final_size = context_data.get('compressed_size_mb', context_data.get('payload_size_mb', estimated_size_mb))
+        logger.debug(f"running _prepare_gpu_proxy_context_enhanced ... context prepared with {len(x_train)} samples, final size: {final_size:.2f} MB")
+        
         return context_data
     
     
@@ -1074,10 +1077,10 @@ print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) els
         validation_split: Optional[float] = None
     ) -> Optional[keras.callbacks.History]:
         """
-        FINAL OPTIMIZED: Enhanced GPU proxy training with minimal response handling
+        Phase 2: Enhanced GPU proxy training with complete execution result processing
         """
         try:
-            logger.debug("running _train_on_gpu_proxy_enhanced ... Starting enhanced GPU proxy training")
+            logger.debug("running _train_on_gpu_proxy_enhanced ... Starting enhanced GPU proxy training with complete result processing")
             
             # Generate training code
             training_code = self._generate_gpu_proxy_training_code_enhanced(validation_split)
@@ -1095,70 +1098,21 @@ print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) els
             if self.runpod_client is None:
                 raise RuntimeError("GPU proxy client is not available")
             
-            result = self.runpod_client.execute_code_sync(
+            execution_result = self.runpod_client.execute_code_sync(
                 code=training_code,
                 context=context_data,
                 timeout_seconds=timeout_seconds
             )
             
-            # HANDLE MINIMAL RESPONSE FORMAT
-            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Raw result type: {type(result)}")
-            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Raw result: {result}")
+            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Received complete execution_result type: {type(execution_result)}")
+            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Execution_result keys: {list(execution_result.keys()) if isinstance(execution_result, dict) else 'Not a dict'}")
             
-            if isinstance(result, dict):
-                logger.debug(f"running _train_on_gpu_proxy_enhanced ... Result keys: {list(result.keys())}")
-                
-                # CASE 1: RunPod metadata without execution results (size limit exceeded)
-                if ('status' in result and result['status'] == 'COMPLETED' and 
-                    'success' not in result and 'executionTime' in result):
-                    logger.error("running _train_on_gpu_proxy_enhanced ... Response size limit exceeded")
-                    logger.error(f"running _train_on_gpu_proxy_enhanced ... RunPod metadata: {result}")
-                    raise Exception("RunPod response size limit exceeded - no execution results returned")
-                
-                # CASE 2: Our minimal response format
-                elif 'success' in result:
-                    if result.get('success'):
-                        logger.debug("running _train_on_gpu_proxy_enhanced ... Received minimal response format")
-                        logger.debug(f"running _train_on_gpu_proxy_enhanced ... Minimal result: {result}")
-                        
-                        # Validate we have training metrics
-                        metric_keys = ['loss', 'acc', 'val_loss', 'val_acc', 'epochs']
-                        found_keys = [key for key in metric_keys if key in result]
-                        logger.debug(f"running _train_on_gpu_proxy_enhanced ... Found metric keys: {found_keys}")
-                        
-                        if not found_keys:
-                            logger.warning("running _train_on_gpu_proxy_enhanced ... No training metrics in response")
-                            # Create minimal synthetic history if no metrics
-                            synthetic_result = {
-                                'epochs': 1,
-                                'loss': 1.0,
-                                'acc': 0.1,
-                                'val_loss': 1.2,
-                                'val_acc': 0.1
-                            }
-                            history = self._convert_minimal_gpu_results_to_history(synthetic_result)
-                        else:
-                            # Convert minimal results to history
-                            history = self._convert_minimal_gpu_results_to_history(result)
-                        
-                        self.training_history = history
-                        logger.debug("running _train_on_gpu_proxy_enhanced ... GPU proxy training completed successfully")
-                        return history
-                    
-                    else:
-                        # Error response
-                        error_msg = result.get('error', 'Unknown error')
-                        logger.error(f"running _train_on_gpu_proxy_enhanced ... GPU proxy execution failed: {error_msg}")
-                        raise Exception(f"GPU proxy execution failed: {error_msg}")
-                
-                # CASE 3: Unknown response format
-                else:
-                    logger.error(f"running _train_on_gpu_proxy_enhanced ... Unknown response format: {result}")
-                    raise Exception(f"Unexpected response format: {list(result.keys())}")
+            # Process complete execution result locally
+            history = self._process_training_results(execution_result)
             
-            else:
-                logger.error(f"running _train_on_gpu_proxy_enhanced ... Result is not a dictionary: {result}")
-                raise Exception(f"GPU proxy returned non-dict result: {type(result)}")
+            self.training_history = history
+            logger.debug("running _train_on_gpu_proxy_enhanced ... GPU proxy training completed successfully with complete result processing")
+            return history
             
         except Exception as e:
             # Log error with context
@@ -1166,15 +1120,278 @@ print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) els
             logger.error("running _train_on_gpu_proxy_enhanced ... Training failed, will fallback to local")
             return None
     
+    
+    def _process_training_results(self, execution_result: Dict[str, Any]) -> keras.callbacks.History:
+        """
+        Process complete execution result from GPU proxy with comprehensive environment logging
+        ENHANCED: Log complete environment comparison and validation metric analysis
+        """
+        logger.debug("running _process_training_results ... Processing complete execution result with comprehensive environment analysis")
+        logger.debug(f"running _process_training_results ... execution_result is: {execution_result}")
+        
+        # Validate execution success
+        if not execution_result.get('success', False):
+            error_msg = execution_result.get('error', 'Unknown execution error')
+            stderr = execution_result.get('stderr', '')
+            stdout = execution_result.get('stdout', '')
+            
+            logger.error(f"running _process_training_results ... GPU execution failed: {error_msg}")
+            if stderr:
+                logger.error(f"running _process_training_results ... Stderr: {stderr}")
+            if stdout:
+                logger.debug(f"running _process_training_results ... Stdout: {stdout}")
+            
+            raise RuntimeError(f"GPU execution failed: {error_msg}")
+        
+        # Extract raw training result from complete execution
+        raw_result = execution_result.get('result')
+        logger.debug(f"running _process_training_results ... FULL RAW RESULT: {raw_result}")
+        if raw_result is None:
+            logger.error("running _process_training_results ... No result found in execution_result")
+            raise RuntimeError("No training result found in execution result")
+        
+        logger.debug(f"running _process_training_results ... Raw result type: {type(raw_result)}")
+        logger.debug(f"running _process_training_results ... Raw result keys: {list(raw_result.keys()) if isinstance(raw_result, dict) else 'Not a dict'}")
+        
+        # ENHANCED: Log comprehensive environment information
+        if 'environment_info' in raw_result:
+            env_info = raw_result['environment_info']
+            logger.debug("running _process_training_results ... ========================================")
+            logger.debug("running _process_training_results ... 🔬 COMPREHENSIVE GPU ENVIRONMENT ANALYSIS")
+            logger.debug("running _process_training_results ... ========================================")
+            
+            # Python and TensorFlow versions
+            logger.debug(f"running _process_training_results ... Python version: {env_info.get('python_version', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... TensorFlow version: {env_info.get('tensorflow_version', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... TensorFlow Keras version: {env_info.get('tensorflow_keras_version', 'Unknown')}")
+            
+            # Keras standalone analysis
+            keras_standalone = env_info.get('keras_standalone_available', False)
+            if keras_standalone:
+                standalone_version = env_info.get('keras_standalone_version', 'Unknown')
+                keras_version = env_info.get('tensorflow_keras_version', 'Unknown')
+                logger.debug(f"running _process_training_results ... Keras standalone: Available (v{standalone_version})")
+                logger.debug(f"running _process_training_results ... Keras version match: {standalone_version == keras_version}")
+                if standalone_version != keras_version:
+                    logger.warning(f"running _process_training_results ... ⚠️  KERAS VERSION MISMATCH DETECTED!")
+                    logger.warning(f"running _process_training_results ... - TF Keras: {keras_version}")
+                    logger.warning(f"running _process_training_results ... - Standalone: {standalone_version}")
+            else:
+                logger.debug("running _process_training_results ... Keras standalone: Not available")
+            
+            # CUDA and GPU information
+            logger.debug(f"running _process_training_results ... TensorFlow built with CUDA: {env_info.get('tensorflow_cuda_built', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... CUDA version: {env_info.get('cuda_version', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... cuDNN version: {env_info.get('cudnn_version', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... GPU devices: {env_info.get('gpu_devices', 'Unknown')}")
+            
+            # Metric information
+            logger.debug(f"running _process_training_results ... Metric used for training: {env_info.get('metric_used', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... Model metric names: {env_info.get('metric_names', 'Unknown')}")
+            logger.debug(f"running _process_training_results ... Validation split: {env_info.get('validation_split_used', 'Unknown')}")
+            
+            # TensorFlow build info (selective - most important ones)
+            build_info = env_info.get('tf_build_info', {})
+            if build_info:
+                logger.debug("running _process_training_results ... TensorFlow build details:")
+                important_keys = ['cuda_version', 'cudnn_version', 'is_cuda_build', 'cuda_compute_capabilities']
+                for key in important_keys:
+                    if key in build_info:
+                        logger.debug(f"running _process_training_results ... - {key}: {build_info[key]}")
+        
+        # ENHANCED: Log validation metric analysis
+        if 'validation_analysis' in raw_result:
+            val_analysis = raw_result['validation_analysis']
+            logger.debug("running _process_training_results ... ========================================")
+            logger.debug("running _process_training_results ... 🎯 VALIDATION METRIC ANALYSIS")
+            logger.debug("running _process_training_results ... ========================================")
+            
+            val_metrics = val_analysis.get('val_metrics_found', [])
+            val_acc_keys = val_analysis.get('val_accuracy_keys', [])
+            val_working = val_analysis.get('val_accuracy_working', False)
+            
+            logger.debug(f"running _process_training_results ... Validation metrics found: {val_metrics}")
+            logger.debug(f"running _process_training_results ... Validation accuracy keys: {val_acc_keys}")
+            logger.debug(f"running _process_training_results ... Validation accuracy working: {val_working}")
+            
+            # Minimal test results
+            minimal_test = val_analysis.get('minimal_test_results', {})
+            if minimal_test:
+                minimal_working = minimal_test.get('val_acc_working', False)
+                minimal_values = minimal_test.get('val_acc_values', [])
+                logger.debug(f"running _process_training_results ... Minimal test validation working: {minimal_working}")
+                logger.debug(f"running _process_training_results ... Minimal test values: {minimal_values}")
+            
+            # CRITICAL: Flag the validation issue if detected
+            if not val_working:
+                logger.error("running _process_training_results ... 🚨 VALIDATION ACCURACY ISSUE CONFIRMED!")
+                logger.error("running _process_training_results ... - Validation accuracy metrics are returning zero")
+                logger.error("running _process_training_results ... - This confirms the environment-specific bug")
+            else:
+                logger.debug("running _process_training_results ... ✅ Validation accuracy working correctly")
+        
+        # Process the training history
+        if isinstance(raw_result, dict) and 'history' in raw_result:
+            logger.debug("running _process_training_results ... Found training history in raw result")
+            
+            # Extract training history
+            history_data = raw_result['history']
+            logger.debug(f"running _process_training_results ... History keys: {list(history_data.keys()) if isinstance(history_data, dict) else 'Not a dict'}")
+            
+            # ENHANCED: Log detailed validation accuracy analysis
+            for key, values in history_data.items():
+                if 'val' in key and ('acc' in key or 'accuracy' in key):
+                    logger.debug(f"running _process_training_results ... 🔍 VALIDATION METRIC DETAILED ANALYSIS:")
+                    logger.debug(f"running _process_training_results ... - Key: {key}")
+                    logger.debug(f"running _process_training_results ... - Values: {values}")
+                    logger.debug(f"running _process_training_results ... - Length: {len(values) if values else 0}")
+                    logger.debug(f"running _process_training_results ... - All zeros: {all(v == 0 for v in values) if values else 'Empty'}")
+                    logger.debug(f"running _process_training_results ... - Any non-zero: {any(v != 0 for v in values) if values else 'Empty'}")
+                    
+                    if values and all(v == 0 for v in values):
+                        logger.error(f"running _process_training_results ... 🚨 CONFIRMED: {key} is all zeros!")
+                        logger.error("running _process_training_results ... This is the validation accuracy bug")
+            
+            # Create Keras History object
+            history = keras.callbacks.History()
+            logger.debug("running _process_training_results ... Creating Keras History object")
+            
+            normalized_history = self._normalize_metric_names(history_data)
+            history.history = normalized_history
+                        
+            # Validate training history
+            self._validate_training_history(history)
+            
+            # Log additional training metadata if available
+            if 'model_params' in raw_result:
+                logger.debug(f"running _process_training_results ... Model parameters: {raw_result['model_params']:,}")
+            if 'training_time' in raw_result:
+                logger.debug(f"running _process_training_results ... Training time: {raw_result['training_time']:.2f}s")
+            
+            # SUMMARY LOG: Environment comparison for Phase 3 analysis
+            logger.debug("running _process_training_results ... ========================================")
+            logger.debug("running _process_training_results ... 📊 PHASE 3 ENVIRONMENT SUMMARY")
+            logger.debug("running _process_training_results ... ========================================")
+            
+            # Compare with local environment (if available in logs)
+            if 'environment_info' in raw_result:
+                env_info = raw_result['environment_info']
+                logger.debug("running _process_training_results ... GPU Environment:")
+                logger.debug(f"running _process_training_results ... - TensorFlow: {env_info.get('tensorflow_version', 'Unknown')}")
+                logger.debug(f"running _process_training_results ... - Keras (TF): {env_info.get('tensorflow_keras_version', 'Unknown')}")
+                logger.debug(f"running _process_training_results ... - Keras (standalone): {env_info.get('keras_standalone_version', 'Not available')}")
+                logger.debug(f"running _process_training_results ... - CUDA: {env_info.get('cuda_version', 'Unknown')}")
+                logger.debug(f"running _process_training_results ... - cuDNN: {env_info.get('cudnn_version', 'Unknown')}")
+                
+            # Local environment for comparison
+            import tensorflow as tf
+            logger.debug("running _process_training_results ... Local Environment (for comparison):")
+            logger.debug(f"running _process_training_results ... - TensorFlow: {tf.__version__}")
+            logger.debug(f"running _process_training_results ... - Keras (TF): {tf.keras.__version__}")            
+            logger.debug(f"running _process_training_results ... - CUDA built: {tf.test.is_built_with_cuda()}")
+            
+            logger.debug("running _process_training_results ... Training history processed successfully with comprehensive analysis")
+            return history
+        
+        else:
+            logger.error("running _process_training_results ... No training history found in raw result")
+            logger.error(f"running _process_training_results ... Available keys: {list(raw_result.keys()) if isinstance(raw_result, dict) else 'Not a dict'}")
+            raise RuntimeError("No training history found in execution result")
+
+    def _validate_training_history(self, history: keras.callbacks.History) -> None:
+        """
+        Validate training history has required metrics
+        
+        Args:
+            history: Keras History object to validate
+            
+        Raises:
+            RuntimeError: If history is invalid or missing required metrics
+        """
+        logger.debug("running _validate_training_history ... Validating training history")
+        logger.debug(f"running _validate_training_history ... history is: {history}")
+        logger.debug(f"running _validate_training_history ... history.history is: {history.history}")
+        
+        if not hasattr(history, 'history') or not isinstance(history.history, dict):
+            raise RuntimeError("Invalid training history: missing or invalid history attribute")
+        
+        if not history.history:
+            raise RuntimeError("Invalid training history: empty history dictionary")
+        
+        # Check for at least one metric
+        # 🎯 PHASE 3 FIX: Check for both old and new metric names
+        required_metrics = ['loss', 'categorical_accuracy', 'val_loss', 'val_categorical_accuracy']
+        found_metrics = [metric for metric in required_metrics if metric in history.history]
+
+        # Also check legacy names for backward compatibility
+        legacy_metrics = ['accuracy', 'val_accuracy']
+        found_legacy = [metric for metric in legacy_metrics if metric in history.history]
+
+        if found_legacy:
+            logger.debug(f"running _validate_training_history ... Found legacy metrics: {found_legacy}")
+            found_metrics.extend(found_legacy)
+        
+        if not found_metrics:
+            logger.warning("running _validate_training_history ... No standard metrics found, checking alternative names")
+            # Check alternative metric names
+            alt_metrics = ['acc', 'val_acc']
+            found_alt_metrics = [metric for metric in alt_metrics if metric in history.history]
+            
+            if not found_alt_metrics:
+                available_keys = list(history.history.keys())
+                logger.error(f"running _validate_training_history ... Available metrics: {available_keys}")
+                raise RuntimeError(f"No valid training metrics found. Available: {available_keys}")
+            else:
+                logger.debug(f"running _validate_training_history ... Found alternative metrics: {found_alt_metrics}")
+        else:
+            logger.debug(f"running _validate_training_history ... Found standard metrics: {found_metrics}")
+        
+        # Validate metric arrays have consistent lengths
+        metric_lengths = {key: len(values) for key, values in history.history.items() if isinstance(values, list)}
+        if metric_lengths:
+            unique_lengths = set(metric_lengths.values())
+            if len(unique_lengths) > 1:
+                logger.warning(f"running _validate_training_history ... Inconsistent metric lengths: {metric_lengths}")
+            else:
+                epochs = list(unique_lengths)[0]
+                logger.debug(f"running _validate_training_history ... Training history validated: {epochs} epochs")
+        
+        logger.debug("running _validate_training_history ... Training history validation completed")
+    
+    
+    def _normalize_metric_names(self, history_data: Dict[str, List[float]]) -> Dict[str, List[float]]:
+        """
+        🎯 PHASE 3 FIX: Normalize metric names for consistent processing
+        Maps both 'val_accuracy' and 'val_categorical_accuracy' to expected names
+        """
+        logger.debug("running _normalize_metric_names ... normalizing metric key names")
+        
+        normalized = dict(history_data)  # Copy original data
+        
+        # Map categorical_accuracy to accuracy for backward compatibility if needed
+        if 'categorical_accuracy' in normalized and 'accuracy' not in normalized:
+            normalized['accuracy'] = normalized['categorical_accuracy']
+            logger.debug("running _normalize_metric_names ... mapped categorical_accuracy to accuracy")
+        
+        # Map val_categorical_accuracy to val_accuracy for backward compatibility if needed  
+        if 'val_categorical_accuracy' in normalized and 'val_accuracy' not in normalized:
+            normalized['val_accuracy'] = normalized['val_categorical_accuracy']
+            logger.debug("running _normalize_metric_names ... mapped val_categorical_accuracy to val_accuracy")
+        
+        logger.debug(f"running _normalize_metric_names ... final metric keys: {list(normalized.keys())}")
+        return normalized
+
+    
     def _train_locally_optimized(
         self, 
         data: Dict[str, Any], 
         validation_split: Optional[float] = None
     ) -> keras.callbacks.History:
         """
-        Optimized local training execution
+        🎯 PHASE 4: Optimized local training execution with MANUAL VALIDATION SPLIT
+        Now uses the same manual validation approach as GPU proxy for consistency
         """
-        logger.debug("running _train_locally_optimized ... Starting optimized local training")
+        logger.debug("running _train_locally_optimized ... Starting optimized local training with MANUAL VALIDATION SPLIT")
         
         # Log performance information
         self.perf_logger.log_data_info(
@@ -1187,21 +1404,86 @@ print(f"Final result keys: {{list(result.keys()) if isinstance(result, dict) els
         # Enhanced callback setup
         callbacks_list = self._setup_training_callbacks_optimized()
         
-        # Train model with enhanced monitoring
         if self.model is None:
             raise ValueError("Model must be built before training")
         
-        with TimedOperation("optimized model training", "model_builder"):
-            self.training_history = self.model.fit(
-                data['x_train'], 
-                data['y_train'],
-                epochs=self.model_config.epochs,
-                validation_split=validation_split or self.model_config.validation_split,
-                verbose=1,
-                callbacks=callbacks_list
-            )
+        # 🎯 PHASE 4: Apply manual validation split for consistency with GPU proxy
+        validation_split_value = validation_split or self.model_config.validation_split
+        logger.debug(f"running _train_locally_optimized ... validation_split_value: {validation_split_value}")
         
-        logger.debug("running _train_locally_optimized ... Optimized local training completed")
+        if validation_split_value > 0:
+            logger.debug("running _train_locally_optimized ... 🔧 APPLYING MANUAL VALIDATION SPLIT for consistency")
+            
+            # Calculate split index (same logic as GPU proxy)
+            x_train = data['x_train']
+            y_train = data['y_train']
+            split_idx = int(len(x_train) * (1 - validation_split_value))
+            
+            # Manual split
+            x_train_manual = x_train[:split_idx]
+            y_train_manual = y_train[:split_idx]
+            x_val_manual = x_train[split_idx:]
+            y_val_manual = y_train[split_idx:]
+            
+            logger.debug(f"running _train_locally_optimized ... Manual validation split applied:")
+            logger.debug(f"running _train_locally_optimized ... - Training samples: {len(x_train_manual)} ({(1-validation_split_value)*100:.1f}%)")
+            logger.debug(f"running _train_locally_optimized ... - Validation samples: {len(x_val_manual)} ({validation_split_value*100:.1f}%)")
+            logger.debug(f"running _train_locally_optimized ... - Train data: x={x_train_manual.shape}, y={y_train_manual.shape}")
+            logger.debug(f"running _train_locally_optimized ... - Val data: x={x_val_manual.shape}, y={y_val_manual.shape}")
+            
+            # Verify split integrity
+            total_original = len(x_train)
+            total_split = len(x_train_manual) + len(x_val_manual)
+            logger.debug(f"running _train_locally_optimized ... Split verification: original={total_original}, split_total={total_split}, matches={total_original == total_split}")
+            
+            # Train with manual validation_data parameter (consistent with GPU approach)
+            logger.debug("running _train_locally_optimized ... 🚀 TRAINING WITH MANUAL VALIDATION_DATA (consistent approach)")
+            
+            with TimedOperation("optimized model training with manual validation split", "model_builder"):
+                self.training_history = self.model.fit(
+                    x_train_manual, 
+                    y_train_manual,
+                    epochs=self.model_config.epochs,
+                    validation_data=(x_val_manual, y_val_manual),  # 🎯 KEY: Use validation_data instead of validation_split
+                    verbose=1,
+                    callbacks=callbacks_list
+                )
+        else:
+            logger.debug("running _train_locally_optimized ... 🔧 NO VALIDATION SPLIT REQUESTED")
+            logger.debug("running _train_locally_optimized ... Training without validation...")
+            
+            with TimedOperation("optimized model training without validation", "model_builder"):
+                self.training_history = self.model.fit(
+                    data['x_train'], 
+                    data['y_train'],
+                    epochs=self.model_config.epochs,
+                    verbose=1,
+                    callbacks=callbacks_list
+                )
+        
+        logger.debug("running _train_locally_optimized ... Optimized local training with manual validation split completed")
+        
+        # 🎯 PHASE 4: Log validation split consistency verification
+        if validation_split_value > 0:
+            val_metrics = [k for k in self.training_history.history.keys() if 'val' in k]
+            val_acc_metrics = [k for k in val_metrics if 'acc' in k or 'accuracy' in k]
+            
+            logger.debug(f"running _train_locally_optimized ... Manual validation split results:")
+            logger.debug(f"running _train_locally_optimized ... - Validation metrics found: {val_metrics}")
+            logger.debug(f"running _train_locally_optimized ... - Validation accuracy keys: {val_acc_metrics}")
+            
+            if val_acc_metrics:
+                for val_key in val_acc_metrics:
+                    val_values = self.training_history.history[val_key]
+                    has_nonzero = any(v > 0 for v in val_values) if val_values else False
+                    logger.debug(f"running _train_locally_optimized ... - {val_key}: non-zero values = {has_nonzero}")
+                    if has_nonzero:
+                        logger.debug(f"running _train_locally_optimized ... - {val_key} values: {val_values}")
+                    else:
+                        logger.warning(f"running _train_locally_optimized ... - {val_key} all zeros: {val_values}")
+            
+            logger.debug("running _train_locally_optimized ... ✅ Local training now uses same manual validation approach as GPU proxy")
+        
         return self.training_history
 
     def _setup_training_callbacks_optimized(self) -> List[keras.callbacks.Callback]:
