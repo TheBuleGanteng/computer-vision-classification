@@ -148,7 +148,7 @@ class ModelConfig:
     gpu_proxy_fallback_local: bool = True
     
     # Enhanced GPU proxy sampling parameters
-    gpu_proxy_sample_percentage: float = 0.50  # Use 50% of training data by default
+    gpu_proxy_sample_percentage: float = 1.0  # Use 100% of training data by default
     gpu_proxy_use_stratified_sampling: bool = True      # Use stratified sampling
     gpu_proxy_adaptive_batch_size: bool = True          # Adapt batch size to sample count
     gpu_proxy_optimize_data_types: bool = True          # Optimize data types for transfer
@@ -209,10 +209,15 @@ class ModelBuilder:
         self.model_config: ModelConfig = model_config or ModelConfig()
         self.model: Optional[keras.Model] = None
         self.training_history: Optional[keras.callbacks.History] = None
-        # REMOVED: self.plot_dir - no longer needed since plots handled by PlotGenerator
+        
         
         # Initialize performance logger
         self.perf_logger: PerformanceLogger = PerformanceLogger("model_builder")
+        
+        # Initialize HealthAnalyzer for evaluation consolidation
+        from health_analyzer import HealthAnalyzer  # Import at method level to avoid circular imports
+        self.health_analyzer = HealthAnalyzer()
+        logger.debug(f"running ModelBuilder.__init__ ... HealthAnalyzer initialized for evaluation consolidation")        
         
         # Enhanced GPU Proxy Integration state
         self.gpu_proxy_available: bool = False
@@ -887,6 +892,7 @@ class ModelBuilder:
         return context_data
     
     
+    # Add this enhanced logging to the _apply_intelligent_sampling method in model_builder.py
     def _apply_intelligent_sampling(
         self, 
         x_train: np.ndarray, 
@@ -895,23 +901,46 @@ class ModelBuilder:
         """Apply intelligent sampling based on configuration"""
         logger.debug("running _apply_intelligent_sampling ... applying sampling strategy")
         
+        # 🎯 STEP 4.1f VERIFICATION: Log the sampling configuration
+        logger.debug(f"running _apply_intelligent_sampling ... ModelConfig.gpu_proxy_sample_percentage: {self.model_config.gpu_proxy_sample_percentage}")
+        logger.debug(f"running _apply_intelligent_sampling ... ModelConfig.gpu_proxy_use_stratified_sampling: {self.model_config.gpu_proxy_use_stratified_sampling}")
+        
         total_samples = len(x_train)
         target_samples = int(total_samples * self.model_config.gpu_proxy_sample_percentage)
         
+        # 🎯 DETAILED SAMPLING CALCULATION LOGS
+        logger.debug(f"running _apply_intelligent_sampling ... SAMPLING CALCULATION:")
+        logger.debug(f"running _apply_intelligent_sampling ... - Total available samples: {total_samples}")
+        logger.debug(f"running _apply_intelligent_sampling ... - Sample percentage: {self.model_config.gpu_proxy_sample_percentage} ({self.model_config.gpu_proxy_sample_percentage*100:.1f}%)")
+        logger.debug(f"running _apply_intelligent_sampling ... - Target sample count: {target_samples}")
+        
         if target_samples >= total_samples:
-            logger.debug("running _apply_intelligent_sampling ... using all samples (no sampling needed)")
+            logger.debug("running _apply_intelligent_sampling ... ✅ NO SAMPLING: target_samples >= total_samples (using full dataset)")
+            logger.debug(f"running _apply_intelligent_sampling ... - Using all {total_samples} samples (no reduction needed)")
             return x_train, y_train
         
+        # 🎯 LOG SAMPLING STRATEGY SELECTION
+        logger.debug(f"running _apply_intelligent_sampling ... 🔄 APPLYING SAMPLING: reducing from {total_samples} to {target_samples} samples")
+        
         if self.model_config.gpu_proxy_use_stratified_sampling:
+            logger.debug("running _apply_intelligent_sampling ... Using STRATIFIED sampling (maintains class balance)")
+            
             # Stratified sampling to maintain class balance
             if y_train.ndim > 1 and y_train.shape[1] > 1:
                 # One-hot encoded labels
                 labels = np.argmax(y_train, axis=1)
+                logger.debug(f"running _apply_intelligent_sampling ... Detected one-hot encoded labels, shape: {y_train.shape}")
             else:
                 labels = y_train.flatten()
+                logger.debug(f"running _apply_intelligent_sampling ... Using direct labels, shape: {y_train.shape}")
             
             unique_classes = np.unique(labels)
             samples_per_class = max(1, target_samples // len(unique_classes))
+            
+            logger.debug(f"running _apply_intelligent_sampling ... STRATIFIED SAMPLING DETAILS:")
+            logger.debug(f"running _apply_intelligent_sampling ... - Unique classes: {len(unique_classes)} classes")
+            logger.debug(f"running _apply_intelligent_sampling ... - Target samples per class: {samples_per_class}")
+            logger.debug(f"running _apply_intelligent_sampling ... - Class distribution: {[(cls, np.sum(labels == cls)) for cls in unique_classes]}")
             
             selected_indices = []
             for class_id in unique_classes:
@@ -920,6 +949,7 @@ class ModelBuilder:
                     n_samples = min(samples_per_class, len(class_indices))
                     sampled = np.random.choice(class_indices, n_samples, replace=False)
                     selected_indices.extend(sampled)
+                    logger.debug(f"running _apply_intelligent_sampling ... - Class {class_id}: sampled {n_samples} from {len(class_indices)} available")
             
             # Fill remaining slots if needed
             if len(selected_indices) < target_samples:
@@ -934,25 +964,47 @@ class ModelBuilder:
                         replace=False
                     )
                     selected_indices.extend(additional)
+                    logger.debug(f"running _apply_intelligent_sampling ... - Added {len(additional)} additional samples to reach target")
             
             selected_indices = np.array(selected_indices[:target_samples])
             
         else:
+            logger.debug("running _apply_intelligent_sampling ... Using RANDOM sampling")
             # Random sampling
             selected_indices = np.random.choice(total_samples, target_samples, replace=False)
         
         sampled_x = x_train[selected_indices]
         sampled_y = y_train[selected_indices]
         
+        # 🎯 VERIFICATION LOGS
+        logger.debug(f"running _apply_intelligent_sampling ... SAMPLING RESULTS:")
+        logger.debug(f"running _apply_intelligent_sampling ... - Original dataset: {x_train.shape}")
+        logger.debug(f"running _apply_intelligent_sampling ... - Sampled dataset: {sampled_x.shape}")
+        logger.debug(f"running _apply_intelligent_sampling ... - Reduction ratio: {len(sampled_x)/len(x_train):.3f} ({len(sampled_x)/len(x_train)*100:.1f}%)")
+        logger.debug(f"running _apply_intelligent_sampling ... - Expected ratio: {self.model_config.gpu_proxy_sample_percentage:.3f} ({self.model_config.gpu_proxy_sample_percentage*100:.1f}%)")
+        
+        # Verify class distribution if using stratified sampling
+        if self.model_config.gpu_proxy_use_stratified_sampling:
+            if sampled_y.ndim > 1 and sampled_y.shape[1] > 1:
+                sampled_labels = np.argmax(sampled_y, axis=1)
+            else:
+                sampled_labels = sampled_y.flatten()
+            
+            unique_sampled_classes, sampled_counts = np.unique(sampled_labels, return_counts=True)
+            logger.debug(f"running _apply_intelligent_sampling ... - Sampled class distribution: {list(zip(unique_sampled_classes, sampled_counts))}")
+        
         # Optimize data types if requested
         if self.model_config.gpu_proxy_optimize_data_types:
+            logger.debug("running _apply_intelligent_sampling ... Optimizing data types...")
             if sampled_x.dtype == np.float64:
                 sampled_x = sampled_x.astype(np.float32)
+                logger.debug("running _apply_intelligent_sampling ... - Converted x from float64 to float32")
             if sampled_x.max() <= 1.0 and sampled_x.min() >= 0.0:
                 # Convert to uint8 if data is normalized
                 sampled_x = (sampled_x * 255).astype(np.uint8)
+                logger.debug("running _apply_intelligent_sampling ... - Converted normalized data to uint8")
         
-        logger.debug(f"running _apply_intelligent_sampling ... sampled {len(sampled_x)} from {total_samples} samples")
+        logger.debug(f"running _apply_intelligent_sampling ... ✅ SAMPLING COMPLETE: {len(sampled_x)} samples selected from {total_samples} total")
         return sampled_x, sampled_y
     
     def _calculate_optimal_timeout(self, context_data: Dict[str, Any]) -> int:
@@ -1287,7 +1339,7 @@ class ModelBuilder:
             import tensorflow as tf
             logger.debug("running _process_training_results ... Local Environment (for comparison):")
             logger.debug(f"running _process_training_results ... - TensorFlow: {tf.__version__}")
-            logger.debug(f"running _process_training_results ... - Keras (TF): {tf.keras.__version__}")            
+            logger.debug(f"running _process_training_results ... - Keras (TF): {tf.keras.__version__}")             # type: ignore
             logger.debug(f"running _process_training_results ... - CUDA built: {tf.test.is_built_with_cuda()}")
             
             logger.debug("running _process_training_results ... Training history processed successfully with comprehensive analysis")
@@ -1464,7 +1516,7 @@ class ModelBuilder:
         logger.debug("running _train_locally_optimized ... Optimized local training with manual validation split completed")
         
         # 🎯 PHASE 4: Log validation split consistency verification
-        if validation_split_value > 0:
+        if validation_split_value > 0 and self.training_history is not None:
             val_metrics = [k for k in self.training_history.history.keys() if 'val' in k]
             val_acc_metrics = [k for k in val_metrics if 'acc' in k or 'accuracy' in k]
             
@@ -1496,43 +1548,53 @@ class ModelBuilder:
         
         return callbacks_list
 
-    # REFACTORED: Simplified evaluate method - NO PLOT GENERATION
     def evaluate(
         self, 
         data: Dict[str, Any]
     ) -> Tuple[float, float]:
         """
-        REFACTORED: Simplified model evaluation - returns only metrics
+        ✅ EVALUATION CONSOLIDATION: Simplified model evaluation using HealthAnalyzer delegation
         
-        Plot generation is now handled separately by PlotGenerator module.
-        This method focuses purely on model evaluation metrics.
+        This method now acts as a thin wrapper that:
+        1. Calls HealthAnalyzer.calculate_comprehensive_health() with data parameter
+        2. Extracts test_loss and test_accuracy from the comprehensive results  
+        3. Maintains the same return signature for backward compatibility
         
         Args:
             data: Dictionary containing test data
             
         Returns:
-            Tuple of (test_loss, test_accuracy)
+            Tuple of (test_loss, test_accuracy) - same as before for compatibility
         """
         if self.model is None:
             raise ValueError("Model must be built and trained before evaluation")
         
-        logger.debug("running evaluate ... Starting simplified model evaluation...")
+        logger.debug("running evaluate ... Starting CONSOLIDATED model evaluation via HealthAnalyzer...")
         
-        # Basic evaluation with performance monitoring
-        with TimedOperation("model evaluation", "model_builder"):
-            evaluation_results = self.model.evaluate(
-                data['x_test'], 
-                data['y_test'],
-                verbose=1
-            )
-            
-            # Handle both single and multiple metrics
-            test_loss, test_accuracy = self._extract_evaluation_metrics(evaluation_results)
+        # ✅ Use HealthAnalyzer as single source of truth for evaluation
+        comprehensive_metrics = self.health_analyzer.calculate_comprehensive_health(
+            model=self.model,
+            history=self.training_history,
+            data=data,  # ✅ KEY: Pass data to get basic metrics
+            sample_data=data['x_test'][:50] if len(data['x_test']) > 50 else data['x_test'],
+            training_time_minutes=getattr(self, 'training_time_minutes', None),
+            total_params=self.model.count_params()
+        )
         
-        # Log evaluation results
-        logger.debug(f"running evaluate ... Evaluation completed:")
+        # ✅ Extract basic metrics that ModelBuilder users expect (backward compatibility)
+        test_loss = comprehensive_metrics.get('test_loss', 0.0)
+        test_accuracy = comprehensive_metrics.get('test_accuracy', 0.0)
+        
+        # Log evaluation results with health context
+        overall_health = comprehensive_metrics.get('overall_health', 0.5)
+        logger.debug(f"running evaluate ... CONSOLIDATED evaluation completed:")
         logger.debug(f"running evaluate ... - Test accuracy: {test_accuracy:.4f}")
         logger.debug(f"running evaluate ... - Test loss: {test_loss:.4f}")
+        logger.debug(f"running evaluate ... - Overall model health: {overall_health:.3f}")
+        
+        # ✅ Store comprehensive metrics for potential later access
+        self.last_comprehensive_evaluation = comprehensive_metrics
+        logger.debug("running evaluate ... Comprehensive metrics stored for later access")
         
         return test_loss, test_accuracy
     
@@ -1546,6 +1608,32 @@ class ModelBuilder:
             test_accuracy = 0.0
         
         return test_loss, test_accuracy
+    
+    
+    def get_last_health_analysis(self) -> Optional[Dict[str, Any]]:
+        """
+        ✅ NEW: Get comprehensive health metrics from last evaluation
+        
+        Provides access to the full health analysis results from the most recent
+        evaluate() call, enabling users to access detailed health metrics beyond
+        just test_loss and test_accuracy.
+        
+        Returns:
+            Dictionary with comprehensive health metrics or None if no evaluation performed
+            
+        Example:
+            # Get basic metrics
+            test_loss, test_accuracy = model_builder.evaluate(data)
+            
+            # Get detailed health analysis from same evaluation
+            health_metrics = model_builder.get_last_health_analysis()
+            if health_metrics:
+                overall_health = health_metrics['overall_health']
+                recommendations = health_metrics['recommendations']
+                neuron_utilization = health_metrics['neuron_utilization']
+        """
+        return getattr(self, 'last_comprehensive_evaluation', None)
+    
     
     # Model saving methods
     def _generate_optimized_filename(
