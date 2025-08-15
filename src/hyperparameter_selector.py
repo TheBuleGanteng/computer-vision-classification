@@ -63,7 +63,7 @@ class HyperparameterSelector:
         logger.debug(f"running suggest_hyperparameters ... Activation override: {activation_override}")
         
         if self.data_type == "text":
-            # Pass activation_override to LSTM suggestion method for consistency
+            # Pass activation_override to LSTM suggestion method for API consistency; LSTM architectures typically ignore this parameter
             params = self.suggest_lstm_hyperparameters(trial, activation_override)
             logger.debug(f"running suggest_hyperparameters ... Generated LSTM hyperparameters")
         else:
