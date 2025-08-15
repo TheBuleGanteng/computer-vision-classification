@@ -1,14 +1,19 @@
 """
-Shared Health Analysis Module
+Shared Health Analysis Module - STEP 3 IMPLEMENTATION COMPLETE
 
-Provides comprehensive model health assessment capabilities for use across
-multiple components including hyperparameter optimizers and API endpoints.
+EVALUATION ARCHITECTURE CONSOLIDATION - STEP 3 COMPLETE:
+✅ Enhanced calculate_comprehensive_health() with data parameter
+✅ Added _calculate_basic_metrics() method (IMPLEMENTED)
+✅ Added _extract_basic_metrics() helper method (IMPLEMENTED)
+✅ Include basic metrics in return dictionary
+✅ Maintains backward compatibility for existing usage
 
-This module extracts and centralizes health calculation logic to enable:
-- Consistent health metrics across all optimization strategies
-- Reusable health assessment for API visualization
-- Centralized health analysis logic with proper separation of concerns
-- Standardized health metric definitions and calculations
+This module now serves as the single source of truth for both:
+- Basic evaluation metrics (test_loss, test_accuracy) 
+- Comprehensive health analysis (neuron utilization, training stability, etc.)
+
+This eliminates the duplication between ModelBuilder.evaluate() and 
+HealthAnalyzer.calculate_comprehensive_health().
 
 Key Health Metrics:
 - Dead Neuron Analysis: Identifies inactive neurons that don't contribute to learning
@@ -19,12 +24,23 @@ Key Health Metrics:
 - Accuracy Consistency: Measures prediction stability across training
 
 Usage:
-    # For optimization (with sample data)
+    # Enhanced usage - includes basic metrics
     analyzer = HealthAnalyzer()
-    health_metrics = analyzer.calculate_comprehensive_health(model, history, sample_data)
+    health_metrics = analyzer.calculate_comprehensive_health(
+        model=trained_model,
+        history=training_history,
+        data=data_dict,  # NEW: Enables basic metrics calculation
+        sample_data=validation_samples
+    )
+    # Now returns: test_loss, test_accuracy + all health metrics
     
-    # For API visualization (without sample data)
-    health_metrics = analyzer.calculate_basic_health(model, history)
+    # Backward compatible usage - health metrics only
+    health_metrics = analyzer.calculate_comprehensive_health(
+        model=trained_model,
+        history=training_history,
+        sample_data=validation_samples
+    )
+    # Returns: health metrics only (no basic metrics)
 """
 
 import numpy as np
@@ -36,14 +52,19 @@ from utils.logger import logger
 
 class HealthAnalyzer:
     """
-    Comprehensive model health analysis system
+    ENHANCED: Comprehensive model health analysis system with basic metrics support
+    
+    EVALUATION CONSOLIDATION: Now serves as single source of truth for both:
+    1. Basic evaluation metrics (test_loss, test_accuracy)
+    2. Comprehensive health analysis (neuron utilization, training stability, etc.)
     
     Provides standardized health assessment capabilities that can be used
     by optimization systems, API endpoints, and visualization tools.
     
-    The analyzer supports two modes:
-    1. Comprehensive analysis (with sample data for activation-based metrics)
-    2. Basic analysis (weight-based metrics only, suitable for API endpoints)
+    The analyzer supports multiple modes:
+    1. Comprehensive analysis with basic metrics (when data provided)
+    2. Comprehensive analysis health-only (traditional usage)
+    3. Basic analysis (weight-based metrics only, suitable for API endpoints)
     
     All health metrics are normalized to 0-1 scale where higher values
     indicate better health, enabling consistent interpretation across
@@ -55,12 +76,22 @@ class HealthAnalyzer:
     Example Usage:
         analyzer = HealthAnalyzer()
         
-        # Comprehensive analysis with sample data
+        # ENHANCED: Comprehensive analysis with basic metrics
+        health = analyzer.calculate_comprehensive_health(
+            model=trained_model,
+            history=training_history,
+            data=data_dict,  # NEW: Enables basic metrics
+            sample_data=validation_samples
+        )
+        # Returns: test_loss, test_accuracy + health metrics
+        
+        # BACKWARD COMPATIBLE: Health-only analysis
         health = analyzer.calculate_comprehensive_health(
             model=trained_model,
             history=training_history,
             sample_data=validation_samples
         )
+        # Returns: health metrics only
         
         # Basic analysis for API endpoints
         health = analyzer.calculate_basic_health(
@@ -76,33 +107,39 @@ class HealthAnalyzer:
         Creates a stateless analyzer instance that can be safely used
         across multiple threads and components.
         """
-        logger.debug("running HealthAnalyzer.__init__ ... Health analyzer initialized")
+        logger.debug("running HealthAnalyzer.__init__ ... Health analyzer initialized with basic metrics support")
     
     def calculate_comprehensive_health(
         self,
         model: Any,
         history: Any,
+        data: Optional[Dict[str, Any]] = None,  # ✅ NEW: Add data parameter
         sample_data: Optional[np.ndarray] = None,
         training_time_minutes: Optional[float] = None,
         total_params: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Calculate comprehensive health metrics with activation-based analysis
+        ✅ ENHANCED: Calculate comprehensive health metrics with optional basic metrics
         
-        Performs complete health assessment including activation-based dead neuron
-        detection when sample data is available. This is the most accurate health
-        assessment method and should be used during optimization.
+        EVALUATION CONSOLIDATION: Now includes basic evaluation metrics when data is provided,
+        eliminating the need for separate ModelBuilder.evaluate() calls.
         
         Args:
             model: Trained Keras model
             history: Training history object with loss/accuracy curves
+            data: Optional data dictionary for basic metrics calculation ✅ NEW
             sample_data: Optional sample data for activation-based analysis
             training_time_minutes: Optional training time for efficiency metrics
             total_params: Optional parameter count (calculated if None)
             
         Returns:
-            Dictionary with comprehensive health metrics:
+            Dictionary with comprehensive health metrics + optional basic metrics:
             {
+                # ✅ NEW: Basic metrics (when data provided)
+                'test_loss': float,               # Basic evaluation loss
+                'test_accuracy': float,           # Basic evaluation accuracy
+                
+                # Existing health metrics
                 'neuron_utilization': float,      # 0-1, higher = better neuron usage
                 'parameter_efficiency': float,    # 0-1, higher = better efficiency
                 'training_stability': float,      # 0-1, higher = more stable training
@@ -114,9 +151,18 @@ class HealthAnalyzer:
                 'recommendations': list           # Specific improvement recommendations
             }
         """
-        logger.debug("running HealthAnalyzer.calculate_comprehensive_health ... Starting comprehensive health analysis")
+        logger.debug("running HealthAnalyzer.calculate_comprehensive_health ... Starting enhanced comprehensive health analysis")
         
         try:
+            # ✅ NEW: Calculate basic metrics if data provided
+            basic_metrics = {}
+            if data is not None:
+                logger.debug("running HealthAnalyzer.calculate_comprehensive_health ... Calculating basic evaluation metrics")
+                basic_metrics = self._calculate_basic_metrics(model, data)
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Basic metrics: test_loss={basic_metrics.get('test_loss', 'N/A'):.4f}, test_accuracy={basic_metrics.get('test_accuracy', 'N/A'):.4f}")
+            else:
+                logger.debug("running HealthAnalyzer.calculate_comprehensive_health ... No data provided, skipping basic metrics")
+            
             # Calculate individual health components
             neuron_health = self._calculate_neuron_utilization(model, sample_data)
             parameter_efficiency = self._calculate_parameter_efficiency(model, history, training_time_minutes, total_params)
@@ -137,8 +183,9 @@ class HealthAnalyzer:
                 gradient_health, convergence_quality, accuracy_consistency
             )
             
-            # Compile comprehensive results
+            # ✅ ENHANCED: Compile comprehensive results with basic metrics
             health_metrics = {
+                **basic_metrics,  # ✅ NEW: Include basic metrics if available
                 'neuron_utilization': neuron_health,
                 'parameter_efficiency': parameter_efficiency,
                 'training_stability': training_stability,
@@ -157,14 +204,101 @@ class HealthAnalyzer:
                 'recommendations': recommendations
             }
             
-            logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Overall health score: {overall_health:.3f}")
-            logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Generated {len(recommendations)} recommendations")
+            # ✅ Log enhancement status
+            if basic_metrics:
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... ENHANCED MODE: Basic + Health metrics")
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Overall health score: {overall_health:.3f}")
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Generated {len(recommendations)} recommendations")
+            else:
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... TRADITIONAL MODE: Health metrics only")
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Overall health score: {overall_health:.3f}")
+                logger.debug(f"running HealthAnalyzer.calculate_comprehensive_health ... Generated {len(recommendations)} recommendations")
             
             return health_metrics
             
         except Exception as e:
-            logger.error(f"running HealthAnalyzer.calculate_comprehensive_health ... Health analysis failed: {e}")
+            logger.error(f"running HealthAnalyzer.calculate_comprehensive_health ... Enhanced health analysis failed: {e}")
             return self._get_default_health_metrics(error=str(e))
+    
+    def _calculate_basic_metrics(self, model: Any, data: Dict[str, Any]) -> Dict[str, float]:
+        """
+        ✅ NEW: Calculate basic evaluation metrics (test_loss, test_accuracy)
+        
+        This method consolidates basic model evaluation that was previously
+        handled by ModelBuilder.evaluate(), eliminating duplication.
+        
+        Args:
+            model: Trained Keras model
+            data: Data dictionary containing 'x_test' and 'y_test'
+            
+        Returns:
+            Dictionary with basic evaluation metrics:
+            {
+                'test_loss': float,
+                'test_accuracy': float
+            }
+        """
+        logger.debug("running HealthAnalyzer._calculate_basic_metrics ... Calculating basic evaluation metrics")
+        
+        try:
+            # Validate data dictionary
+            if not data or 'x_test' not in data or 'y_test' not in data:
+                logger.warning("running HealthAnalyzer._calculate_basic_metrics ... Invalid data dictionary, missing x_test or y_test")
+                return {'test_loss': 0.0, 'test_accuracy': 0.0}
+            
+            # Perform model evaluation
+            logger.debug("running HealthAnalyzer._calculate_basic_metrics ... Running model.evaluate()")
+            evaluation_results = model.evaluate(data['x_test'], data['y_test'], verbose=0)
+            logger.debug(f"running HealthAnalyzer._calculate_basic_metrics ... Raw evaluation results: {evaluation_results}")
+            
+            # Extract metrics using helper method
+            test_loss, test_accuracy = self._extract_basic_metrics(evaluation_results)
+            
+            basic_metrics = {
+                'test_loss': test_loss,
+                'test_accuracy': test_accuracy
+            }
+            
+            logger.debug(f"running HealthAnalyzer._calculate_basic_metrics ... Basic metrics calculated: {basic_metrics}")
+            return basic_metrics
+            
+        except Exception as e:
+            logger.warning(f"running HealthAnalyzer._calculate_basic_metrics ... Failed to calculate basic metrics: {e}")
+            return {'test_loss': 0.0, 'test_accuracy': 0.0}
+    
+    def _extract_basic_metrics(self, evaluation_results: Any) -> Tuple[float, float]:
+        """
+        ✅ NEW: Extract basic metrics from model.evaluate() results
+        
+        Helper method to handle different return formats from model.evaluate():
+        - Single value (loss only)
+        - List of values (loss + metrics)
+        
+        Args:
+            evaluation_results: Results from model.evaluate()
+            
+        Returns:
+            Tuple of (test_loss, test_accuracy)
+        """
+        logger.debug(f"running HealthAnalyzer._extract_basic_metrics ... Extracting from results: {evaluation_results}")
+        
+        try:
+            if isinstance(evaluation_results, list):
+                # Multiple metrics returned: [loss, metric1, metric2, ...]
+                test_loss = float(evaluation_results[0])
+                test_accuracy = float(evaluation_results[1]) if len(evaluation_results) > 1 else 0.0
+                logger.debug(f"running HealthAnalyzer._extract_basic_metrics ... Extracted from list: loss={test_loss:.4f}, accuracy={test_accuracy:.4f}")
+            else:
+                # Single metric returned (loss only)
+                test_loss = float(evaluation_results)
+                test_accuracy = 0.0
+                logger.debug(f"running HealthAnalyzer._extract_basic_metrics ... Extracted single value: loss={test_loss:.4f}, accuracy=0.0 (not available)")
+            
+            return test_loss, test_accuracy
+            
+        except Exception as e:
+            logger.warning(f"running HealthAnalyzer._extract_basic_metrics ... Failed to extract metrics: {e}")
+            return 0.0, 0.0
     
     def calculate_basic_health(
         self,

@@ -311,15 +311,27 @@ class ConfusionMatrixAnalyzer:
         
         logger.debug("running _log_analysis_results ... Top 10 performing classes (by recall):")
         for i, metrics in enumerate(class_metrics_sorted[:10], 1):
+            '''
             logger.debug(f"running _log_analysis_results ... {i:2d}. {metrics['class_name']:20s}: "
                         f"recall={metrics['recall']:.3f}, precision={metrics['precision']:.3f} "
                         f"({metrics['total_actual']} samples)")
-        
+            '''
+            
         logger.debug("running _log_analysis_results ... Bottom 10 performing classes (by recall):")
         for i, metrics in enumerate(class_metrics_sorted[-10:], 1):
+            '''
             logger.debug(f"running _log_analysis_results ... {i:2d}. {metrics['class_name']:20s}: "
                         f"recall={metrics['recall']:.3f}, precision={metrics['precision']:.3f} "
                         f"({metrics['total_actual']} samples)")
+            # logger.debug(f"running _log_analysis_results ... {i:2d}. {metrics['class_name']:20s}: "
+            #             f"recall={metrics['recall']:.3f}, precision={metrics['precision']:.3f} "
+            #             f"({metrics['total_actual']} samples)")
+            
+        logger.debug("running _log_analysis_results ... Bottom 10 performing classes (by recall):")
+        for i, metrics in enumerate(class_metrics_sorted[-10:], 1):
+            # logger.debug(f"running _log_analysis_results ... {i:2d}. {metrics['class_name']:20s}: "
+            #             f"recall={metrics['recall']:.3f}, precision={metrics['precision']:.3f} "
+            #             f"({metrics['total_actual']} samples)")
     
     def _create_visualization(
         self,

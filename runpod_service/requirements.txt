@@ -1,0 +1,17 @@
+numpy<2.0.0
+optuna
+optuna-integration
+scikit-learn
+pandas
+matplotlib
+seaborn
+plotly
+opencv-python
+pydantic
+fastapi
+uvicorn
+requests
+pyyaml
+altair
+runpod
+kagglehub
