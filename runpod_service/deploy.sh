@@ -282,7 +282,16 @@ if command -v runpodctl > /dev/null 2>&1; then
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 echo -e "${YELLOW}⏸️  Deployment paused. Please update RunPod endpoint and re-run script.${NC}"
                 echo -e "${BLUE}💡 Copy this image name: ${REMOTE_IMAGE}${NC}"
-                exit 0
+            if [ "$SKIP_CONFIRMATION" = false ]; then
+                read -p "Have you updated the RunPod endpoint with the new image? (y/n): " -n 1 -r
+                echo
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    echo -e "${YELLOW}⏸️  Deployment paused. Please update RunPod endpoint and re-run script.${NC}"
+                    echo -e "${BLUE}💡 Copy this image name: ${REMOTE_IMAGE}${NC}"
+                    exit 0
+                fi
+            else
+                echo -e "${YELLOW}⚠️  Skipping manual confirmation (--skip-confirmation specified).${NC}"
             fi
             echo -e "${GREEN}✅ Continuing with testing...${NC}"
             
