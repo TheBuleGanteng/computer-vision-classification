@@ -261,7 +261,12 @@ def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             logger.debug(f"running start_training ... - {key}: {value}")
         
         # 🎯 CRITICAL FIX: Call create_and_train_model directly, not optimize_model
-        # optimize_model runs its own optimization study, ignoring our hyperparameters
+        # 🎯 CRITICAL FIX: Architectural decision: Call create_and_train_model directly, not optimize_model.
+        # In this serverless handler, each invocation is responsible for running a single training trial with explicit hyperparameters
+        # provided by an external orchestrator (e.g., a hyperparameter tuning service). Calling optimize_model here would incorrectly
+        # initiate a new optimization study, ignoring the supplied hyperparameters and breaking the intended control flow. By calling
+        # create_and_train_model directly, we ensure that the handler executes only the requested trial, maintaining separation of
+        # concerns and preventing nested or conflicting optimization loops.
         logger.debug(f"running start_training ... calling create_and_train_model with trial hyperparameters: {trial_id}")
         
         # Import create_and_train_model for single trial execution
