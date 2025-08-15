@@ -80,7 +80,7 @@ def analyze_config_differences():
             model_value = getattr(model_config, param_name)
             if opt_value != model_value:
                 missing_transfers.append((param_name, opt_value, model_value))
-                print(f"  ⚠️  {param_name}: OptConfig={opt_value}, ModelConfig={model_value}")
+                logger.warning(f"  ⚠️  {param_name}: OptConfig={opt_value}, ModelConfig={model_value}")
     
     if not missing_transfers:
         print("  ✅ No missing parameter transfers found")
