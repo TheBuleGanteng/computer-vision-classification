@@ -63,7 +63,7 @@ from health_analyzer import HealthAnalyzer
 from model_builder import ModelBuilder, ModelConfig, create_and_train_model
 from utils.logger import logger
 
-# PHASE 2 REFACTORING: Import new modular components
+# Import modular components
 from hyperparameter_selector import HyperparameterSelector
 from plot_generator import PlotGenerator
 
@@ -85,6 +85,7 @@ def _load_env_file():
 
 # Load environment variables automatically
 _load_env_file()
+
 
 @dataclass
 class TrialProgress:
@@ -418,6 +419,99 @@ Top Parameter Importance:
         return "\n".join(lines)
 
 
+class ConcurrentProgressAggregator:
+    """Aggregates progress across multiple concurrent trials"""
+    
+    def __init__(self, total_trials: int):
+        self.total_trials = total_trials
+    
+    def aggregate_progress(self, current_trial: TrialProgress, all_trial_statuses: Dict[int, str]) -> 'AggregatedProgress':
+        """
+        Aggregate progress from multiple concurrent trials
+        
+        Args:
+            current_trial: Current trial progress data
+            all_trial_statuses: Dictionary mapping trial numbers to status strings
+            
+        Returns:
+            AggregatedProgress with consolidated status
+        """
+        logger.debug(f"running aggregate_progress ... aggregating progress for {len(all_trial_statuses)} trials")
+        
+        # Categorize trials by status
+        running_trials = [t for t, s in all_trial_statuses.items() if s == "running"]
+        completed_trials = [t for t, s in all_trial_statuses.items() if s == "completed"]
+        failed_trials = [t for t, s in all_trial_statuses.items() if s == "failed"]
+        
+        # Calculate ETA using the current trial statuses
+        estimated_time_remaining = self.calculate_eta(all_trial_statuses)
+        
+        # Get current best value (this will be implemented in the callback)
+        current_best_value = self.get_current_best_value()
+        
+        return AggregatedProgress(
+            total_trials=self.total_trials,
+            running_trials=running_trials,
+            completed_trials=completed_trials,
+            failed_trials=failed_trials,
+            current_best_value=current_best_value,
+            estimated_time_remaining=estimated_time_remaining
+        )
+    
+    def calculate_eta(self, all_trial_statuses: Dict[int, str]) -> Optional[float]:
+        """Calculate estimated time remaining based on trial statuses"""
+        # Simple implementation - can be enhanced later
+        completed_count = len([s for s in all_trial_statuses.values() if s == "completed"])
+        
+        if completed_count == 0:
+            return None
+        
+        # Rough estimate based on completion rate
+        remaining_trials = self.total_trials - completed_count
+        avg_time_per_trial = 120.0  # Assume 2 minutes per trial as baseline
+        
+        return remaining_trials * avg_time_per_trial
+    
+    def get_current_best_value(self) -> Optional[float]:
+        """Get current best value - placeholder for now"""
+        return None  # Will be populated by the ModelOptimizer instance
+
+
+@dataclass 
+class AggregatedProgress:
+    """Aggregated progress data across multiple concurrent trials"""
+    total_trials: int
+    running_trials: List[int]
+    completed_trials: List[int]
+    failed_trials: List[int]
+    current_best_value: Optional[float]
+    estimated_time_remaining: Optional[float]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API serialization"""
+        return {
+            'total_trials': self.total_trials,
+            'running_trials': self.running_trials,
+            'completed_trials': self.completed_trials,
+            'failed_trials': self.failed_trials,
+            'current_best_value': self.current_best_value,
+            'estimated_time_remaining': self.estimated_time_remaining
+        }
+
+
+# Progress callback
+def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress]) -> None:
+    """Default progress callback that prints progress updates to console"""
+    if isinstance(progress, AggregatedProgress):
+        print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
+              f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
+        if progress.current_best_value is not None:
+            print(f"   Best value so far: {progress.current_best_value:.4f}")
+        if progress.estimated_time_remaining is not None:
+            eta_minutes = progress.estimated_time_remaining / 60
+            print(f"   ETA: {eta_minutes:.1f} minutes")
+
+
 class ModelOptimizer:
     """
     ARCHITECTURAL PIVOT: Unified optimizer class with RunPod service integration
@@ -429,7 +523,7 @@ class ModelOptimizer:
     def __init__(self, dataset_name: str, optimization_config: Optional[OptimizationConfig] = None, 
         datasets_root: Optional[str] = None, run_name: Optional[str] = None,
         health_analyzer: Optional[HealthAnalyzer] = None,
-        progress_callback: Optional[Callable[[TrialProgress], None]] = None,
+        progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress]], None]] = None,
         activation_override: Optional[str] = None):
         """
         Initialize ModelOptimizer with RunPod service support
@@ -460,9 +554,10 @@ class ModelOptimizer:
         # Initialize health analyzer (always available for monitoring)
         self.health_analyzer = health_analyzer or HealthAnalyzer()
         
-        # Health monitoring storage
-        #self.trial_health_history: List[Dict[str, Any]] = []
-        #self.best_trial_health: Optional[Dict[str, Any]] = None
+        # Thread-safe shared state management
+        self._state_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._best_trial_lock = threading.Lock()
         
         # Initialize dataset manager and load dataset info
         self.dataset_manager = DatasetManager(datasets_root)
@@ -481,7 +576,7 @@ class ModelOptimizer:
             test_size=self.config.test_size
         )
         
-        # PHASE 2 REFACTORING: Initialize HyperparameterSelector
+        # Initialize HyperparameterSelector
         logger.debug(f"running ModelOptimizer.__init__ ... Initializing HyperparameterSelector")
         self.hyperparameter_selector = HyperparameterSelector(
             dataset_config=self.dataset_config,
@@ -509,33 +604,27 @@ class ModelOptimizer:
         self.results_dir: Optional[Path] = None
         
         # Create results directory
-        self._setup_results_directory()
-        
-        # Real-time trial tracking
-        #self.progress_callback = progress_callback
-        #self.current_trial_progress: Optional[TrialProgress] = None
-        #self.trial_progress_history: List[TrialProgress] = []
-        #self.best_trial_progress: Optional[TrialProgress] = None
-        
-        # Architecture and health trends for visualization
-        #self.architecture_trends: Dict[str, List[float]] = {}
-        #self.health_trends: Dict[str, List[float]] = {}
-        
+        self._setup_results_directory()      
+                        
+        # Health monitoring storage (protected by _state_lock)
+        self._trial_health_history: List[Dict[str, Any]] = []
+        self._best_trial_health: Optional[Dict[str, Any]] = None
         
         # Thread-safe shared state management
         self._state_lock = threading.Lock()
         self._progress_lock = threading.Lock()
         self._best_trial_lock = threading.Lock()
         
-        # Health monitoring storage (protected by _state_lock)
-        self._trial_health_history: List[Dict[str, Any]] = []
-        self._best_trial_health: Optional[Dict[str, Any]] = None
-        
         # Real-time trial tracking (protected by _progress_lock)
         self.progress_callback = progress_callback
         self._current_trial_progress: Optional[TrialProgress] = None
         self._trial_progress_history: List[TrialProgress] = []
         self._best_trial_progress: Optional[TrialProgress] = None
+        
+        # Progress aggregation infrastructure
+        self._progress_aggregator = ConcurrentProgressAggregator(self.config.n_trials)
+        self._trial_start_times: Dict[int, float] = {}
+        self._trial_statuses: Dict[int, str] = {}  # "running", "completed", "failed"
         
         # Architecture and health trends (protected by _state_lock)
         self._architecture_trends: Dict[str, List[float]] = {}
@@ -601,6 +690,50 @@ class ModelOptimizer:
         """Thread-safe method to get best trial info"""
         with self._best_trial_lock:
             return self._best_trial_number, self._best_trial_value
+        
+    def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
+        """
+        Thread-safe progress callback wrapper as specified in status.md
+        
+        Args:
+            trial_progress: TrialProgress object with current trial status
+        """
+        logger.debug(f"running _thread_safe_progress_callback ... processing progress for trial {trial_progress.trial_number}")
+        
+        with self._progress_lock:
+            # Update trial status tracking
+            self._trial_statuses[trial_progress.trial_number] = trial_progress.status
+            logger.debug(f"running _thread_safe_progress_callback ... updated trial {trial_progress.trial_number} status to '{trial_progress.status}'")
+            
+            # Call user-provided progress callback if available
+            if self.progress_callback:
+                try:
+                    # Get current best value for aggregation
+                    best_trial_number, best_trial_value = self.get_best_trial_info()
+                    
+                    # Update the progress aggregator with current best value
+                    self._progress_aggregator.get_current_best_value = lambda: best_trial_value
+                    
+                    # Create aggregated progress
+                    aggregated_progress = self._progress_aggregator.aggregate_progress(
+                        current_trial=trial_progress,
+                        all_trial_statuses=self._trial_statuses
+                    )
+                    
+                    logger.debug(f"running _thread_safe_progress_callback ... calling user progress callback with aggregated data")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Total trials: {aggregated_progress.total_trials}")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Running: {len(aggregated_progress.running_trials)}")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Completed: {len(aggregated_progress.completed_trials)}")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Failed: {len(aggregated_progress.failed_trials)}")
+                    
+                    # Call the user's progress callback with aggregated progress
+                    self.progress_callback(aggregated_progress)
+                    
+                except Exception as e:
+                    logger.error(f"running _thread_safe_progress_callback ... error in progress callback: {e}")
+                    # Don't re-raise to avoid disrupting trial execution
+            else:
+                logger.debug(f"running _thread_safe_progress_callback ... no user progress callback configured")
     
     
     
@@ -1156,6 +1289,22 @@ class ModelOptimizer:
         Returns:
             Objective value (higher is better for maximization objectives)
         """
+        trial_start_time = time.time()
+    
+        # Track trial start in progress aggregation
+        if self.progress_callback:
+            trial_progress = TrialProgress(
+                trial_id=f"trial_{trial.number}",
+                trial_number=trial.number,
+                status="running",
+                started_at=datetime.now().isoformat()
+            )
+            self._thread_safe_progress_callback(trial_progress)
+        
+        # Record trial start time for ETA calculation
+        with self._progress_lock:
+            self._trial_start_times[trial.number] = trial_start_time
+        
         try:
             logger.debug(
                 f"running _objective_function ... start "
@@ -1217,12 +1366,43 @@ class ModelOptimizer:
             # Check execution method
             if self._should_use_runpod_service():
                 logger.debug(f"running _objective_function ... Trial {trial.number}: 🔄 Using RunPod service (JSON API)")
-                return self._train_via_runpod_service(trial, params)
+                objective_value = self._train_via_runpod_service(trial, params)
             else:
                 logger.debug(f"running _objective_function ... Trial {trial.number}: Using local execution")
-                return self._train_locally_for_trial(trial, params)
+                objective_value = self._train_locally_for_trial(trial, params)
+            
+            # Track trial completion in progress aggregation
+            if self.progress_callback:
+                trial_end_time = time.time()
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="completed",
+                    started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
+                    completed_at=datetime.now().isoformat(),
+                    duration_seconds=trial_end_time - trial_start_time,
+                    performance={'objective_value': objective_value}
+                )
+                self._thread_safe_progress_callback(trial_progress)
+            
+            # Update best trial tracking
+            self.update_best_trial(trial.number, objective_value)
+            
+            return objective_value
             
         except Exception as e:
+            # Track trial failure in progress aggregation
+            if self.progress_callback:
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="failed",
+                    started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
+                    completed_at=datetime.now().isoformat(),
+                    duration_seconds=time.time() - trial_start_time
+                )
+                self._thread_safe_progress_callback(trial_progress)
+            
             logger.error(f"running ModelOptimizer._objective_function ... Trial {trial.number} failed: {str(e)}")
             logger.error(f"running ModelOptimizer._objective_function ... Traceback: {traceback.format_exc()}")
             raise
@@ -1336,8 +1516,8 @@ def optimize_model(
     trials: int = 50,
     run_name: Optional[str] = None,
     activation: Optional[str] = None,
-    progress_callback: Optional[Callable[[TrialProgress], None]] = None,
-    # 🔄 ARCHITECTURAL PIVOT: RunPod service parameters (replacing GPU proxy)
+    progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress]], None]] = None,
+    # RunPod service parameters (replacing GPU proxy)
     use_runpod_service: bool = False,
     runpod_service_endpoint: Optional[str] = None,
     runpod_service_timeout: int = 600,
@@ -1602,6 +1782,7 @@ if __name__ == "__main__":
             trials=trials,
             run_name=run_name,
             activation=activation,
+            progress_callback=default_progress_callback,
             use_runpod_service=use_runpod_service,
             runpod_service_endpoint=runpod_service_endpoint,
             runpod_service_timeout=runpod_service_timeout,
