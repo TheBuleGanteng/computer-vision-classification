@@ -433,3 +433,74 @@ The system has been successfully transformed from monolithic to clean modular ar
 - **Developer Productivity**: Seamless integration with automatic fallback and error handling
 
 **Ready for Phase 4 advanced features with a solid foundation for enterprise-scale hyperparameter optimization capabilities.**
+
+## In-Process Parallelism – Implementation Plan
+
+### Goal
+Enable multiple hyperparameter optimization trials to run in parallel **within the same Python process** using `n_jobs` in Optuna, so that available RunPod workers (or local resources) can be utilized more efficiently.
+
+---
+
+### 1. Changes to `optimizer.py` – Orchestration
+- **Add a concurrency configuration parameter** (e.g., `concurrency`) that maps to `study.optimize(..., n_jobs=concurrency)`.
+- **Ensure objective function is thread-safe**:  
+  - Avoid modifying shared mutable state from multiple threads.
+  - Use per-trial local variables for metrics, logs, and temporary files.
+- **Per-trial filesystem isolation**:  
+  - Each trial writes to a unique output directory, identified by trial number or ID.
+- **Log clarity**:  
+  - Include trial numbers in log messages to distinguish output from concurrent trials.
+
+---
+
+### 2. Changes to `hyperparameter_selector.py` – Search Space
+- Keep this module **pure**—no changes needed for concurrency, as it only returns trial parameters.
+- Confirm that parameter suggestion functions do not rely on any mutable global state.
+
+---
+
+### 3. Changes to `model_builder.py` – Training Engine
+- Ensure all model training steps are isolated per trial:
+  - Separate model directories for saving checkpoints.
+  - No shared model instances between trials.
+- If falling back to local training, ensure that multiple trials can run simultaneously without device conflicts.
+- Release resources (close TensorFlow sessions, free GPU memory) at the end of each trial.
+
+---
+
+### 4. Changes to `dataset_manager.py` – Data Handling
+- Keep datasets **read-only** during trials.
+- If large datasets are loaded into memory, consider read-only memory sharing to avoid duplicating large objects across threads.
+
+---
+
+### 5. Changes to `plot_generator.py` – Visualization
+- Ensure plots are generated **per trial** in separate directories.
+- Avoid simultaneous writes to the same file from different trials.
+- Plot generation can remain as-is if it is already scoped to per-trial outputs.
+
+---
+
+### 6. Changes to `health_analyzer.py` – Metrics
+- Compute health metrics independently per trial.
+- Save outputs in trial-specific directories.
+
+---
+
+### 7. README Documentation Updates
+- Add a **Parallel Execution** section to explain:
+  - Why GIL is not a bottleneck here (I/O and C-extensions release GIL).
+  - How `n_jobs` controls parallel trial execution.
+  - Memory and GPU considerations when running multiple trials.
+  - Example commands for running with parallelism enabled.
+
+---
+
+### Additional Considerations
+- **Random Seeds**: Set unique seeds per trial to ensure reproducibility.
+- **Error Handling**: Catch exceptions in trials so one failed trial does not stop all others.
+- **RunPod Quotas**: Ensure the number of concurrent trials does not exceed available worker capacity.
+
+---
+
+**Next Step**: Start by adding the `concurrency` config in `optimizer.py` and wiring it to `n_jobs`. Then progressively validate that each trial is isolated in terms of filesystem, logging, and GPU/memory usage.

@@ -30,7 +30,7 @@ import datetime
 from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
 from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
 from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
-from gpu_proxy_code import get_gpu_proxy_training_code
+#from gpu_proxy_code import get_gpu_proxy_training_code
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -626,32 +626,6 @@ class ModelBuilder:
         assert self.model is not None
         logger.debug("running train ... Starting model training...")
         
-        # Enhanced GPU proxy execution
-        if self._should_use_gpu_proxy():
-            logger.debug("running train ... Using GPU proxy for training execution")
-            
-            try:
-                training_result = self._train_on_gpu_proxy_enhanced(data, validation_split)
-                
-                if training_result is not None:
-                    logger.debug("running train ... GPU proxy training completed successfully")
-                    return training_result
-                else:
-                    logger.warning("running train ... GPU proxy training failed")
-                    
-                    if self.model_config.gpu_proxy_fallback_local:
-                        logger.warning("running train ... Falling back to local training")
-                    else:
-                        raise RuntimeError("GPU proxy training failed and local fallback disabled")
-                        
-            except Exception as gpu_error:
-                logger.warning(f"running train ... GPU proxy training error: {gpu_error}")
-                
-                if self.model_config.gpu_proxy_fallback_local:
-                    logger.warning("running train ... Falling back to local training due to GPU proxy error")
-                else:
-                    raise RuntimeError(f"GPU proxy training failed and local fallback disabled: {gpu_error}")
-        
         # Execute local training
         logger.debug("running train ... Using local training execution")
         return self._train_locally_optimized(data, validation_split)
@@ -664,20 +638,7 @@ class ModelBuilder:
             self.runpod_client is not None and 
             self.model_config.use_gpu_proxy
         )
-    
-    
-    # Replace the existing _generate_gpu_proxy_training_code_enhanced method with:
-    def _generate_gpu_proxy_training_code_enhanced(self, validation_split: Optional[float] = None) -> str:
-        logger.debug("running _generate_gpu_proxy_training_code_enhanced ... Generating GPU proxy training code")
         
-        validation_split_value = validation_split or self.model_config.validation_split
-        logger.debug(f"running _generate_gpu_proxy_training_code_enhanced ... validation_split_value is: {validation_split_value}")
-        
-        gpu_proxy_training_code = get_gpu_proxy_training_code(validation_split_value)
-        logger.debug("running _generate_gpu_proxy_training_code_enhanced ... gpu_proxy__training_code is: {gpu_proxy_training_code}")
-        
-        return gpu_proxy_training_code
-    
     
     def _estimate_payload_size(self, x_train: np.ndarray, y_train: np.ndarray) -> float:
         """Estimate payload size in MB"""
@@ -1122,57 +1083,6 @@ class ModelBuilder:
         return history
   
         
-    
-    def _train_on_gpu_proxy_enhanced(
-        self, 
-        data: Dict[str, Any], 
-        validation_split: Optional[float] = None
-    ) -> Optional[keras.callbacks.History]:
-        """
-        Phase 2: Enhanced GPU proxy training with complete execution result processing
-        """
-        try:
-            logger.debug("running _train_on_gpu_proxy_enhanced ... Starting enhanced GPU proxy training with complete result processing")
-            
-            # Generate training code
-            training_code = self._generate_gpu_proxy_training_code_enhanced(validation_split)
-            
-            # Prepare context data
-            context_data = self._prepare_gpu_proxy_context_enhanced(data, validation_split)
-            context_size_mb = len(str(context_data).encode()) / (1024 * 1024)
-            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Context size: {context_size_mb:.1f} MB")
-            
-            # Calculate timeout
-            timeout_seconds = self._calculate_optimal_timeout(context_data)
-            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Executing on remote GPU (timeout: {timeout_seconds}s)")
-            
-            # Execute on GPU proxy
-            if self.runpod_client is None:
-                raise RuntimeError("GPU proxy client is not available")
-            
-            execution_result = self.runpod_client.execute_code_sync(
-                code=training_code,
-                context=context_data,
-                timeout_seconds=timeout_seconds
-            )
-            
-            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Received complete execution_result type: {type(execution_result)}")
-            logger.debug(f"running _train_on_gpu_proxy_enhanced ... Execution_result keys: {list(execution_result.keys()) if isinstance(execution_result, dict) else 'Not a dict'}")
-            
-            # Process complete execution result locally
-            history = self._process_training_results(execution_result)
-            
-            self.training_history = history
-            logger.debug("running _train_on_gpu_proxy_enhanced ... GPU proxy training completed successfully with complete result processing")
-            return history
-            
-        except Exception as e:
-            # Log error with context
-            self._log_gpu_proxy_error(e, "training execution")
-            logger.error("running _train_on_gpu_proxy_enhanced ... Training failed, will fallback to local")
-            return None
-    
-    
     def _process_training_results(self, execution_result: Dict[str, Any]) -> keras.callbacks.History:
         """
         Process complete execution result from GPU proxy with comprehensive environment logging

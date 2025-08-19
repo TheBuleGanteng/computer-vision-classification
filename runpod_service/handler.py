@@ -4,10 +4,12 @@ Implements specialized serverless hyperparameter optimization using existing bat
 """
 
 # Web server wrapper for local testing and container deployment
+import asyncio
 from fastapi import FastAPI, HTTPException
 import json
 from pathlib import Path
 from pydantic import BaseModel
+import runpod
 import sys
 import traceback
 from typing import Dict, Any, Optional
@@ -22,6 +24,11 @@ sys.path.insert(0, str(project_root / "src"))
 # Import existing orchestration layer
 from src.optimizer import optimize_model, OptimizationConfig, OptimizationMode, OptimizationObjective, OptimizationResult
 from src.utils.logger import logger
+
+
+def adjust_concurrency(current_concurrency):
+    return min(current_concurrency + 1, 6)  # Your max workers
+
 
 def extract_metrics(optimization_result: OptimizationResult) -> Dict[str, Any]:
     """
@@ -221,7 +228,7 @@ def build_optimization_config(request: Dict[str, Any]) -> Dict[str, Any]:
     
     return config_params
 
-def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
+async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     Main handler function for RunPod serverless training requests.
     Uses existing optimizer.py orchestration for consistency.
@@ -339,7 +346,7 @@ def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             "success": False
         }
 
-def handler(event: Dict[str, Any]) -> Dict[str, Any]:
+async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     """
     Main RunPod handler function.
     Processes incoming serverless requests and routes to appropriate handlers.
@@ -387,7 +394,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         
         # Route to appropriate handler
         if command == 'start_training':
-            return start_training(job)
+            return await start_training(job)  # ✅ Awaits coroutine to get Dict
         else:
             error_msg = f"Unknown command: {command}"
             logger.error(f"running handler ... {error_msg}")
@@ -404,51 +411,62 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 # RunPod serverless entry point
-def runpod_handler(event):
+async def runpod_handler(event):
     """
     RunPod serverless entry point.
     This is the function that RunPod will call for each serverless request.
     """
-    return handler(event)
+    # RunPod expects a sync function, so we need to run the async handler
+    return await handler(event)
 
 
 if __name__ == "__main__":
+    import os
     
-    # FastAPI web server wrapper for local testing and container deployment
-    app = FastAPI(title="CV Classification Optimizer", version="1.0.0")
-    
-    class TrainingRequest(BaseModel):
-        command: str
-        trial_id: str
-        dataset: str
-        hyperparameters: Dict[str, Any]
-        config: Dict[str, Any]
-    
-    @app.get("/health")
-    async def health_check():
-        return {"status": "healthy", "service": "cv-classification-optimizer"}
-    
-    @app.post("/")
-    async def web_handler(request: TrainingRequest):
-        """FastAPI wrapper around RunPod handler"""
-        try:
-            # Convert Pydantic model to dict
-            data = request.dict()
-            
-            # Wrap in RunPod event format
-            event = {"input": data}
-            
-            # Call your existing RunPod handler
-            result = runpod_handler(event)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Web handler error: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    logger.info("Starting CV Classification Optimizer Handler with FastAPI...")
-    logger.info("Listening on port 8080")
-    logger.info("API docs available at http://localhost:8080/docs")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    # Check if running in RunPod environment vs local development
+    if os.getenv('RUNPOD_ENDPOINT_ID'):
+        # Running in RunPod serverless environment
+        logger.info("Starting RunPod serverless handler...")
+        runpod.serverless.start({
+            "handler": handler,
+            "concurrency_modifier": adjust_concurrency
+        })
+    else:
+        # Running locally for development/testing
+        logger.info("Starting FastAPI web server for local development...")
+        app = FastAPI(title="CV Classification Optimizer", version="1.0.0")
+        
+        class TrainingRequest(BaseModel):
+            command: str
+            trial_id: str
+            dataset: str
+            hyperparameters: Dict[str, Any]
+            config: Dict[str, Any]
+        
+        @app.get("/health")
+        async def health_check():
+            return {"status": "healthy", "service": "cv-classification-optimizer"}
+        
+        @app.post("/")
+        async def web_handler(request: TrainingRequest):
+            """FastAPI wrapper around RunPod handler"""
+            try:
+                # Convert Pydantic model to dict
+                data = request.dict()
+                
+                # Wrap in RunPod event format
+                event = {"input": data}
+                
+                # Call your existing RunPod handler - need to await the async function
+                import asyncio
+                result = await handler(event)
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"Web handler error: {str(e)}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        logger.info("FastAPI server starting...")
+        logger.info("API docs available at http://localhost:8080/docs")
+        uvicorn.run(app, host="0.0.0.0", port=8080)
