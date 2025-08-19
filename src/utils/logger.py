@@ -146,7 +146,8 @@ def setup_logging(
         # logging.getLogger('tensorflow').setLevel(logging.ERROR)
         # logging.getLogger('tensorflow.python.platform').setLevel(logging.ERROR)
         
-        print("Matplotlib and PIL verbose logging silenced (WARNING level and above will still show)")
+        setup_logger = logging.getLogger(__name__)
+        setup_logger.info("Matplotlib and PIL verbose logging silenced (WARNING level and above will still show)")
     
     # Log the setup completion
     setup_logger = logging.getLogger(__name__)
