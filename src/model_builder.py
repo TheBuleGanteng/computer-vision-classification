@@ -1,5 +1,5 @@
 """
-Model Builder for Multi-Modal Classification - REFACTORED VERSION
+Model Builder for Multi-Modal Classification
 
 Creates and trains neural networks for both image classification (CNN) and 
 text classification (LSTM). Automatically detects data type and builds 
@@ -102,6 +102,7 @@ class ModelConfig:
     loss: str = "categorical_crossentropy"
     metrics: List[str] = field(default_factory=lambda: ["categorical_accuracy"])
     validation_split: float = 0.2
+    batch_size: int = 32
     
     # Real-time visualization parameters (kept for training callbacks)
     enable_realtime_plots: bool = True
@@ -181,7 +182,7 @@ class ModelConfig:
 
 class ModelBuilder:
     """
-    REFACTORED: Main class for building and training neural network models
+    Main class for building and training neural network models
     
     NOW FOCUSES ON:
     - Model building and compilation
@@ -404,7 +405,7 @@ class ModelBuilder:
         for i in range(self.model_config.num_layers_conv):
             logger.debug(f"running _build_cnn_model_optimized ... Building conv layer {i+1}/{self.model_config.num_layers_conv}")
             
-            # FIXED: Separate activation handling to prevent graph construction issues
+            # Separate activation handling to prevent graph construction issues
             if self.model_config.activation == 'leaky_relu':
                 # For LeakyReLU: Create Conv2D without activation, then add separate LeakyReLU layer
                 conv_layer = keras.layers.Conv2D(
@@ -585,14 +586,14 @@ class ModelBuilder:
             optimizer = self.model_config.optimizer
         
         # Compile model
-        # 🎯 PHASE 3 FIX: Ensure consistent metric names
-        fixed_metrics = ['categorical_accuracy' if m == 'accuracy' else m for m in self.model_config.metrics]
+        # Ensure consistent metric names
+        result_metrics = ['categorical_accuracy' if m == 'accuracy' else m for m in self.model_config.metrics]
         self.model.compile(
             optimizer=optimizer,
             loss=self.model_config.loss,
-            metrics=fixed_metrics
+            metrics=result_metrics
         )
-        logger.debug(f"running _compile_model_optimized ... Using fixed metrics: {fixed_metrics}")
+        logger.debug(f"running _compile_model_optimized ... Using result_metrics: {result_metrics}")
         
         logger.debug("running _compile_model_optimized ... Model compiled successfully")
     
@@ -614,21 +615,23 @@ class ModelBuilder:
     def train(
         self, 
         data: Dict[str, Any], 
-        validation_split: Optional[float] = None
+        validation_split: Optional[float] = None,
+        use_multi_gpu: bool = False
     ) -> keras.callbacks.History:
         """
         Enhanced training with optimized GPU proxy execution
         """
-        if self.model is None:
+        # For multi-GPU, model building happens inside _train_locally_optimized
+        # For single-GPU, build model here if not already built
+        if not use_multi_gpu and self.model is None:
             logger.debug("running train ... No model found, building model first...")
             self.build_model()
         
-        assert self.model is not None
         logger.debug("running train ... Starting model training...")
         
         # Execute local training
         logger.debug("running train ... Using local training execution")
-        return self._train_locally_optimized(data, validation_split)
+        return self._train_locally_optimized(data, validation_split, use_multi_gpu)
     
     
     def _should_use_gpu_proxy(self) -> bool:
@@ -790,7 +793,7 @@ class ModelBuilder:
                 'activation': self.model_config.activation
             })
         
-        # FIXED: Define dataset_config_dict
+        # Define dataset_config_dict
         dataset_config_dict = {
             'name': self.dataset_config.name,
             'num_classes': self.dataset_config.num_classes,
@@ -1344,16 +1347,96 @@ class ModelBuilder:
         return normalized
 
     
+    def _is_model_suitable_for_multi_gpu(self) -> bool:
+        """
+        Determine if the current model configuration is suitable for multi-GPU training
+        
+        Returns:
+            True if model is complex enough to benefit from multi-GPU
+        """
+        # Check if model has sufficient complexity for multi-GPU benefits
+        min_params_for_multi_gpu = 100_000  # Minimum parameters to benefit from multi-GPU
+        min_epochs_for_multi_gpu = 15      # Minimum epochs to amortize multi-GPU overhead
+        
+        # Estimate parameter count based on configuration
+        estimated_params = self._estimate_model_parameters()
+        
+        is_suitable = (
+            estimated_params >= min_params_for_multi_gpu and
+            self.model_config.epochs >= min_epochs_for_multi_gpu
+        )
+        
+        logger.debug(f"running _is_model_suitable_for_multi_gpu ... Estimated parameters: {estimated_params:,}")
+        logger.debug(f"running _is_model_suitable_for_multi_gpu ... Epochs: {self.model_config.epochs}")
+        logger.debug(f"running _is_model_suitable_for_multi_gpu ... Suitable for multi-GPU: {is_suitable}")
+        
+        return is_suitable
+
+    def _estimate_model_parameters(self) -> int:
+        """
+        Estimate the number of parameters in the model based on configuration
+        
+        Returns:
+            Estimated parameter count
+        """
+        try:
+            if self.model is not None:
+                return self.model.count_params()
+        except:
+            pass
+        
+        # Rough estimation based on configuration
+        if self._detect_data_type_enhanced() == "text":
+            # LSTM model estimation
+            vocab_size = self.model_config.vocab_size
+            embedding_dim = self.model_config.embedding_dim
+            lstm_units = self.model_config.lstm_units
+            
+            # Embedding layer
+            embedding_params = vocab_size * embedding_dim
+            
+            # LSTM layer (rough approximation)
+            lstm_params = 4 * lstm_units * (embedding_dim + lstm_units + 1)
+            
+            # Dense layers
+            dense_params = lstm_units * self.model_config.first_hidden_layer_nodes
+            output_params = self.model_config.first_hidden_layer_nodes * self.dataset_config.num_classes
+            
+            total_params = embedding_params + lstm_params + dense_params + output_params
+        else:
+            # CNN model estimation
+            input_size = self.dataset_config.img_height * self.dataset_config.img_width * self.dataset_config.channels
+            
+            # Convolutional layers (rough approximation)
+            conv_params = 0
+            for i in range(self.model_config.num_layers_conv):
+                kernel_params = (
+                    self.model_config.kernel_size[0] * 
+                    self.model_config.kernel_size[1] * 
+                    self.model_config.filters_per_conv_layer * 
+                    (self.dataset_config.channels if i == 0 else self.model_config.filters_per_conv_layer)
+                )
+                conv_params += kernel_params
+            
+            # Dense layers (rough approximation)
+            flattened_size = input_size // (4 ** self.model_config.num_layers_conv)  # Rough pooling reduction
+            dense_params = flattened_size * self.model_config.first_hidden_layer_nodes
+            output_params = self.model_config.first_hidden_layer_nodes * self.dataset_config.num_classes
+            
+            total_params = conv_params + dense_params + output_params
+        
+        return max(1000, int(total_params))  # Minimum of 1000 parameters
+    
     def _train_locally_optimized(
         self, 
         data: Dict[str, Any], 
-        validation_split: Optional[float] = None
+        validation_split: Optional[float] = None,
+        use_multi_gpu: bool = False
     ) -> keras.callbacks.History:
         """
-        🎯 PHASE 4: Optimized local training execution with MANUAL VALIDATION SPLIT
-        Now uses the same manual validation approach as GPU proxy for consistency
+        Optimized local training execution with PROPER multi-GPU implementation
         """
-        logger.debug("running _train_locally_optimized ... Starting optimized local training with MANUAL VALIDATION SPLIT")
+        logger.debug("running _train_locally_optimized ... Starting optimized local training with proper multi-GPU support")
         
         # Log performance information
         self.perf_logger.log_data_info(
@@ -1366,85 +1449,154 @@ class ModelBuilder:
         # Enhanced callback setup
         callbacks_list = self._setup_training_callbacks_optimized()
         
-        if self.model is None:
-            raise ValueError("Model must be built before training")
+        # Check multi-GPU availability and model requirements
+        available_gpus = tf.config.list_physical_devices('GPU')
+        should_use_multi_gpu = (
+            use_multi_gpu and 
+            len(available_gpus) > 1 and
+            self._is_model_suitable_for_multi_gpu()
+        )
         
-        # 🎯 PHASE 4: Apply manual validation split for consistency with GPU proxy
+        logger.debug(f"running _train_locally_optimized ... Available GPUs: {len(available_gpus)}")
+        logger.debug(f"running _train_locally_optimized ... Multi-GPU requested: {use_multi_gpu}")
+        logger.debug(f"running _train_locally_optimized ... Will use multi-GPU: {should_use_multi_gpu}")
+        
+        # Apply manual validation split for consistency
         validation_split_value = validation_split or self.model_config.validation_split
         logger.debug(f"running _train_locally_optimized ... validation_split_value: {validation_split_value}")
         
         if validation_split_value > 0:
-            logger.debug("running _train_locally_optimized ... 🔧 APPLYING MANUAL VALIDATION SPLIT for consistency")
+            logger.debug("running _train_locally_optimized ... Applying manual validation split")
             
-            # Calculate split index (same logic as GPU proxy)
             x_train = data['x_train']
             y_train = data['y_train']
             split_idx = int(len(x_train) * (1 - validation_split_value))
             
-            # Manual split
             x_train_manual = x_train[:split_idx]
             y_train_manual = y_train[:split_idx]
             x_val_manual = x_train[split_idx:]
             y_val_manual = y_train[split_idx:]
             
-            logger.debug(f"running _train_locally_optimized ... Manual validation split applied:")
-            logger.debug(f"running _train_locally_optimized ... - Training samples: {len(x_train_manual)} ({(1-validation_split_value)*100:.1f}%)")
-            logger.debug(f"running _train_locally_optimized ... - Validation samples: {len(x_val_manual)} ({validation_split_value*100:.1f}%)")
-            logger.debug(f"running _train_locally_optimized ... - Train data: x={x_train_manual.shape}, y={y_train_manual.shape}")
-            logger.debug(f"running _train_locally_optimized ... - Val data: x={x_val_manual.shape}, y={y_val_manual.shape}")
+            logger.debug(f"running _train_locally_optimized ... Training samples: {len(x_train_manual)}")
+            logger.debug(f"running _train_locally_optimized ... Validation samples: {len(x_val_manual)}")
             
-            # Verify split integrity
-            total_original = len(x_train)
-            total_split = len(x_train_manual) + len(x_val_manual)
-            logger.debug(f"running _train_locally_optimized ... Split verification: original={total_original}, split_total={total_split}, matches={total_original == total_split}")
-            
-            # Train with manual validation_data parameter (consistent with GPU approach)
-            logger.debug("running _train_locally_optimized ... 🚀 TRAINING WITH MANUAL VALIDATION_DATA (consistent approach)")
-            
-            with TimedOperation("optimized model training with manual validation split", "model_builder"):
-                self.training_history = self.model.fit(
-                    x_train_manual, 
-                    y_train_manual,
-                    epochs=self.model_config.epochs,
-                    validation_data=(x_val_manual, y_val_manual),  # 🎯 KEY: Use validation_data instead of validation_split
-                    verbose=1,
-                    callbacks=callbacks_list
-                )
+            training_data = (x_train_manual, y_train_manual)
+            validation_data = (x_val_manual, y_val_manual)
         else:
-            logger.debug("running _train_locally_optimized ... 🔧 NO VALIDATION SPLIT REQUESTED")
-            logger.debug("running _train_locally_optimized ... Training without validation...")
+            logger.debug("running _train_locally_optimized ... No validation split")
+            training_data = (data['x_train'], data['y_train'])
+            validation_data = None
+        
+        # Proper multi-GPU model building and training
+        if should_use_multi_gpu:
+            logger.debug("running _train_locally_optimized ... Using MirroredStrategy for multi-GPU training")
+            strategy = tf.distribute.MirroredStrategy()
+            logger.debug(f"running _train_locally_optimized ... Strategy devices: {strategy.extended.worker_devices}")
+            logger.debug(f"running _train_locally_optimized ... Number of replicas: {strategy.num_replicas_in_sync}")
             
-            with TimedOperation("optimized model training without validation", "model_builder"):
-                self.training_history = self.model.fit(
-                    data['x_train'], 
-                    data['y_train'],
-                    epochs=self.model_config.epochs,
-                    verbose=1,
-                    callbacks=callbacks_list
+            with strategy.scope():
+                # CRITICAL FIX: Build model components directly inside strategy scope
+                # Do NOT call self.build_model() which may have its own strategy logic
+                self.model = None  # Reset any existing model
+                
+                logger.debug("running _train_locally_optimized ... Building model components inside strategy scope")
+                
+                # Detect data type
+                data_type = self._detect_data_type_enhanced()
+                
+                # Build appropriate model architecture directly
+                if data_type == "text":
+                    logger.debug("running _train_locally_optimized ... Building TEXT model inside strategy")
+                    self.model = self._build_text_model_optimized()
+                else:
+                    logger.debug("running _train_locally_optimized ... Building CNN model inside strategy")
+                    self.model = self._build_cnn_model_optimized()
+                
+                # Compile model directly inside strategy scope
+                self._compile_model_optimized()
+                
+                # TYPE SAFETY: Ensure model was built successfully
+                if self.model is None:
+                    raise RuntimeError("Failed to build model inside strategy scope")
+                
+                logger.debug("running _train_locally_optimized ... Model built and compiled inside strategy scope")
+                
+                # Scale batch size for multi-GPU (optional optimization)
+                # ENHANCED: Ensure minimum effective batch size for multi-GPU
+                original_batch_size = getattr(self.model_config, 'batch_size', 32)
+                min_batch_size_per_gpu = 8  # Minimum batch size per GPU for effective distribution
+                min_total_batch_size = min_batch_size_per_gpu * strategy.num_replicas_in_sync
+
+                # Use larger of scaled original or minimum required
+                scaled_batch_size = max(
+                    original_batch_size * strategy.num_replicas_in_sync,
+                    min_total_batch_size
                 )
-        
-        logger.debug("running _train_locally_optimized ... Optimized local training with manual validation split completed")
-        
-        # 🎯 PHASE 4: Log validation split consistency verification
-        if validation_split_value > 0 and self.training_history is not None:
-            val_metrics = [k for k in self.training_history.history.keys() if 'val' in k]
-            val_acc_metrics = [k for k in val_metrics if 'acc' in k or 'accuracy' in k]
-            
-            logger.debug(f"running _train_locally_optimized ... Manual validation split results:")
-            logger.debug(f"running _train_locally_optimized ... - Validation metrics found: {val_metrics}")
-            logger.debug(f"running _train_locally_optimized ... - Validation accuracy keys: {val_acc_metrics}")
-            
-            if val_acc_metrics:
-                for val_key in val_acc_metrics:
-                    val_values = self.training_history.history[val_key]
-                    has_nonzero = any(v > 0 for v in val_values) if val_values else False
-                    logger.debug(f"running _train_locally_optimized ... - {val_key}: non-zero values = {has_nonzero}")
-                    if has_nonzero:
-                        logger.debug(f"running _train_locally_optimized ... - {val_key} values: {val_values}")
+
+                logger.debug(f"running _train_locally_optimized ... Multi-GPU batch size optimization:")
+                logger.debug(f"running _train_locally_optimized ... - Original batch size: {original_batch_size}")
+                logger.debug(f"running _train_locally_optimized ... - Min per GPU: {min_batch_size_per_gpu}")
+                logger.debug(f"running _train_locally_optimized ... - GPUs: {strategy.num_replicas_in_sync}")
+                logger.debug(f"running _train_locally_optimized ... - Final batch size: {scaled_batch_size}")
+                logger.debug(f"running _train_locally_optimized ... - Per GPU batch size: {scaled_batch_size // strategy.num_replicas_in_sync}")
+                logger.debug(f"running _train_locally_optimized ... About to start training with scaled_batch_size: {scaled_batch_size}")
+                logger.debug(f"running _train_locally_optimized ... Training data shapes: {training_data[0].shape}, {training_data[1].shape}")
+
+                with TimedOperation("multi-GPU model training", "model_builder"):
+                    if validation_data:
+                        self.training_history = self.model.fit(
+                            training_data[0], 
+                            training_data[1],
+                            epochs=self.model_config.epochs,
+                            batch_size=scaled_batch_size,
+                            validation_data=validation_data,
+                            verbose=1,
+                            callbacks=callbacks_list
+                        )
                     else:
-                        logger.warning(f"running _train_locally_optimized ... - {val_key} all zeros: {val_values}")
+                        self.training_history = self.model.fit(
+                            training_data[0], 
+                            training_data[1],
+                            epochs=self.model_config.epochs,
+                            batch_size=scaled_batch_size,
+                            verbose=1,
+                            callbacks=callbacks_list
+                        )
+        else:
+            logger.debug("running _train_locally_optimized ... Using single-GPU training")
             
-            logger.debug("running _train_locally_optimized ... ✅ Local training now uses same manual validation approach as GPU proxy")
+            # Build model normally for single GPU
+            if self.model is None:
+                self.build_model()
+            
+            # TYPE SAFETY: Ensure model was built successfully
+            if self.model is None:
+                raise RuntimeError("Failed to build model")
+            
+            with TimedOperation("single-GPU model training", "model_builder"):
+                if validation_data:
+                    self.training_history = self.model.fit(
+                        training_data[0], 
+                        training_data[1],
+                        epochs=self.model_config.epochs,
+                        validation_data=validation_data,
+                        verbose=1,
+                        callbacks=callbacks_list
+                    )
+                else:
+                    self.training_history = self.model.fit(
+                        training_data[0], 
+                        training_data[1],
+                        epochs=self.model_config.epochs,
+                        verbose=1,
+                        callbacks=callbacks_list
+                    )
+        
+        logger.debug("running _train_locally_optimized ... Training completed")
+        
+        # TYPE SAFETY: Ensure training history was created
+        if self.training_history is None:
+            raise RuntimeError("Training failed - no history returned")
         
         return self.training_history
 
@@ -1823,7 +1975,7 @@ class ModelBuilder:
             return 0.0
 
 
-# REFACTORED: Enhanced convenience function WITHOUT embedded plot generation
+# Enhanced convenience function WITHOUT embedded plot generation
 def create_and_train_model(
     data: Optional[Dict[str, Any]] = None,
     dataset_name: Optional[str] = None,
@@ -1832,11 +1984,11 @@ def create_and_train_model(
     test_size: float = 0.4,
     run_name: Optional[str] = None,
     enable_performance_monitoring: bool = True,
-    # REMOVED: plot-related parameters - now handled by PlotGenerator
+    use_multi_gpu: bool = False,
     **config_overrides
 ) -> Dict[str, Any]:
     """
-    REFACTORED: Enhanced convenience function focused on model training
+    Enhanced convenience function focused on model training
     
     Plot generation has been moved to separate PlotGenerator module.
     This function now focuses purely on model building, training, and evaluation.
@@ -1896,7 +2048,8 @@ def create_and_train_model(
         return _handle_model_training_refactored(
             dataset_config, data, model_config, config_overrides,
             run_timestamp, run_name, 
-            architecture_type, dataset_name_clean, enable_performance_monitoring
+            architecture_type, dataset_name_clean, enable_performance_monitoring,
+            use_multi_gpu
         )
 
 
@@ -1908,7 +2061,7 @@ def _handle_model_loading_refactored(
     architecture_type: str,
     dataset_name_clean: str
 ) -> Dict[str, Any]:
-    """REFACTORED: Model loading handler without plot generation"""
+    """Model loading handler without plot generation"""
     
     logger.debug(f"running _handle_model_loading_refactored ... Loading existing model from: {load_model_path}")
     
@@ -1923,7 +2076,7 @@ def _handle_model_loading_refactored(
         builder.model = keras.models.load_model(load_model_path)
         logger.debug("running _handle_model_loading_refactored ... Model loaded successfully!")
     
-    # REFACTORED: Simple evaluation without plots
+    # Simple evaluation without plots
     logger.debug("running _handle_model_loading_refactored ... Starting simple evaluation...")
     
     with TimedOperation("model evaluation", "refactored_model_builder"):
@@ -1954,9 +2107,10 @@ def _handle_model_training_refactored(
     run_name: Optional[str],
     architecture_type: str,
     dataset_name_clean: str,
-    enable_performance_monitoring: bool
+    enable_performance_monitoring: bool,
+    use_multi_gpu: bool = False
 ) -> Dict[str, Any]:
-    """REFACTORED: Model training handler without embedded plot generation"""
+    """Model training handler without embedded plot generation"""
     
     logger.debug("running _handle_model_training_refactored ... Starting refactored model training")
     
@@ -1979,13 +2133,17 @@ def _handle_model_training_refactored(
     # Create ModelBuilder
     builder = ModelBuilder(dataset_config, model_config)
     
-    # REFACTORED: Training pipeline without plot generation
+    # Training pipeline without plot generation
     with TimedOperation("refactored model training pipeline", "refactored_model_builder"):
-        logger.debug("running _handle_model_training_refactored ... Building model...")
-        builder.build_model()
+        # Don't build model here if using multi-GPU
+        if not use_multi_gpu:
+            logger.debug("running _handle_model_training_refactored ... Building model for single-GPU...")
+            builder.build_model()
+        else:
+            logger.debug("running _handle_model_training_refactored ... Skipping model building - will be done inside MirroredStrategy scope")
         
         logger.debug("running _handle_model_training_refactored ... Training model...")
-        builder.train(data)
+        builder.train(data, use_multi_gpu=use_multi_gpu)
         
         logger.debug("running _handle_model_training_refactored ... Evaluating model...")
         test_loss, test_accuracy = builder.evaluate(data=data)
@@ -2034,7 +2192,7 @@ if __name__ == "__main__":
     logger.debug(f"running refactored_model_builder.py ... Parsed arguments: {args}")
     
     try:
-        # Refactored function call
+        # Function call
         result = create_and_train_model(**args)
         builder = result['model_builder']
         test_accuracy = result['test_accuracy']

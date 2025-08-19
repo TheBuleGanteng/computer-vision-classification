@@ -4,9 +4,8 @@ Implements specialized serverless hyperparameter optimization using existing bat
 """
 
 # Web server wrapper for local testing and container deployment
-import asyncio
 from fastapi import FastAPI, HTTPException
-import json
+import os
 from pathlib import Path
 from pydantic import BaseModel
 import runpod
@@ -22,9 +21,9 @@ project_root = current_file.parent.parent  # Go up 2 levels to project root
 sys.path.insert(0, str(project_root / "src"))
 
 # Import existing orchestration layer
-from src.optimizer import optimize_model, OptimizationConfig, OptimizationMode, OptimizationObjective, OptimizationResult
+from src.optimizer import OptimizationResult
 from src.utils.logger import logger
-
+from src.model_builder import create_and_train_model, ModelConfig
 
 def adjust_concurrency(current_concurrency):
     return min(current_concurrency + 1, 6)  # Your max workers
@@ -168,7 +167,7 @@ def validate_request(request: Dict[str, Any]) -> tuple[bool, Optional[str]]:
 
 def build_optimization_config(request: Dict[str, Any]) -> Dict[str, Any]:
     """
-    FIXED: Build optimization config AND hyperparameters from request.
+    Build optimization config AND hyperparameters from request.
     
     Args:
         request: Request dictionary from RunPod
@@ -259,20 +258,17 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 "success": False
             }
         
-        # 🎯 CRITICAL FIX: Build COMPLETE configuration (config + hyperparameters)
+        # 🎯 Build configuration (config + hyperparameters)
         all_params = build_optimization_config(request)
         
-        # 🎯 VERIFICATION: Log what we're actually using
+        # 🎯 Log what we're actually using
         logger.debug(f"running start_training ... VERIFICATION: Complete parameter set:")
         for key, value in all_params.items():
             logger.debug(f"running start_training ... - {key}: {value}")
         
-        # 🎯 CRITICAL FIX: Call create_and_train_model directly, not optimize_model
+        # 🎯 Call create_and_train_model directly, not optimize_model
         # optimize_model runs its own optimization study, ignoring our hyperparameters
-        logger.debug(f"running start_training ... calling create_and_train_model with trial hyperparameters: {trial_id}")
-        
-        # Import create_and_train_model for single trial execution
-        from src.model_builder import create_and_train_model, ModelConfig
+        logger.debug(f"running start_training ... calling create_and_train_model with trial hyperparameters: {trial_id}")    
         
         # Create ModelConfig with hyperparameters
         model_config = ModelConfig()
@@ -283,20 +279,39 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             if hasattr(model_config, param_name):
                 setattr(model_config, param_name, param_value)
                 logger.debug(f"running start_training ... Applied to ModelConfig: {param_name} = {param_value}")
-        
+
         # Apply validation_split from config
         if 'validation_split' in all_params:
             model_config.validation_split = all_params['validation_split']
-        
+
         # Apply gpu_proxy_sample_percentage from config  
         if 'gpu_proxy_sample_percentage' in all_params:
             model_config.gpu_proxy_sample_percentage = all_params['gpu_proxy_sample_percentage']
-        
+
+        # Extract and apply multi-GPU configuration from request
+        config_data = request.get('config', {})
+        use_multi_gpu = config_data.get('use_multi_gpu', False)
+        target_gpus_per_worker = config_data.get('target_gpus_per_worker', 2)
+        auto_detect_gpus = config_data.get('auto_detect_gpus', True)
+        multi_gpu_batch_size_scaling = config_data.get('multi_gpu_batch_size_scaling', True)
+
+        logger.debug(f"running start_training ... Multi-GPU configuration received:")
+        logger.debug(f"running start_training ... - use_multi_gpu: {use_multi_gpu}")
+        logger.debug(f"running start_training ... - target_gpus_per_worker: {target_gpus_per_worker}")
+        logger.debug(f"running start_training ... - auto_detect_gpus: {auto_detect_gpus}")
+        logger.debug(f"running start_training ... - multi_gpu_batch_size_scaling: {multi_gpu_batch_size_scaling}")
+
+        # Add a default batch_size to ModelConfig for the batch size scaling to work
+        if not hasattr(model_config, 'batch_size') or not model_config.batch_size:
+            model_config.batch_size = 32  # Set default batch size
+            logger.debug(f"running start_training ... Set default batch_size: {model_config.batch_size}")
+
         # Call create_and_train_model with the configured ModelConfig
         training_result = create_and_train_model(
             dataset_name=request['dataset'],
             model_config=model_config,
-            test_size=all_params.get('test_size', 0.2)
+            test_size=all_params.get('test_size', 0.2),
+            use_multi_gpu=use_multi_gpu  # Pass multi-GPU flag to create_and_train_model
         )
         
         # Extract metrics from training result
@@ -327,7 +342,9 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 "total_trials": 1,
                 "successful_trials": 1
             },
-            "best_params": hyperparameters
+            "best_params": hyperparameters,
+            "multi_gpu_used": use_multi_gpu,
+            "target_gpus": target_gpus_per_worker if use_multi_gpu else 1
         }
         
         logger.debug(f"running start_training ... trial {trial_id} completed with COMPLETE config")
@@ -421,7 +438,6 @@ async def runpod_handler(event):
 
 
 if __name__ == "__main__":
-    import os
     
     # Check if running in RunPod environment vs local development
     if os.getenv('RUNPOD_ENDPOINT_ID'):
@@ -458,7 +474,6 @@ if __name__ == "__main__":
                 event = {"input": data}
                 
                 # Call your existing RunPod handler - need to await the async function
-                import asyncio
                 result = await handler(event)
                 
                 return result

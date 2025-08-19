@@ -1,17 +1,6 @@
 """
 Unified Model Optimizer for Multi-Modal Classification - RUNPOD SERVICE INTEGRATION
 
-ARCHITECTURAL PIVOT: FROM CODE INJECTION TO SPECIALIZED SERVERLESS
-- ❌ REMOVED: GPU proxy code injection approach
-- ✅ ADDED: RunPod service JSON API approach  
-- 🔄 SAME: Uses same RunPod infrastructure, different approach
-
-PHASE 2 REFACTORING: Transforming into pure orchestrator
-- ✅ STEP 2.1a: Added HyperparameterSelector integration
-- ✅ STEP 2.1b: Removed embedded hyperparameter suggestion methods
-- ✅ STEP 2.1c: Added PlotGenerator integration
-- ✅ STEP 2.1: Replaced GPU proxy with RunPod service integration
-
 RUNPOD SERVICE INTEGRATION:
 - Sends JSON commands instead of Python code
 - Uses specialized handler.py on RunPod side
@@ -26,9 +15,6 @@ Health metrics are always calculated for monitoring and API reporting regardless
 
 Uses Bayesian optimization (Optuna) for intelligent hyperparameter search.
 """
-
-import copy
-import csv
 from datetime import datetime
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -36,14 +22,12 @@ from enum import Enum
 import json
 import numpy as np
 import optuna
-import optuna.integration.keras as optuna_keras
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 import os
 from pathlib import Path
 import random
 import requests  # For RunPod service communication
-from sklearn.model_selection import train_test_split
 import sys
 import tensorflow as tf  # type: ignore
 from tensorflow import keras # type: ignore
@@ -51,16 +35,12 @@ import threading
 import time
 import traceback
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
-import uuid
 import yaml
-
-
-
 
 # Import existing modules
 from dataset_manager import DatasetManager, DatasetConfig
 from health_analyzer import HealthAnalyzer
-from model_builder import ModelBuilder, ModelConfig, create_and_train_model
+from model_builder import ModelBuilder, ModelConfig
 from utils.logger import logger
 
 # Import modular components
@@ -274,6 +254,14 @@ class OptimizationConfig:
     # Concurrency (only applies when using RunPod service)
     concurrent: bool = True
     concurrent_workers: int = 2
+    
+    # Multi-GPU Configuration (for RunPod workers)
+    use_multi_gpu: bool = False                    # Enable multi-GPU per worker
+    target_gpus_per_worker: int = 2               # Desired GPUs per worker
+    auto_detect_gpus: bool = True                 # Auto-detect available GPUs
+    multi_gpu_batch_size_scaling: bool = True     # Scale batch size for multi-GPU
+    max_gpus_per_worker: int = 4                  # Maximum GPUs to use per worker
+    
     
     def __post_init__(self) -> None:
         """Validate configuration after initialization"""
@@ -514,7 +502,7 @@ def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress]
 
 class ModelOptimizer:
     """
-    ARCHITECTURAL PIVOT: Unified optimizer class with RunPod service integration
+    Unified optimizer class with RunPod service integration
 
     Integrates with existing ModelBuilder and DatasetManager to provide
     automated hyperparameter tuning with simple or health-aware optimization.
@@ -646,7 +634,7 @@ class ModelOptimizer:
         
         # Log runpod service configuration
         if self.config.use_runpod_service:
-            logger.debug(f"running ModelOptimizer.__init__ ... 🔄 ARCHITECTURAL PIVOT: RunPod service integration ENABLED")
+            logger.debug(f"running ModelOptimizer.__init__ ... RunPod service integration ENABLED")
             logger.debug(f"running ModelOptimizer.__init__ ... - Approach: JSON API calls (specialized serverless)")
             logger.debug(f"running ModelOptimizer.__init__ ... - Endpoint: {self.config.runpod_service_endpoint}")
             logger.debug(f"running ModelOptimizer.__init__ ... - Timeout: {self.config.runpod_service_timeout}s")
@@ -655,7 +643,7 @@ class ModelOptimizer:
         else:
             logger.debug(f"running ModelOptimizer.__init__ ... RunPod service integration: DISABLED (local execution only)")
         
-        logger.debug(f"running ModelOptimizer.__init__ ... ARCHITECTURAL PIVOT: GPU proxy code injection → RunPod service JSON API")
+        logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy code injection → RunPod service JSON API")
     
     
     # Add these methods to ModelOptimizer class
@@ -782,7 +770,7 @@ class ModelOptimizer:
     
     def _suggest_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
         """
-        PHASE 2 REFACTORING: Use HyperparameterSelector for hyperparameter suggestion
+        Use HyperparameterSelector for hyperparameter suggestion
         
         Args:
             trial: Optuna trial object
@@ -803,7 +791,7 @@ class ModelOptimizer:
         
         return params
 
-    # 🔄 ARCHITECTURAL PIVOT: RunPod Service Methods (replacing GPU proxy)
+    # RunPod Service Methods (replacing GPU proxy)
     
     def _should_use_runpod_service(self) -> bool:
         """
@@ -823,7 +811,7 @@ class ModelOptimizer:
         return False
     
     def _train_via_runpod_service(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
-        logger.debug(f"running _train_via_runpod_service ... 🔄 ARCHITECTURAL PIVOT: Starting RunPod service training for trial {trial.number}")
+        logger.debug(f"running _train_via_runpod_service ... Starting RunPod service training for trial {trial.number}")
         logger.debug(f"running _train_via_runpod_service ... Using JSON API approach (tiny payloads) instead of code injection")
         
         try:
@@ -844,7 +832,11 @@ class ModelOptimizer:
                         "max_training_time": self.config.max_training_time_minutes,
                         "mode": self.config.mode.value,
                         "objective": self.config.objective.value,
-                        "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage
+                        "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage,
+                        "use_multi_gpu": self.config.use_multi_gpu,
+                        "target_gpus_per_worker": self.config.target_gpus_per_worker,
+                        "auto_detect_gpus": self.config.auto_detect_gpus,
+                        "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling
                     }
                 }
             }
@@ -853,7 +845,6 @@ class ModelOptimizer:
             logger.debug(f"running _train_via_runpod_service ... DEBUG PAYLOAD: {json.dumps(request_payload, indent=2)}")
 
             # --- per-trial HTTP session (safer under n_jobs > 1) ---
-            import requests
             with requests.Session() as sess:
                 sess.headers.update({
                     "Content-Type": "application/json",
@@ -1495,7 +1486,7 @@ class ModelOptimizer:
                 "health_weight": results.health_weight,
                 "best_value": float(results.best_value),
                 "hyperparameters": best_params,
-                "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # 🔄 ARCHITECTURAL PIVOT: Track execution method
+                "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # Track execution method
             }
             
             with open(yaml_file, 'w') as f:
@@ -1528,7 +1519,7 @@ def optimize_model(
     **config_overrides
 ) -> OptimizationResult:
     """
-    🔄 ARCHITECTURAL PIVOT: Convenience function with RunPod service support
+    Convenience function with RunPod service support
     
     Args:
         dataset_name: Name of dataset to optimize
