@@ -1,17 +1,6 @@
 """
 Unified Model Optimizer for Multi-Modal Classification - RUNPOD SERVICE INTEGRATION
 
-ARCHITECTURAL PIVOT: FROM CODE INJECTION TO SPECIALIZED SERVERLESS
-- ❌ REMOVED: GPU proxy code injection approach
-- ✅ ADDED: RunPod service JSON API approach  
-- 🔄 SAME: Uses same RunPod infrastructure, different approach
-
-PHASE 2 REFACTORING: Transforming into pure orchestrator
-- ✅ STEP 2.1a: Added HyperparameterSelector integration
-- ✅ STEP 2.1b: Removed embedded hyperparameter suggestion methods
-- ✅ STEP 2.1c: Added PlotGenerator integration
-- ✅ STEP 2.1: Replaced GPU proxy with RunPod service integration
-
 RUNPOD SERVICE INTEGRATION:
 - Sends JSON commands instead of Python code
 - Uses specialized handler.py on RunPod side
@@ -26,9 +15,6 @@ Health metrics are always calculated for monitoring and API reporting regardless
 
 Uses Bayesian optimization (Optuna) for intelligent hyperparameter search.
 """
-
-import copy
-import csv
 from datetime import datetime
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -36,28 +22,28 @@ from enum import Enum
 import json
 import numpy as np
 import optuna
-import optuna.integration.keras as optuna_keras
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 import os
 from pathlib import Path
+import random
 import requests  # For RunPod service communication
-from sklearn.model_selection import train_test_split
 import sys
+import tensorflow as tf  # type: ignore
 from tensorflow import keras # type: ignore
+import threading
 import time
 import traceback
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
-import uuid
 import yaml
 
 # Import existing modules
 from dataset_manager import DatasetManager, DatasetConfig
 from health_analyzer import HealthAnalyzer
-from model_builder import ModelBuilder, ModelConfig, create_and_train_model
+from model_builder import ModelBuilder, ModelConfig
 from utils.logger import logger
 
-# PHASE 2 REFACTORING: Import new modular components
+# Import modular components
 from hyperparameter_selector import HyperparameterSelector
 from plot_generator import PlotGenerator
 
@@ -79,6 +65,7 @@ def _load_env_file():
 
 # Load environment variables automatically
 _load_env_file()
+
 
 @dataclass
 class TrialProgress:
@@ -255,7 +242,7 @@ class OptimizationConfig:
     enable_early_stopping: bool = True
     early_stopping_patience: int = 5
     
-    # 🔄 ARCHITECTURAL PIVOT: RunPod Service Integration (replaces GPU proxy)
+    # RunPod Service Integration (replaces GPU proxy)
     use_runpod_service: bool = False               # Enable/disable RunPod service usage
     runpod_service_endpoint: Optional[str] = None  # RunPod service endpoint URL
     runpod_service_timeout: int = 600              # Request timeout in seconds (10 minutes)
@@ -264,7 +251,19 @@ class OptimizationConfig:
     # Plot generation configuration
     plot_generation: PlotGenerationMode = PlotGenerationMode.ALL
     
-    def __post_init__(self):
+    # Concurrency (only applies when using RunPod service)
+    concurrent: bool = True
+    concurrent_workers: int = 2
+    
+    # Multi-GPU Configuration (for RunPod workers)
+    use_multi_gpu: bool = False                    # Enable multi-GPU per worker
+    target_gpus_per_worker: int = 2               # Desired GPUs per worker
+    auto_detect_gpus: bool = True                 # Auto-detect available GPUs
+    multi_gpu_batch_size_scaling: bool = True     # Scale batch size for multi-GPU
+    max_gpus_per_worker: int = 4                  # Maximum GPUs to use per worker
+    
+    
+    def __post_init__(self) -> None:
         """Validate configuration after initialization"""
         if self.n_trials <= 0:
             raise ValueError("n_trials must be positive")
@@ -274,12 +273,15 @@ class OptimizationConfig:
             raise ValueError("test_size must be between 0 and 1")
         if not 0 <= self.health_weight <= 1:
             raise ValueError("health_weight must be between 0 and 1")
+        if self.concurrent_workers < 1:
+            self.concurrent_workers = 1
+            logger.debug("running OptimizationConfig.__post_init__ ... concurrent_workers < 1; coerced to 1")
         
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
         logger.debug(f"running OptimizationConfig.__post_init__ ... Plot generation mode: {self.plot_generation.value}")
         
-        # 🔄 ARCHITECTURAL PIVOT: Auto-configure RunPod endpoint if not provided
+        # Auto-configure RunPod endpoint if not provided
         if self.use_runpod_service and not self.runpod_service_endpoint:
             endpoint_id = os.getenv('RUNPOD_ENDPOINT_ID')
             if endpoint_id:
@@ -288,14 +290,25 @@ class OptimizationConfig:
             else:
                 logger.warning(f"running OptimizationConfig.__post_init__ ... RunPod service enabled but RUNPOD_ENDPOINT_ID not found in environment")
         
-        # 🔄 ARCHITECTURAL PIVOT: Log RunPod Service configuration
+        # Log RunPod Service configuration
         if self.use_runpod_service:
             logger.debug(f"running OptimizationConfig.__post_init__ ... RunPod service enabled in optimization config")
             logger.debug(f"running OptimizationConfig.__post_init__ ... - Endpoint: {self.runpod_service_endpoint}")
             logger.debug(f"running OptimizationConfig.__post_init__ ... - Timeout: {self.runpod_service_timeout}s")
             logger.debug(f"running OptimizationConfig.__post_init__ ... - Fallback local: {self.runpod_service_fallback_local}")
+            logger.debug(f"running OptimizationConfig.__post_init__ ... concurrent is: {self.concurrent}")
+            logger.debug(f"running OptimizationConfig.__post_init__ ... - concurrent_workers is: {self.concurrent_workers}")
         else:
             logger.debug(f"running OptimizationConfig.__post_init__ ... RunPod service disabled - using local execution only")
+    
+        # Enforce: local execution must not use concurrent workers
+        if not self.use_runpod_service:
+            if self.concurrent or self.concurrent_workers != 1:
+                logger.debug("running OptimizationConfig.__post_init__ ... local execution detected; "
+                            "forcing concurrent=False and concurrent_workers=1")
+            self.concurrent = False
+            self.concurrent_workers = 1
+
     
     def _validate_mode_objective_compatibility(self) -> None:
         """Validate that the objective is compatible with the selected mode"""
@@ -394,21 +407,103 @@ Top Parameter Importance:
         return "\n".join(lines)
 
 
+class ConcurrentProgressAggregator:
+    """Aggregates progress across multiple concurrent trials"""
+    
+    def __init__(self, total_trials: int):
+        self.total_trials = total_trials
+    
+    def aggregate_progress(self, current_trial: TrialProgress, all_trial_statuses: Dict[int, str]) -> 'AggregatedProgress':
+        """
+        Aggregate progress from multiple concurrent trials
+        
+        Args:
+            current_trial: Current trial progress data
+            all_trial_statuses: Dictionary mapping trial numbers to status strings
+            
+        Returns:
+            AggregatedProgress with consolidated status
+        """
+        logger.debug(f"running aggregate_progress ... aggregating progress for {len(all_trial_statuses)} trials")
+        
+        # Categorize trials by status
+        running_trials = [t for t, s in all_trial_statuses.items() if s == "running"]
+        completed_trials = [t for t, s in all_trial_statuses.items() if s == "completed"]
+        failed_trials = [t for t, s in all_trial_statuses.items() if s == "failed"]
+        
+        # Calculate ETA using the current trial statuses
+        estimated_time_remaining = self.calculate_eta(all_trial_statuses)
+        
+        # Get current best value (this will be implemented in the callback)
+        current_best_value = self.get_current_best_value()
+        
+        return AggregatedProgress(
+            total_trials=self.total_trials,
+            running_trials=running_trials,
+            completed_trials=completed_trials,
+            failed_trials=failed_trials,
+            current_best_value=current_best_value,
+            estimated_time_remaining=estimated_time_remaining
+        )
+    
+    def calculate_eta(self, all_trial_statuses: Dict[int, str]) -> Optional[float]:
+        """Calculate estimated time remaining based on trial statuses"""
+        # Simple implementation - can be enhanced later
+        completed_count = len([s for s in all_trial_statuses.values() if s == "completed"])
+        
+        if completed_count == 0:
+            return None
+        
+        # Rough estimate based on completion rate
+        remaining_trials = self.total_trials - completed_count
+        avg_time_per_trial = 120.0  # Assume 2 minutes per trial as baseline
+        
+        return remaining_trials * avg_time_per_trial
+    
+    def get_current_best_value(self) -> Optional[float]:
+        """Get current best value - placeholder for now"""
+        return None  # Will be populated by the ModelOptimizer instance
+
+
+@dataclass 
+class AggregatedProgress:
+    """Aggregated progress data across multiple concurrent trials"""
+    total_trials: int
+    running_trials: List[int]
+    completed_trials: List[int]
+    failed_trials: List[int]
+    current_best_value: Optional[float]
+    estimated_time_remaining: Optional[float]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API serialization"""
+        return {
+            'total_trials': self.total_trials,
+            'running_trials': self.running_trials,
+            'completed_trials': self.completed_trials,
+            'failed_trials': self.failed_trials,
+            'current_best_value': self.current_best_value,
+            'estimated_time_remaining': self.estimated_time_remaining
+        }
+
+
+# Progress callback
+def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress]) -> None:
+    """Default progress callback that prints progress updates to console"""
+    if isinstance(progress, AggregatedProgress):
+        print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
+              f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
+        if progress.current_best_value is not None:
+            print(f"   Best value so far: {progress.current_best_value:.4f}")
+        if progress.estimated_time_remaining is not None:
+            eta_minutes = progress.estimated_time_remaining / 60
+            print(f"   ETA: {eta_minutes:.1f} minutes")
+
+
 class ModelOptimizer:
     """
-    ARCHITECTURAL PIVOT: Unified optimizer class with RunPod service integration
-    
-    REFACTORING PROGRESS:
-    - ✅ STEP 2.1a: Added HyperparameterSelector integration
-    - ✅ STEP 2.1b: Removed embedded hyperparameter suggestion methods
-    - ✅ STEP 2.1c: Added PlotGenerator integration
-    - ✅ STEP 2.1: Added RunPod service integration (replaces GPU proxy)
-    
-    ARCHITECTURAL PIVOT CHANGES:
-    - ❌ REMOVED: GPU proxy code injection approach
-    - ✅ ADDED: RunPod service JSON API approach
-    - 🔄 SAME: Uses same RunPod infrastructure with specialized handler
-    
+    Unified optimizer class with RunPod service integration
+
     Integrates with existing ModelBuilder and DatasetManager to provide
     automated hyperparameter tuning with simple or health-aware optimization.
     """
@@ -416,7 +511,7 @@ class ModelOptimizer:
     def __init__(self, dataset_name: str, optimization_config: Optional[OptimizationConfig] = None, 
         datasets_root: Optional[str] = None, run_name: Optional[str] = None,
         health_analyzer: Optional[HealthAnalyzer] = None,
-        progress_callback: Optional[Callable[[TrialProgress], None]] = None,
+        progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress]], None]] = None,
         activation_override: Optional[str] = None):
         """
         Initialize ModelOptimizer with RunPod service support
@@ -439,7 +534,7 @@ class ModelOptimizer:
         
         # Enhanced plot tracking
         self.trial_plot_data = {}
-        self.best_trial_number = None      
+        #self.best_trial_number = None      
         
         # Log plot generation configuration
         logger.debug(f"running ModelOptimizer.__init__ ... Plot generation mode: {self.config.plot_generation.value}")
@@ -447,9 +542,10 @@ class ModelOptimizer:
         # Initialize health analyzer (always available for monitoring)
         self.health_analyzer = health_analyzer or HealthAnalyzer()
         
-        # Health monitoring storage
-        self.trial_health_history: List[Dict[str, Any]] = []
-        self.best_trial_health: Optional[Dict[str, Any]] = None
+        # Thread-safe shared state management
+        self._state_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._best_trial_lock = threading.Lock()
         
         # Initialize dataset manager and load dataset info
         self.dataset_manager = DatasetManager(datasets_root)
@@ -468,7 +564,7 @@ class ModelOptimizer:
             test_size=self.config.test_size
         )
         
-        # PHASE 2 REFACTORING: Initialize HyperparameterSelector
+        # Initialize HyperparameterSelector
         logger.debug(f"running ModelOptimizer.__init__ ... Initializing HyperparameterSelector")
         self.hyperparameter_selector = HyperparameterSelector(
             dataset_config=self.dataset_config,
@@ -481,7 +577,7 @@ class ModelOptimizer:
         self.data_type = self._detect_data_type()
         logger.debug(f"running ModelOptimizer.__init__ ... Detected data type: {self.data_type}")
         
-        # PHASE 2 REFACTORING: Initialize PlotGenerator
+        # Initialize PlotGenerator
         logger.debug(f"running ModelOptimizer.__init__ ... Initializing PlotGenerator")
         default_model_config = ModelConfig()
         self.plot_generator = PlotGenerator(
@@ -496,17 +592,36 @@ class ModelOptimizer:
         self.results_dir: Optional[Path] = None
         
         # Create results directory
-        self._setup_results_directory()
+        self._setup_results_directory()      
+                        
+        # Health monitoring storage (protected by _state_lock)
+        self._trial_health_history: List[Dict[str, Any]] = []
+        self._best_trial_health: Optional[Dict[str, Any]] = None
         
-        # Real-time trial tracking
+        # Thread-safe shared state management
+        self._state_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._best_trial_lock = threading.Lock()
+        
+        # Real-time trial tracking (protected by _progress_lock)
         self.progress_callback = progress_callback
-        self.current_trial_progress: Optional[TrialProgress] = None
-        self.trial_progress_history: List[TrialProgress] = []
-        self.best_trial_progress: Optional[TrialProgress] = None
+        self._current_trial_progress: Optional[TrialProgress] = None
+        self._trial_progress_history: List[TrialProgress] = []
+        self._best_trial_progress: Optional[TrialProgress] = None
         
-        # Architecture and health trends for visualization
-        self.architecture_trends: Dict[str, List[float]] = {}
-        self.health_trends: Dict[str, List[float]] = {}
+        # Progress aggregation infrastructure
+        self._progress_aggregator = ConcurrentProgressAggregator(self.config.n_trials)
+        self._trial_start_times: Dict[int, float] = {}
+        self._trial_statuses: Dict[int, str] = {}  # "running", "completed", "failed"
+        
+        # Architecture and health trends (protected by _state_lock)
+        self._architecture_trends: Dict[str, List[float]] = {}
+        self._health_trends: Dict[str, List[float]] = {}
+        
+        # Best trial tracking (protected by _best_trial_lock)
+        self._best_trial_number: Optional[int] = None
+        self._best_trial_value: Optional[float] = None
+        
         
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
         logger.debug(f"running ModelOptimizer.__init__ ... Mode: {self.config.mode.value}")
@@ -517,9 +632,9 @@ class ModelOptimizer:
         if self.run_name:
             logger.debug(f"running ModelOptimizer.__init__ ... Run name: {self.run_name}")
         
-        # 🔄 ARCHITECTURAL PIVOT: LOG RUNPOD SERVICE CONFIGURATION
+        # Log runpod service configuration
         if self.config.use_runpod_service:
-            logger.debug(f"running ModelOptimizer.__init__ ... 🔄 ARCHITECTURAL PIVOT: RunPod service integration ENABLED")
+            logger.debug(f"running ModelOptimizer.__init__ ... RunPod service integration ENABLED")
             logger.debug(f"running ModelOptimizer.__init__ ... - Approach: JSON API calls (specialized serverless)")
             logger.debug(f"running ModelOptimizer.__init__ ... - Endpoint: {self.config.runpod_service_endpoint}")
             logger.debug(f"running ModelOptimizer.__init__ ... - Timeout: {self.config.runpod_service_timeout}s")
@@ -528,9 +643,87 @@ class ModelOptimizer:
         else:
             logger.debug(f"running ModelOptimizer.__init__ ... RunPod service integration: DISABLED (local execution only)")
         
-        # PHASE 2 REFACTORING LOG
-        logger.debug(f"running ModelOptimizer.__init__ ... PHASE 2 REFACTORING: Pure orchestrator transformation complete")
-        logger.debug(f"running ModelOptimizer.__init__ ... ARCHITECTURAL PIVOT: GPU proxy code injection → RunPod service JSON API")
+        logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy code injection → RunPod service JSON API")
+    
+    
+    # Add these methods to ModelOptimizer class
+    def add_trial_health(self, trial_health: Dict[str, Any]) -> None:
+        """Thread-safe method to add trial health data"""
+        with self._state_lock:
+            self._trial_health_history.append(trial_health)
+
+    def update_best_trial_health(self, trial_health: Dict[str, Any]) -> None:
+        """Thread-safe method to update best trial health"""
+        with self._state_lock:
+            self._best_trial_health = trial_health
+
+    def get_trial_health_history(self) -> List[Dict[str, Any]]:
+        """Thread-safe method to get trial health history"""
+        with self._state_lock:
+            return self._trial_health_history.copy()
+
+    def get_best_trial_health(self) -> Optional[Dict[str, Any]]:
+        """Thread-safe method to get best trial health"""
+        with self._state_lock:
+            return self._best_trial_health
+
+    def update_best_trial(self, trial_number: int, trial_value: float) -> None:
+        """Thread-safe method to update best trial tracking"""
+        with self._best_trial_lock:
+            if self._best_trial_value is None or trial_value > self._best_trial_value:
+                self._best_trial_number = trial_number
+                self._best_trial_value = trial_value
+
+    def get_best_trial_info(self) -> Tuple[Optional[int], Optional[float]]:
+        """Thread-safe method to get best trial info"""
+        with self._best_trial_lock:
+            return self._best_trial_number, self._best_trial_value
+        
+    def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
+        """
+        Thread-safe progress callback wrapper as specified in status.md
+        
+        Args:
+            trial_progress: TrialProgress object with current trial status
+        """
+        logger.debug(f"running _thread_safe_progress_callback ... processing progress for trial {trial_progress.trial_number}")
+        
+        with self._progress_lock:
+            # Update trial status tracking
+            self._trial_statuses[trial_progress.trial_number] = trial_progress.status
+            logger.debug(f"running _thread_safe_progress_callback ... updated trial {trial_progress.trial_number} status to '{trial_progress.status}'")
+            
+            # Call user-provided progress callback if available
+            if self.progress_callback:
+                try:
+                    # Get current best value for aggregation
+                    best_trial_number, best_trial_value = self.get_best_trial_info()
+                    
+                    # Update the progress aggregator with current best value
+                    self._progress_aggregator.get_current_best_value = lambda: best_trial_value
+                    
+                    # Create aggregated progress
+                    aggregated_progress = self._progress_aggregator.aggregate_progress(
+                        current_trial=trial_progress,
+                        all_trial_statuses=self._trial_statuses
+                    )
+                    
+                    logger.debug(f"running _thread_safe_progress_callback ... calling user progress callback with aggregated data")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Total trials: {aggregated_progress.total_trials}")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Running: {len(aggregated_progress.running_trials)}")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Completed: {len(aggregated_progress.completed_trials)}")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Failed: {len(aggregated_progress.failed_trials)}")
+                    
+                    # Call the user's progress callback with aggregated progress
+                    self.progress_callback(aggregated_progress)
+                    
+                except Exception as e:
+                    logger.error(f"running _thread_safe_progress_callback ... error in progress callback: {e}")
+                    # Don't re-raise to avoid disrupting trial execution
+            else:
+                logger.debug(f"running _thread_safe_progress_callback ... no user progress callback configured")
+    
+    
     
     def _detect_data_type(self) -> str:
         """Detect whether this is image or text data"""
@@ -577,7 +770,7 @@ class ModelOptimizer:
     
     def _suggest_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
         """
-        PHASE 2 REFACTORING: Use HyperparameterSelector for hyperparameter suggestion
+        Use HyperparameterSelector for hyperparameter suggestion
         
         Args:
             trial: Optuna trial object
@@ -598,7 +791,7 @@ class ModelOptimizer:
         
         return params
 
-    # 🔄 ARCHITECTURAL PIVOT: RunPod Service Methods (replacing GPU proxy)
+    # RunPod Service Methods (replacing GPU proxy)
     
     def _should_use_runpod_service(self) -> bool:
         """
@@ -618,34 +811,18 @@ class ModelOptimizer:
         return False
     
     def _train_via_runpod_service(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
-        """
-        🔄 ARCHITECTURAL PIVOT: Train model via RunPod service using JSON API
-        
-        Sends a small JSON request to the RunPod service instead of large Python code.
-        The RunPod service uses the same optimizer.py orchestration logic via handler.py.
-        
-        Args:
-            trial: Optuna trial object
-            params: Hyperparameters for this trial
-            
-        Returns:
-            Objective value for optimization
-            
-        Raises:
-            RuntimeError: If RunPod service call fails and fallback is disabled
-        """
-        logger.debug(f"running _train_via_runpod_service ... 🔄 ARCHITECTURAL PIVOT: Starting RunPod service training for trial {trial.number}")
+        logger.debug(f"running _train_via_runpod_service ... Starting RunPod service training for trial {trial.number}")
         logger.debug(f"running _train_via_runpod_service ... Using JSON API approach (tiny payloads) instead of code injection")
         
         try:
-            # Get API key from environment
             api_key = os.getenv('RUNPOD_API_KEY')
             if not api_key:
                 raise RuntimeError("RUNPOD_API_KEY environment variable not set")
-            
-            # Prepare JSON request payload (tiny payload <1KB)
+            if self.config.runpod_service_endpoint is None:
+                raise RuntimeError("RunPod service endpoint is not configured")
+
             request_payload = {
-                "input": {  # ← ADD THIS WRAPPER
+                "input": {
                     "command": "start_training",
                     "trial_id": f"trial_{trial.number}",
                     "dataset": self.dataset_name,
@@ -655,123 +832,90 @@ class ModelOptimizer:
                         "max_training_time": self.config.max_training_time_minutes,
                         "mode": self.config.mode.value,
                         "objective": self.config.objective.value,
-                        "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage
+                        "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage,
+                        "use_multi_gpu": self.config.use_multi_gpu,
+                        "target_gpus_per_worker": self.config.target_gpus_per_worker,
+                        "auto_detect_gpus": self.config.auto_detect_gpus,
+                        "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling
                     }
                 }
             }
-            
-            # Log payload size for architectural pivot verification
             payload_size = len(json.dumps(request_payload).encode('utf-8'))
-            logger.debug(f"running _train_via_runpod_service ... 🔄 PAYLOAD SIZE: {payload_size} bytes (vs old approach: 1.15MB+)")
-            logger.debug(f"running _train_via_runpod_service ... Request payload prepared for trial {trial.number}")
-            logger.debug(f"running _train_via_runpod_service ... Dataset: {self.dataset_name}")
-            logger.debug(f"running _train_via_runpod_service ... Hyperparameters: {params}")
-            logger.debug(f"running _train_via_runpod_service ... Endpoint: {self.config.runpod_service_endpoint}")
-            
-            # Send request to RunPod service
-            if self.config.runpod_service_endpoint is None:
-                raise RuntimeError("RunPod service endpoint is not configured")
-
+            logger.debug(f"running _train_via_runpod_service ... 🔄 PAYLOAD SIZE: {payload_size} bytes")
             logger.debug(f"running _train_via_runpod_service ... DEBUG PAYLOAD: {json.dumps(request_payload, indent=2)}")
 
-            response = requests.post(
-                self.config.runpod_service_endpoint,
-                json=request_payload,
-                timeout=self.config.runpod_service_timeout,
-                headers={
+            # --- per-trial HTTP session (safer under n_jobs > 1) ---
+            with requests.Session() as sess:
+                sess.headers.update({
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}"
-                }
-            )
-            
-            # Check response status
-            if response.status_code != 200:
-                raise RuntimeError(f"RunPod service returned status {response.status_code}: {response.text}")
-            
-            # Parse initial response
-            result = response.json()
-            job_id = result.get('id')
-            
-            if not job_id:
-                raise RuntimeError("No job ID returned from RunPod service")
-            
-            logger.debug(f"running _train_via_runpod_service ... Job submitted with ID: {job_id}")
-            logger.debug(f"running _train_via_runpod_service ... Polling for completion...")
-            
-            # Poll for job completion
-            max_poll_time = self.config.runpod_service_timeout
-            poll_interval = 10  # seconds
-            start_time = time.time()
-            
-            while time.time() - start_time < max_poll_time:
-                # Check job status
+                    "Authorization": f"Bearer {api_key}",
+                    "Connection": "close"
+                })
+
+                # Submit
+                submit_url = self.config.runpod_service_endpoint
+                logger.debug(f"running _train_via_runpod_service ... POST {submit_url}")
+                response = sess.post(submit_url, json=request_payload, timeout=self.config.runpod_service_timeout)
+                response.raise_for_status()
+                result = response.json()
+                job_id = result.get('id')
+                if not job_id:
+                    raise RuntimeError("No job ID returned from RunPod service")
+
+                logger.debug(f"running _train_via_runpod_service ... Job submitted with ID: {job_id}")
+                logger.debug(f"running _train_via_runpod_service ... Polling for completion...")
+
+                # Poll
+                max_poll_time = self.config.runpod_service_timeout
+                poll_interval = 10
+                start_time = time.time()
                 status_url = f"{self.config.runpod_service_endpoint.rsplit('/run', 1)[0]}/status/{job_id}"
-                status_response = requests.get(
-                    status_url,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=30
-                )
-                
-                if status_response.status_code == 200:
+
+                while time.time() - start_time < max_poll_time:
+                    status_response = sess.get(status_url, timeout=30)
+                    status_response.raise_for_status()
                     status_data = status_response.json()
                     job_status = status_data.get('status', 'UNKNOWN')
-                    
                     logger.debug(f"running _train_via_runpod_service ... Job {job_id} status: {job_status}")
-                    
+
                     if job_status == 'COMPLETED':
-                        # Get the output
                         output = status_data.get('output', {})
                         if not output:
                             raise RuntimeError("No output returned from completed RunPod job")
-                        
-                        # Validate response format
                         if not output.get('success', False):
                             error_msg = output.get('error', 'Unknown error from RunPod service')
                             raise RuntimeError(f"RunPod service training failed: {error_msg}")
-                        
-                        # Extract metrics from response
+
                         metrics = output.get('metrics', {})
                         if not metrics:
                             raise RuntimeError("No metrics returned from RunPod service")
-                        
-                        # Calculate objective value based on configuration
+
                         objective_value = self._calculate_objective_from_service_response(metrics, output, trial)
-                        
                         logger.debug(f"running _train_via_runpod_service ... Trial {trial.number} completed via RunPod service")
-                        logger.debug(f"running _train_via_runpod_service ... 🔄 ARCHITECTURAL PIVOT SUCCESS: JSON API approach working")
                         logger.debug(f"running _train_via_runpod_service ... Objective value: {objective_value:.4f}")
-                        
                         return objective_value
-                        
-                    elif job_status == 'FAILED':
+
+                    if job_status == 'FAILED':
                         error_logs = status_data.get('error', 'Job failed without details')
                         raise RuntimeError(f"RunPod job failed: {error_logs}")
-                        
-                    elif job_status in ['IN_QUEUE', 'IN_PROGRESS']:
-                        # Continue polling
+
+                    if job_status in ['IN_QUEUE', 'IN_PROGRESS']:
                         time.sleep(poll_interval)
                         continue
-                    else:
-                        logger.warning(f"running _train_via_runpod_service ... Unknown job status: {job_status}")
-                        time.sleep(poll_interval)
-                        continue
-                else:
-                    logger.warning(f"running _train_via_runpod_service ... Failed to get job status: {status_response.status_code}")
+
+                    logger.warning(f"running _train_via_runpod_service ... Unknown job status: {job_status}")
                     time.sleep(poll_interval)
-                    continue
-            
-            # Timeout reached
-            raise RuntimeError(f"RunPod job {job_id} did not complete within {max_poll_time} seconds")
-            
+
+                raise RuntimeError(f"RunPod job {job_id} did not complete within {max_poll_time} seconds")
+
         except Exception as e:
             logger.error(f"running _train_via_runpod_service ... RunPod service training failed for trial {trial.number}: {e}")
-            
             if self.config.runpod_service_fallback_local:
                 logger.warning(f"running _train_via_runpod_service ... Falling back to local execution for trial {trial.number}")
                 return self._train_locally_for_trial(trial, params)
-            else:
-                logger.error(f"running _train_via_runpod_service ... RunPod service failed and local fallback disabled")
-                raise RuntimeError(f"RunPod service training failed for trial {trial.number}: {e}")
+            logger.error("running _train_via_runpod_service ... RunPod service failed and local fallback disabled")
+            raise RuntimeError(f"RunPod service training failed for trial {trial.number}: {e}")
+
     
     def _calculate_objective_from_service_response(
         self, 
@@ -1051,7 +1195,7 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.optimize ... Objective: {self.config.objective.value}")
         logger.debug(f"running ModelOptimizer.optimize ... Trials: {self.config.n_trials}")
         
-        # 🔄 ARCHITECTURAL PIVOT: Log execution approach
+        # Log execution approach
         if self.config.use_runpod_service:
             logger.debug(f"running ModelOptimizer.optimize ... 🔄 EXECUTION: RunPod Service (JSON API, tiny payloads)")
             logger.debug(f"running ModelOptimizer.optimize ... Endpoint: {self.config.runpod_service_endpoint}")
@@ -1071,15 +1215,46 @@ class ModelOptimizer:
         # Record optimization start time
         self.optimization_start_time = time.time()
         
+        # Decide Optuna parallelism: only >1 when using RunPod service
+        proposed_jobs: int = (
+            self.config.concurrent_workers
+            if (self.config.use_runpod_service and self.config.concurrent)
+            else 1
+        )
+        # Cap by number of trials to avoid oversubscribing the executor
+        n_jobs: int = min(proposed_jobs, self.config.n_trials)
+
+        logger.debug(
+            "running ModelOptimizer.optimize ... Optuna n_jobs=%s (concurrent=%s, workers=%s, runpod=%s, trials=%s)",
+            n_jobs, self.config.concurrent, self.config.concurrent_workers, self.config.use_runpod_service, self.config.n_trials
+        )
+
+        if not self.config.use_runpod_service and (
+            self.config.concurrent or self.config.concurrent_workers != 1
+        ):
+            logger.debug(
+                "running ModelOptimizer.optimize ... Local execution detected; "
+                "overriding concurrency (concurrent=%s, concurrent_workers=%s) → n_jobs=1",
+                self.config.concurrent, self.config.concurrent_workers
+            )
+
+
         # Run optimization
         try:
-            self.study.optimize(self._objective_function, n_trials=self.config.n_trials)
+            self.study.optimize(
+                self._objective_function,
+                n_trials=self.config.n_trials,
+                n_jobs=n_jobs,
+                catch=(Exception,),          # ← don’t let a single trial kill the study
+                gc_after_trial=True          # ← reclaim memory between concurrent trials
+            )
             logger.debug(f"running ModelOptimizer.optimize ... Completed {len(self.study.trials)} trials")
         except KeyboardInterrupt:
             logger.warning("running ModelOptimizer.optimize ... Optimization interrupted by user")
         except Exception as e:
             logger.error(f"running ModelOptimizer.optimize ... Optimization failed: {e}")
             raise
+
         
         # Compile results
         results = self._compile_results()
@@ -1093,7 +1268,7 @@ class ModelOptimizer:
     
     def _objective_function(self, trial: optuna.Trial) -> float:
         """
-        🔄 ARCHITECTURAL PIVOT: Objective function with RunPod service integration
+        Objective function with RunPod service integration
         
         Now checks execution method:
         1. RunPod service (JSON API approach) - if enabled and configured
@@ -1105,19 +1280,120 @@ class ModelOptimizer:
         Returns:
             Objective value (higher is better for maximization objectives)
         """
+        trial_start_time = time.time()
+    
+        # Track trial start in progress aggregation
+        if self.progress_callback:
+            trial_progress = TrialProgress(
+                trial_id=f"trial_{trial.number}",
+                trial_number=trial.number,
+                status="running",
+                started_at=datetime.now().isoformat()
+            )
+            self._thread_safe_progress_callback(trial_progress)
+        
+        # Record trial start time for ETA calculation
+        with self._progress_lock:
+            self._trial_start_times[trial.number] = trial_start_time
+        
         try:
-            # PHASE 2 REFACTORING: Use modular hyperparameter suggestion
+            logger.debug(
+                f"running _objective_function ... start "
+                f"trial={trial.number} "
+                f"mode={'runpod' if self.config.use_runpod_service else 'local'} "
+                f"concurrent={self.config.concurrent} "
+                f"workers={self.config.concurrent_workers}"
+            )
+            
+            # Per-trial deterministic seeding (thread-safe for concurrent trials)
+            try:
+                base_seed: int = int(self.config.random_seed) if self.config.random_seed is not None else 0
+            except Exception:
+                base_seed = 0
+            seed_value: int = (base_seed + int(trial.number)) & 0x7FFFFFFF  # keep in 32-bit range
+
+            logger.debug(f"running _objective_function ... setting per-trial seed={seed_value} for trial={trial.number}")
+
+            random.seed(seed_value)
+            np.random.seed(seed_value)
+
+            try:
+                # If TensorFlow is in use, seed it as well
+                tf.random.set_seed(seed_value)  # deterministic graph-level seed
+            except Exception:
+                # Silent if TF not installed/needed in this run context
+                pass
+
+            # Create a unique directory for this trial's artifacts (thread-safe)
+            try:
+                current_file = Path(__file__).resolve()
+                project_root = current_file.parent.parent  # Go up 2 levels to project root
+                results_root = project_root / "optimization_results"
+
+                # Ensure a run-scoped directory already exists or create it
+                # (self.run_name should already be set when ModelOptimizer is constructed)
+                run_dir = results_root / (self.run_name or "default_run")
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                # Trial-specific subdirectory (e.g., trial_003)
+                trial_dir = run_dir / f"trial_{int(trial.number):03d}"
+                trial_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save on the instance for downstream writers; also store on trial for clarity
+                self.current_trial_dir = trial_dir  # type: ignore[attr-defined]
+                trial.set_user_attr("output_dir", str(trial_dir))
+
+                logger.debug(
+                    "running _objective_function ... trial directory ready: %s",
+                    str(trial_dir)
+                )
+            except Exception as e:
+                logger.error("running _objective_function ... failed to prepare trial directory: %s", e)
+                raise
+                    
+            # Use modular hyperparameter suggestion
             params = self._suggest_hyperparameters(trial)
             
-            # 🔄 ARCHITECTURAL PIVOT: Check execution method
+            # Check execution method
             if self._should_use_runpod_service():
                 logger.debug(f"running _objective_function ... Trial {trial.number}: 🔄 Using RunPod service (JSON API)")
-                return self._train_via_runpod_service(trial, params)
+                objective_value = self._train_via_runpod_service(trial, params)
             else:
                 logger.debug(f"running _objective_function ... Trial {trial.number}: Using local execution")
-                return self._train_locally_for_trial(trial, params)
+                objective_value = self._train_locally_for_trial(trial, params)
+            
+            # Track trial completion in progress aggregation
+            if self.progress_callback:
+                trial_end_time = time.time()
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="completed",
+                    started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
+                    completed_at=datetime.now().isoformat(),
+                    duration_seconds=trial_end_time - trial_start_time,
+                    performance={'objective_value': objective_value}
+                )
+                self._thread_safe_progress_callback(trial_progress)
+            
+            # Update best trial tracking
+            self.update_best_trial(trial.number, objective_value)
+            
+            return objective_value
             
         except Exception as e:
+            # Track trial failure in progress aggregation
+            if self.progress_callback:
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="failed",
+                    started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
+                    completed_at=datetime.now().isoformat(),
+                    duration_seconds=time.time() - trial_start_time
+                )
+                self._thread_safe_progress_callback(trial_progress)
+            
             logger.error(f"running ModelOptimizer._objective_function ... Trial {trial.number} failed: {str(e)}")
             logger.error(f"running ModelOptimizer._objective_function ... Traceback: {traceback.format_exc()}")
             raise
@@ -1144,8 +1420,8 @@ class ModelOptimizer:
                 health_weight=self.config.health_weight,
                 objective_history=[],
                 parameter_importance={},
-                health_history=self.trial_health_history,
-                best_trial_health=self.best_trial_health,
+                health_history=self._trial_health_history,
+                best_trial_health=self._best_trial_health,
                 dataset_name=self.dataset_name,
                 dataset_config=self.dataset_config,
                 optimization_config=self.config,
@@ -1176,8 +1452,8 @@ class ModelOptimizer:
             health_weight=self.config.health_weight,
             objective_history=[t.value for t in self.study.trials if t.value is not None],
             parameter_importance=importance,
-            health_history=self.trial_health_history,
-            best_trial_health=self.best_trial_health,
+            health_history=self._trial_health_history,
+            best_trial_health=self._best_trial_health,
             dataset_name=self.dataset_name,
             dataset_config=self.dataset_config,
             optimization_config=self.config,
@@ -1210,7 +1486,7 @@ class ModelOptimizer:
                 "health_weight": results.health_weight,
                 "best_value": float(results.best_value),
                 "hyperparameters": best_params,
-                "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # 🔄 ARCHITECTURAL PIVOT: Track execution method
+                "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # Track execution method
             }
             
             with open(yaml_file, 'w') as f:
@@ -1231,17 +1507,19 @@ def optimize_model(
     trials: int = 50,
     run_name: Optional[str] = None,
     activation: Optional[str] = None,
-    progress_callback: Optional[Callable[[TrialProgress], None]] = None,
-    # 🔄 ARCHITECTURAL PIVOT: RunPod service parameters (replacing GPU proxy)
+    progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress]], None]] = None,
+    # RunPod service parameters (replacing GPU proxy)
     use_runpod_service: bool = False,
     runpod_service_endpoint: Optional[str] = None,
     runpod_service_timeout: int = 600,
     runpod_service_fallback_local: bool = True,
     gpu_proxy_sample_percentage: float = 0.5,
+    concurrent: bool = True,
+    concurrent_workers: int = 2,
     **config_overrides
 ) -> OptimizationResult:
     """
-    🔄 ARCHITECTURAL PIVOT: Convenience function with RunPod service support
+    Convenience function with RunPod service support
     
     Args:
         dataset_name: Name of dataset to optimize
@@ -1250,7 +1528,7 @@ def optimize_model(
         trials: Number of trials to run
         run_name: Optional unified run name for consistent directory/file naming
         progress_callback: Optional callback for real-time progress updates
-        # 🔄 ARCHITECTURAL PIVOT: RunPod service parameters
+        # RunPod service parameters
         use_runpod_service: Enable/disable RunPod service usage
         runpod_service_endpoint: RunPod service endpoint URL
         runpod_service_timeout: Request timeout in seconds
@@ -1264,7 +1542,7 @@ def optimize_model(
         # Local execution
         result = optimize_model('cifar10', mode='simple', optimize_for='val_accuracy', trials=20)
         
-        # 🔄 ARCHITECTURAL PIVOT: RunPod service execution (JSON API)
+        # RunPod service execution (JSON API)
         result = optimize_model('cifar10', mode='simple', optimize_for='val_accuracy', 
                                trials=20, use_runpod_service=True, 
                                runpod_service_endpoint='https://your-runpod-endpoint.com')
@@ -1312,13 +1590,24 @@ def optimize_model(
         mode=opt_mode,
         objective=objective,
         n_trials=trials,
-        # 🔄 ARCHITECTURAL PIVOT: RunPod service configuration
         use_runpod_service=use_runpod_service,
         runpod_service_endpoint=runpod_service_endpoint,
         runpod_service_timeout=runpod_service_timeout,
         runpod_service_fallback_local=runpod_service_fallback_local,
-        gpu_proxy_sample_percentage=gpu_proxy_sample_percentage
+        gpu_proxy_sample_percentage=gpu_proxy_sample_percentage,
+        concurrent=concurrent,
+        concurrent_workers=concurrent_workers,
     )
+    
+    logger.debug(
+        "running optimize_model ... opt_config loaded: concurrent=%s, workers=%s, use_runpod_service=%s",
+        opt_config.concurrent, opt_config.concurrent_workers, opt_config.use_runpod_service
+    )
+    if not opt_config.use_runpod_service and opt_config.concurrent:
+        logger.debug(
+            "running optimize_model ... local execution detected; ignoring concurrency flags (forcing n_jobs=1)"
+        )
+
     
     # Apply config overrides
     for key, value in config_overrides.items():
@@ -1343,7 +1632,7 @@ def optimize_model(
         else:
             logger.warning(f"running optimize_model ... Unknown config parameter: {key}")
     
-    # 🔄 ARCHITECTURAL PIVOT: LOG EXECUTION APPROACH
+    # Log execution approach
     if opt_config.use_runpod_service:
         logger.debug(f"running optimize_model ... 🔄 EXECUTION APPROACH: RunPod Service (JSON API)")
         logger.debug(f"running optimize_model ... - Endpoint: {opt_config.runpod_service_endpoint}")
@@ -1380,7 +1669,7 @@ if __name__ == "__main__":
     run_name = args.get('run_name', None)
     activation = args.get('activation', None)
     
-    # 🔄 ARCHITECTURAL PIVOT: Extract RunPod service parameters
+    # Extract RunPod service parameters
     use_runpod_service = args.get('use_runpod_service', 'false').lower() in ['true', '1', 'yes', 'on']
     runpod_service_endpoint = args.get('runpod_service_endpoint', None)
     runpod_service_timeout = int(args.get('runpod_service_timeout', '600'))
@@ -1391,7 +1680,7 @@ if __name__ == "__main__":
         'n_trials', 'n_startup_trials', 'n_warmup_steps', 'random_seed',
         'max_epochs_per_trial', 'early_stopping_patience', 'min_epochs_per_trial',
         'stability_window', 'health_analysis_sample_size', 'health_monitoring_frequency',
-        'runpod_service_timeout'
+        'runpod_service_timeout', 'concurrent_workers'
     ]
     for int_param in int_params:
         if int_param in args:
@@ -1416,14 +1705,15 @@ if __name__ == "__main__":
     bool_params = [
         'save_best_model', 'save_optimization_history', 'create_comparison_plots',
         'enable_early_stopping', 'enable_stability_checks',
-        'use_runpod_service', 'runpod_service_fallback_local'  # 🔄 ARCHITECTURAL PIVOT
+        'use_runpod_service', 'runpod_service_fallback_local',
+        'concurrent'
     ]
     for bool_param in bool_params:
         if bool_param in args:
             args[bool_param] = args[bool_param].lower() in ['true', '1', 'yes', 'on']
     
     # Handle string parameters
-    string_params = ['plot_generation', 'activation', 'runpod_service_endpoint']  # 🔄 ARCHITECTURAL PIVOT
+    string_params = ['plot_generation', 'activation', 'runpod_service_endpoint']
     for string_param in string_params:
         if string_param in args:
             if args[string_param].strip():
@@ -1462,7 +1752,7 @@ if __name__ == "__main__":
     if run_name:
         logger.debug(f"running optimizer.py ... Run name: {run_name}")
     
-    # 🔄 ARCHITECTURAL PIVOT: LOG EXECUTION APPROACH
+    # Log execution approach
     if use_runpod_service:
         logger.debug(f"running optimizer.py ... 🔄 EXECUTION: RunPod Service (JSON API approach)")
         logger.debug(f"running optimizer.py ... - Endpoint: {runpod_service_endpoint}")
@@ -1483,10 +1773,11 @@ if __name__ == "__main__":
             trials=trials,
             run_name=run_name,
             activation=activation,
-            use_runpod_service=use_runpod_service,  # 🔄 ARCHITECTURAL PIVOT
-            runpod_service_endpoint=runpod_service_endpoint,  # 🔄 ARCHITECTURAL PIVOT
-            runpod_service_timeout=runpod_service_timeout,  # 🔄 ARCHITECTURAL PIVOT
-            runpod_service_fallback_local=runpod_service_fallback_local,  # 🔄 ARCHITECTURAL PIVOT
+            progress_callback=default_progress_callback,
+            use_runpod_service=use_runpod_service,
+            runpod_service_endpoint=runpod_service_endpoint,
+            runpod_service_timeout=runpod_service_timeout,
+            runpod_service_fallback_local=runpod_service_fallback_local,
             **{k: v for k, v in args.items() if k not in ['dataset', 'mode', 'optimize_for', 'trials', 'run_name', 'activation', 'use_runpod_service', 'runpod_service_endpoint', 'runpod_service_timeout', 'runpod_service_fallback_local']}
         )
         
@@ -1495,7 +1786,7 @@ if __name__ == "__main__":
         
         logger.debug(f"running optimizer.py ... ✅ Optimization completed successfully!")
         
-        # 🔄 ARCHITECTURAL PIVOT: LOG EXECUTION METHOD IN RESULTS
+        # Log execution method in results
         if use_runpod_service:
             print(f"\n🚀 RunPod Service: All trials executed via JSON API")
             print(f"   Endpoint: {runpod_service_endpoint}")
