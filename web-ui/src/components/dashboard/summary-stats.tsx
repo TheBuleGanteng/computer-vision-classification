@@ -68,12 +68,12 @@ export function SummaryStats() {
           <div className="flex items-center space-x-2">
             <Activity className="h-5 w-5 text-purple-500" />
             <div>
-              <p className="text-sm font-medium text-muted-foreground">
-                Best Total Score
-                <Badge variant="outline" className="ml-1 text-xs">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-sm font-medium text-muted-foreground">Best Total Score</span>
+                <Badge variant="outline" className="text-xs">
                   {optimizationMode}
                 </Badge>
-              </p>
+              </div>
               <p className="text-2xl font-bold">{(bestTotalScore * 100).toFixed(2)}%</p>
             </div>
           </div>

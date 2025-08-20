@@ -1436,7 +1436,7 @@ class ModelBuilder:
         """
         Optimized local training execution with PROPER multi-GPU implementation
         """
-        logger.debug("running _train_locally_optimized ... Starting optimized local training with proper multi-GPU support")
+        logger.debug("running _train_locally_optimized ... Starting optimized local training")
         
         # Log performance information
         self.perf_logger.log_data_info(

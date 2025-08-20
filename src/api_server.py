@@ -15,6 +15,7 @@ import asyncio
 from datetime import datetime
 from enum import Enum
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 import json
 import numpy as np
@@ -30,9 +31,9 @@ import uvicorn
 import zipfile
 
 # UPDATED IMPORTS - Fixed compatibility
-from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, TrialProgress
+from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective
 from dataset_manager import DatasetManager
-from utils.logger import logger
+from utils.logger import logger, setup_logging
 
 
 class JobStatus(str, Enum):
@@ -86,7 +87,7 @@ class OptimizationRequest(BaseModel):
     dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'imdb')")
     mode: str = Field(default="simple", description="Optimization mode ('simple' or 'health')")
     optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
-    trials: int = Field(default=50, ge=1, le=200, description="Number of optimization trials")
+    trials: int = Field(default=20, ge=1, le=200, description="Number of optimization trials")
     health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
     config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration")
 
@@ -278,54 +279,72 @@ class OptimizationJob:
         self.error: Optional[str] = None
         self.task: Optional[asyncio.Task] = None
         
-        # NEW: Real-time trial tracking
+        # Real-time aggregated progress tracking
         self.optimizer: Optional[Any] = None  # Will be ModelOptimizer instance
-        self.trial_progress_history: List[TrialProgress] = []
-        self.current_trial_progress: Optional[TrialProgress] = None
-        self.best_trial_progress: Optional[TrialProgress] = None
+        self.latest_aggregated_progress: Optional[Dict[str, Any]] = None
         
         logger.debug(f"running OptimizationJob.__init__ ... Created job {self.job_id} for dataset {request.dataset_name}")
         logger.debug(f"running OptimizationJob.__init__ ... Mode: {request.mode}, Objective: {request.optimize_for}")
         logger.debug(f"running OptimizationJob.__init__ ... Real-time trial tracking enabled")
     
-    def _progress_callback(self, trial_progress: TrialProgress) -> None:
+    def _progress_callback(self, aggregated_progress: Any) -> None:
         """
-        Callback function to receive real-time trial progress updates
+        Callback function to receive real-time aggregated progress updates
         
-        This method is called by the optimizer whenever trial progress is updated.
-        It maintains the job's trial tracking state and updates progress metrics.
+        This method is called by the optimizer whenever progress is updated.
+        The optimizer sends AggregatedProgress objects with consolidated trial status.
         
         Args:
-            trial_progress: TrialProgress object with current trial state
+            aggregated_progress: AggregatedProgress object with current optimization state
         """
-        logger.debug(f"running OptimizationJob._progress_callback ... Trial {trial_progress.trial_number} update: {trial_progress.status}")
-        
-        # Store trial progress
-        self.trial_progress_history.append(trial_progress)
-        
-        # Update current trial
-        if trial_progress.status == "running":
-            self.current_trial_progress = trial_progress
-        elif trial_progress.status in ["completed", "failed", "pruned"]:
-            # Clear current trial when completed
-            if self.current_trial_progress and self.current_trial_progress.trial_id == trial_progress.trial_id:
-                self.current_trial_progress = None
+        try:
+            logger.debug(f"running OptimizationJob._progress_callback ... Received aggregated progress update")
             
-            # Update best trial if this one performed better
-            if (trial_progress.status == "completed" and 
-                trial_progress.performance and 
-                trial_progress.performance.get('final_val_accuracy')):
-                
-                current_val_acc = trial_progress.performance['final_val_accuracy']
-                best_val_acc = (self.best_trial_progress.performance.get('final_val_accuracy', 0) 
-                              if self.best_trial_progress and self.best_trial_progress.performance else 0)
-                
-                if current_val_acc > best_val_acc:
-                    self.best_trial_progress = trial_progress
-                    logger.debug(f"running OptimizationJob._progress_callback ... New best trial: {trial_progress.trial_number} with val_acc: {current_val_acc:.4f}")
-        
-        # Update job progress
-        self._update_job_progress()
+            # Extract data from AggregatedProgress object
+            completed_count = len(aggregated_progress.completed_trials) if hasattr(aggregated_progress, 'completed_trials') else 0
+            running_count = len(aggregated_progress.running_trials) if hasattr(aggregated_progress, 'running_trials') else 0
+            failed_count = len(aggregated_progress.failed_trials) if hasattr(aggregated_progress, 'failed_trials') else 0
+            total_trials = getattr(aggregated_progress, 'total_trials', 0)
+            
+            # FIXED: Calculate current trial count for UI display (not trial numbers)
+            # The UI expects "X/Y trials" where X is the count of trials processed
+            current_trial = completed_count
+            if running_count > 0:
+                # If there are trials running, show the next trial count
+                current_trial = completed_count + running_count
+            
+            # Calculate elapsed time
+            elapsed_time = 0
+            if self.started_at:
+                start_time = datetime.fromisoformat(self.started_at.replace('Z', '+00:00').replace('T', ' '))
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+            
+            # Store latest aggregated progress data
+            self.latest_aggregated_progress = {
+                "completed_trials": aggregated_progress.completed_trials if hasattr(aggregated_progress, 'completed_trials') else [],
+                "running_trials": aggregated_progress.running_trials if hasattr(aggregated_progress, 'running_trials') else [],
+                "failed_trials": aggregated_progress.failed_trials if hasattr(aggregated_progress, 'failed_trials') else [],
+                "total_trials": total_trials,
+                "current_best_value": getattr(aggregated_progress, 'current_best_value', None)
+            }
+            
+            # Update progress directly from aggregated data
+            self.progress = {
+                "current_trial": current_trial,
+                "total_trials": total_trials,
+                "completed_trials": completed_count,
+                "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
+                "best_value": getattr(aggregated_progress, 'current_best_value', None),
+                "elapsed_time": elapsed_time,
+                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
+            }
+            
+            logger.debug(f"running OptimizationJob._progress_callback ... Updated progress: {current_trial}/{total_trials} trials")
+            logger.debug(f"running OptimizationJob._progress_callback ... Best value: {getattr(aggregated_progress, 'current_best_value', None)}")
+            
+        except Exception as e:
+            logger.error(f"running OptimizationJob._progress_callback ... Error processing progress update: {e}")
+            # Don't re-raise to avoid disrupting optimization
     
     def _update_job_progress(self) -> None:
         """
@@ -487,6 +506,11 @@ class OptimizationJob:
         """
         logger.debug(f"running OptimizationJob._execute_optimization ... Executing optimization for job {self.job_id}")
         
+        # CRITICAL FIX: Ensure logging setup is applied before running optimization
+        # This guarantees UI-triggered optimizations write to the same log file as command-line runs
+        setup_logging()
+        logger.info(f"Starting UI-triggered optimization job {self.job_id} - logs will be written to logs/non-cron.log")
+        
         # Validate mode and objective
         try:
             opt_mode = OptimizationMode(self.request.mode.lower())
@@ -509,6 +533,15 @@ class OptimizationJob:
         config_overrides = self.request.config_overrides.copy()
         config_overrides['health_weight'] = self.request.health_weight
         
+        # FIXED: Configure RunPod GPU acceleration for UI-triggered optimizations
+        config_overrides.update({
+            'use_multi_gpu': True,              # Enable multiple GPUs per RunPod worker
+            'target_gpus_per_worker': 2,        # Number of GPUs per worker
+            'max_gpus_per_worker': 4,          # Maximum GPUs per worker
+            'auto_detect_gpus': True,          # Auto-detect available GPUs
+            'multi_gpu_batch_size_scaling': True  # Scale batch size for multi-GPU
+        })
+        
         logger.debug(f"running OptimizationJob._execute_optimization ... Using optimize_model function")
         logger.debug(f"running OptimizationJob._execute_optimization ... Config overrides: {config_overrides}")
         
@@ -522,6 +555,9 @@ class OptimizationJob:
             trials=self.request.trials,
             run_name=None,  # Let optimize_model generate the run_name using its established logic
             progress_callback=self._progress_callback,  # Real-time progress updates
+            use_runpod_service=False,           # FIXED: Enable RunPod GPU proxy for UI optimizations
+            concurrent=True,                   # FIXED: Enable concurrent workers
+            concurrent_workers=2,              # FIXED: Use multiple concurrent workers
             **config_overrides
         )
         
@@ -637,8 +673,8 @@ class OptimizationJob:
         if self.optimizer:
             return self.optimizer.get_trial_history()
         else:
-            # Fallback to stored progress history
-            return [trial.to_dict() for trial in self.trial_progress_history]
+            # Fallback when optimizer is not available
+            return []
     
     def get_current_trial(self) -> Optional[Dict[str, Any]]:
         """
@@ -652,7 +688,12 @@ class OptimizationJob:
         if self.optimizer:
             return self.optimizer.get_current_trial()
         else:
-            return self.current_trial_progress.to_dict() if self.current_trial_progress else None
+            # Fallback: use aggregated progress data if available
+            if self.latest_aggregated_progress and self.latest_aggregated_progress.get('running_trials'):
+                running_trials = self.latest_aggregated_progress['running_trials']
+                if running_trials:
+                    return {"trial_id": f"trial_{running_trials[0]}", "trial_number": running_trials[0], "status": "running"}
+            return None
     
     def get_best_trial(self) -> Optional[Dict[str, Any]]:
         """
@@ -666,7 +707,14 @@ class OptimizationJob:
         if self.optimizer:
             return self.optimizer.get_best_trial()
         else:
-            return self.best_trial_progress.to_dict() if self.best_trial_progress else None
+            # Fallback: use aggregated progress data if available
+            if self.latest_aggregated_progress and self.latest_aggregated_progress.get('current_best_value') is not None:
+                return {
+                    "trial_id": "best_trial", 
+                    "status": "completed",
+                    "best_value": self.latest_aggregated_progress['current_best_value']
+                }
+            return None
     
     def get_architecture_trends(self) -> Dict[str, List[float]]:
         """
@@ -770,13 +818,32 @@ class OptimizationAPI:
         
         Sets up the FastAPI instance, configures CORS, initializes
         job storage, and registers all API endpoints.
+        
+        FIXED: Ensures consistent logging to files for all optimizations
         """
+        # CRITICAL FIX: Ensure logging is configured consistently for both UI and command-line triggers
+        # This ensures logs always go to logs/non-cron.log regardless of how optimization is started
+        setup_logging()
+        logger.info("API server initializing - logging configured to write to logs/non-cron.log")
         self.app = FastAPI(
             title="Hyperparameter Optimization API",
             description="REST API for automated hyperparameter optimization with GPU acceleration",
             version="1.0.0",
             docs_url="/docs",
             redoc_url="/redoc"
+        )
+        
+        # Configure CORS for Next.js development server
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",  # Next.js dev server
+                "http://127.0.0.1:3000",
+                "http://0.0.0.0:3000"
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
         )
         
         # Job storage - in production, use Redis or database
@@ -788,7 +855,7 @@ class OptimizationAPI:
         # Register API endpoints
         self._register_routes()
         
-        logger.debug("running OptimizationAPI.__init__ ... FastAPI application initialized")
+        logger.debug("running OptimizationAPI.__init__ ... FastAPI application initialized with CORS")
         logger.debug("running OptimizationAPI.__init__ ... Available datasets: " + 
                     ", ".join(self.dataset_manager.get_available_datasets()))
     
@@ -1711,6 +1778,9 @@ if __name__ == "__main__":
     For production deployment, use:
     uvicorn api_server:app --host 0.0.0.0 --port 8000
     """
+    # CRITICAL FIX: Ensure logging is set up before server starts
+    setup_logging()
+    logger.info("FastAPI server starting - all logs will be written to logs/non-cron.log")
     logger.debug("running api_server.__main__ ... Starting FastAPI development server")
     
     uvicorn.run(

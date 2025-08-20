@@ -231,7 +231,7 @@ export function BestArchitectureView() {
             <h4 className="text-sm font-medium mb-3">Architecture layers ({architecture.layers.length})</h4>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
               {architecture.layers.map((layer, index) => (
-                <div key={index} className="p-2 bg-muted/50 rounded text-xs">
+                <div key={index} className="p-2 bg-muted/0 rounded text-xs">
                   <div className="font-medium">{index + 1}. {layer.type}</div>
                   {layer.filters && <div className="text-muted-foreground">Filters: {layer.filters}</div>}
                   {layer.kernelSize && <div className="text-muted-foreground">Kernel: {layer.kernelSize}</div>}

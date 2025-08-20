@@ -15,6 +15,22 @@ interface SelectItemProps {
   children: React.ReactNode
 }
 
+export function SelectItem({ value, children, ...props }: SelectItemProps & { onClick?: () => void }) {
+  return (
+    <div
+      className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-gray-200 hover:text-gray-900"
+      {...props}
+    >
+      {children}
+    </div>
+  )
+}
+
+// Helper function to check if a React element is a SelectItem
+const isSelectItemElement = (element: React.ReactNode): element is React.ReactElement<SelectItemProps> => {
+  return React.isValidElement(element) && element.type === SelectItem
+}
+
 export function Select({ placeholder, value, onValueChange, children, disabled }: SelectProps) {
   const [isOpen, setIsOpen] = React.useState(false)
   const [selectedValue, setSelectedValue] = React.useState(value || "")
@@ -73,17 +89,6 @@ export function Select({ placeholder, value, onValueChange, children, disabled }
           })}
         </div>
       )}
-    </div>
-  )
-}
-
-export function SelectItem({ value, children, ...props }: SelectItemProps & { onClick?: () => void }) {
-  return (
-    <div
-      className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-gray-200 hover:text-gray-900"
-      {...props}
-    >
-      {children}
     </div>
   )
 }
