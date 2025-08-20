@@ -63,7 +63,7 @@ export function Select({ placeholder, value, onValueChange, children, disabled }
       {isOpen && (
         <div className="absolute z-50 mt-1 w-full rounded-md border bg-gray-50 text-gray-900 shadow-lg p-1">
           {React.Children.map(children, (child) => {
-            if (React.isValidElement<SelectItemProps>(child)) {
+            if (isSelectItemElement(child)) {
               return React.cloneElement(child, {
                 ...child.props,
                 onClick: () => handleSelect(child.props.value)
