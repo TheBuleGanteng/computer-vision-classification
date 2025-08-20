@@ -14,6 +14,7 @@ This project implements a **comprehensive hyperparameter optimization system** f
 - **Local fallback**: Automatic fallback to local execution when service unavailable ✅ **ENHANCED**
 - **Complete accuracy synchronization**: **<0.5% gap** between cloud and local execution ✅ **VERIFIED**
 - **REST API**: FastAPI backend with comprehensive endpoints for job management
+- **Modern 3D Architecture Visualization**: Next.js-based UI with interactive 3D neural network exploration ⚠️ **PHASE 1 COMPLETE - BACKEND INTEGRATION REQUIRED**
 
 **Supported Datasets:**
 - **Images**: MNIST, CIFAR-10, CIFAR-100, Fashion-MNIST, GTSRB (German Traffic Signs)
@@ -35,6 +36,11 @@ This project implements a **comprehensive hyperparameter optimization system** f
 **Date**: August 19, 2025  
 **Status**: **SHAPE MISMATCH FIXED - EXCEPTIONAL PERFORMANCE ✅**  
 **Achievement**: **3.07x speedup with TensorFlow MirroredStrategy**
+
+### **⚠️ MODERN 3D ARCHITECTURE VISUALIZATION UI - IN PROGRESS**
+**Date**: August 20, 2025  
+**Status**: **PHASE 1 COMPLETE - BACKEND INTEGRATION REQUIRED ⚠️**  
+**Goal**: **Interactive 3D neural network architecture exploration with Next.js**
 
 #### **🏆 CRITICAL SUCCESS METRICS**
 
@@ -449,23 +455,130 @@ python optimizer.py dataset=cifar10 trials=5 use_runpod_service=false max_epochs
 - ✅ **Zero data corruption**: Results properly saved and accessible
 - ✅ **Reproducible results**: Deterministic seeding implemented and validated
 
-## 🚀 **NEXT STEPS IN DEVELOPMENT SEQUENCE**
+## 🚀 **CURRENT DEVELOPMENT: 3D ARCHITECTURE VISUALIZATION UI**
 
-### **Phase 4: Advanced UI and Visualization Platform**
+### **✅ Phase 1: Foundation Setup - COMPLETE**
+**Goal: Establish Next.js project with 3D visualization capabilities**
 
-**Rich Architecture Visualization Interface:**
-- **3D Architecture Explorer**: Interactive 3D visualizations of CNN and LSTM architectures showing layer structure, connections, and parameter flow
-- **Comparative Architecture Analysis**: Side-by-side comparison of different architectures with visual highlighting of differences
-- **Performance Heatmaps**: Visual correlation between architectural choices and performance outcomes
-- **Real-Time Training Visualization**: Live 3D rendering of training progress with gradient flow and activation patterns
-- **Interactive Parameter Space**: 3D scatter plots of hyperparameter combinations with performance color-coding
+#### **Core Infrastructure**
+- ✅ **Next.js 14 Project**: TypeScript, modern React features, optimized bundling
+- ✅ **React Three Fiber Setup**: 3D rendering engine for neural network visualization
+- ✅ **Tailwind CSS + Framer Motion**: Modern styling and smooth animations
+- ⚠️ **API Integration**: Connection to existing Python FastAPI backend
+- ✅ **Base Layout & Routing**: App router structure for dashboard and explorer views
 
-**Modern Web Interface Features:**
-- **Architecture Gallery**: Visual gallery of all explored architectures with performance metrics and interactive filtering
-- **Training Animation Suite**: Animated visualizations showing how models learn and evolve during training
-- **Performance Dashboard**: Real-time monitoring of concurrent trials with rich visual progress indicators
-- **Export Capabilities**: High-quality export of visualizations for presentations and reports
-- **Mobile-Responsive Design**: Full functionality across desktop, tablet, and mobile devices
+#### **Data Pipeline Architecture**
+- ✅ **TypeScript Interfaces**: Type-safe optimization results and trial data matching Python structures
+- ⚠️ **API Routes**: Next.js endpoints for Python backend communication
+- ⚠️ **Data Transformation**: Utilities for 3D visualization data preparation
+- ⚠️ **Real-time Updates**: WebSocket integration for live optimization monitoring
+
+#### **✅ UI Components Foundation - COMPLETE**
+- ✅ **Core Components**: Card, Button, Badge, Select, Dialog components with modern design
+- ✅ **Dashboard Layout**: Complete responsive dashboard with optimization controls
+- ✅ **OptimizationControls**: Dataset selection and target metric dropdowns with classification type indicators and interactive tooltip
+- ✅ **SummaryStats**: Real-time trial metrics display (trials, accuracy, score, duration)
+- ✅ **BestArchitectureView**: Full-width 3D visualization area with two-column architecture details and model health metrics
+- ✅ **TrialGallery**: Responsive grid of trial tiles with modal architecture viewing
+- ✅ **Interactive Features**: Click-away dropdown behavior, hover states, responsive design
+- ⚠️ **3D Visualization Engine**: React Three Fiber architecture rendering (placeholder ready)
+
+#### **✅ Recent UI Improvements - COMPLETE**
+- ✅ **Enhanced Dataset Selection**: Wider dropdown preventing text wrap with classification type labels
+- ✅ **Target Metric Selection**: Added dropdown for accuracy-only vs accuracy+health optimization modes with default placeholder
+- ✅ **Interactive Tooltip**: Professional info icon with comprehensive model health explanation and CS231n resource link
+- ✅ **Model Health Metrics**: Two-column responsive layout showing gradient norm, loss, dead/saturated filters, and training stability
+- ✅ **Improved User Experience**: Click-away functionality for dropdown auto-collapse
+- ✅ **Refined Layout**: Moved download model button to BestArchitectureView bottom
+- ✅ **Balanced Grid Layout**: Removed architecture tile from stats row for consistent heights
+- ✅ **Visual Polish**: Green/red button styling, proper spacing, and mobile responsiveness
+- ✅ **Consistent Design System**: Unified grey backgrounds for tooltips and dropdowns with proper text contrast
+- ✅ **Professional Typography**: Sentence case capitalization throughout interface
+
+---
+
+## **🚨 IMMEDIATE NEXT STEPS: BACKEND INTEGRATION**
+
+### **Phase 1.5: UI-Backend Integration (CRITICAL PRIORITY)**
+**Goal: Connect UI controls to Python optimization system for seamless operation**
+
+#### **⚠️ Required Backend Modifications**
+
+**A. UI-Triggered Optimization System**
+- **Modify `optimizer.py`**: Add FastAPI endpoints to handle UI start/cancel requests
+- **Start Optimization Endpoint**: `POST /api/optimization/start` with dataset and target_metric parameters
+- **Cancel Optimization Endpoint**: `POST /api/optimization/cancel` 
+- **Status Endpoint**: `GET /api/optimization/status` for real-time progress
+- **Session Management**: Track optimization sessions with unique IDs
+- **Target Metric Support**: Handle both "simple" (accuracy only) and "health" (accuracy + model health) modes
+
+**B. Real-Time Data Emission** 
+- **Trial Start Events**: Emit architecture metadata when trial begins
+- **Progress Updates**: Send epoch-by-epoch training metrics to frontend
+- **Trial Completion**: Emit final results with health scores and model details
+- **WebSocket Integration**: Real-time bidirectional communication with UI
+
+**C. Architecture Metadata Extraction**
+- **Model Introspection**: Extract layer details, parameters, and topology from Keras models
+- **3D Position Hints**: Calculate spatial positioning data for React Three Fiber rendering
+- **Performance Metrics**: Include accuracy, health scores, and training duration
+- **Export Capabilities**: Generate downloadable .keras models and .gltf 3D files
+
+#### **⚠️ Required Frontend Modifications**
+
+**A. API Integration**
+- **Create Next.js API Routes**: `/api/optimization/*` endpoints for Python backend communication
+- **WebSocket Client**: Real-time connection for live optimization updates
+- **State Management**: Replace mock data with real optimization results
+- **Error Handling**: Graceful failure handling and user feedback
+
+**B. Real-Time Updates**
+- **Live Trial Updates**: Replace mock trials with real-time data from backend
+- **Progress Indicators**: Show actual optimization progress in UI
+- **Dynamic Statistics**: Update summary stats as optimization progresses
+- **Architecture Streaming**: Display new architectures as they are explored
+
+### **🎯 Implementation Priority Order**
+1. **Backend API Endpoints** - Enable UI start/cancel functionality
+2. **Real-Time Data Pipeline** - WebSocket communication for live updates
+3. **Architecture Metadata Extraction** - Detailed model information for visualization
+4. **Frontend Integration** - Connect UI to real backend data
+5. **3D Visualization Engine** - React Three Fiber architecture rendering
+
+#### **📋 Current Status Summary**
+- ✅ **Complete UI Foundation**: Modern, responsive dashboard with all required components
+- ✅ **TypeScript Architecture**: Type-safe interfaces matching Python data structures  
+- ✅ **Enhanced Interactive Controls**: Dataset and target metric selection with educational tooltip
+- ✅ **Professional Design System**: Consistent grey backgrounds, sentence case typography, and polished interactions
+- ✅ **Comprehensive Architecture Display**: Two-column layout with layer details and health metrics
+- ✅ **Visualization Ready**: 3D placeholder areas prepared for React Three Fiber integration
+- ⚠️ **Missing Backend Integration**: UI is ready but requires Python API modifications
+- ⚠️ **Missing Real-Time Data**: Mock data needs replacement with live optimization results
+
+**Next Step**: Implement FastAPI endpoints in `optimizer.py` to handle UI-triggered optimizations with both dataset and target_metric parameters, and emit real-time architecture data to the frontend.
+
+### **🎯 Upcoming Phases**
+
+### **Phase 2: 3D Architecture Explorer**
+**Interactive 3D Neural Network Visualization**
+- **Architecture3D**: Main 3D scene with intuitive camera controls
+- **LayerNode**: Individual CNN/LSTM layer visualization with parameter details
+- **ConnectionFlow**: Animated data flow between layers showing information propagation
+- **ParameterPanel**: Interactive parameter adjustment with real-time 3D updates
+
+### **Phase 3: Performance Dashboard**
+**Comprehensive Optimization Analysis Interface**
+- **TrialGallery**: Grid view of all explored architectures with filtering
+- **PerformanceHeatmap**: Parameter importance visualization with interactive exploration
+- **ComparisonView**: Side-by-side architecture analysis with detailed metrics
+- **ProgressTracker**: Real-time optimization monitoring with 3D progress indicators
+
+### **Phase 4: Advanced Features**
+**Production-Ready Polish and Integration**
+- **Export Capabilities**: High-quality visualization export for presentations
+- **Mobile-Responsive Design**: Full functionality across all device types
+- **Performance Optimization**: 60fps 3D rendering with efficient memory management
+- **Docker Integration**: Seamless deployment alongside existing optimization system
 
 ### **Phase 4a: Advanced RunPod Service Features**
 
@@ -549,3 +662,419 @@ python optimizer.py dataset=cifar10 trials=5 use_runpod_service=false max_epochs
 - **Developer Productivity**: Seamless integration with real-time progress tracking and automatic fallback
 
 **Ready for Phase 4 advanced UI and visualization features with a comprehensive foundation for enterprise-scale hyperparameter optimization capabilities with rich visual architecture exploration.**
+
+---
+
+# 🔄 **REAL-TIME DATA PIPELINE & BACKEND INTEGRATION SPECIFICATION**
+
+## **📡 OVERVIEW: CONNECTING OPTIMIZATION TO VISUALIZATION**
+
+### **Critical Integration Challenge**
+The visualization UI must display real-time model architectures as they are being tested by `optimizer.py`, requiring seamless data flow from Python optimization processes to the Next.js frontend. This necessitates modifications to the existing Python codebase to emit structured data suitable for 3D visualization.
+
+### **Data Flow Architecture**
+```
+Python Optimization Pipeline → WebSocket/REST API → Next.js Frontend → 3D Visualization
+     ↓                              ↓                    ↓                ↓
+optimizer.py                   api_server.py         app/api/          components/3d/
+model_builder.py          →    FastAPI endpoints  →  Next.js routes →  Architecture3D
+handler.py                     WebSocket server      WebSocket client   LayerNode
+```
+
+---
+
+## **🔧 REQUIRED PYTHON BACKEND MODIFICATIONS**
+
+### **Phase 1.5: Real-Time Data Emission (IMMEDIATE PRIORITY)**
+**Target**: Extend existing Python codebase to emit structured visualization data
+
+#### **A. Optimizer.py Enhancements**
+
+**Current State**: `optimizer.py` orchestrates trials but doesn't emit real-time architecture data
+**Required Changes**:
+
+```python
+# New additions to OptimizationConfig
+@dataclass
+class OptimizationConfig:
+    # ... existing fields ...
+    enable_visualization: bool = True
+    visualization_websocket_url: str = "ws://localhost:3001/ws"
+    emit_trial_start: bool = True
+    emit_epoch_progress: bool = True
+    emit_trial_complete: bool = True
+
+# New VisualizationEmitter class
+class VisualizationEmitter:
+    def __init__(self, config: OptimizationConfig):
+        self.websocket_url = config.visualization_websocket_url
+        self.enabled = config.enable_visualization
+        
+    async def emit_trial_start(self, trial_number: int, hyperparameters: dict):
+        """Emit trial start with architecture details"""
+        
+    async def emit_epoch_progress(self, trial_number: int, epoch: int, metrics: dict):
+        """Emit real-time training progress"""
+        
+    async def emit_trial_complete(self, trial_number: int, results: dict):
+        """Emit final trial results with health metrics"""
+```
+
+**Integration Points**:
+- `_objective()` method: Emit trial start before model creation
+- `_train_via_runpod_service()`: Add visualization hooks for remote training
+- `_compile_results()`: Emit architecture summaries for gallery view
+
+#### **B. Model_Builder.py Architecture Data Extraction**
+
+**Current State**: `model_builder.py` creates models but doesn't extract architecture metadata
+**Required Changes**:
+
+```python
+# New method in ModelBuilder
+def extract_architecture_metadata(self, model: keras.Model, config: ModelConfig) -> dict:
+    """Extract detailed architecture data for 3D visualization"""
+    return {
+        'layers': [
+            {
+                'name': layer.name,
+                'type': layer.__class__.__name__,
+                'input_shape': layer.input_shape,
+                'output_shape': layer.output_shape,
+                'parameters': layer.count_params(),
+                'trainable_params': layer.trainable_variables,
+                'config': layer.get_config(),
+                'position_hint': self._calculate_layer_position(i, total_layers)
+            }
+            for i, layer in enumerate(model.layers)
+        ],
+        'total_params': model.count_params(),
+        'model_type': 'CNN' if self._is_cnn_architecture(config) else 'LSTM',
+        'architecture_hash': self._generate_architecture_hash(model),
+        'hyperparameters': asdict(config)
+    }
+
+def _calculate_layer_position(self, layer_index: int, total_layers: int) -> tuple:
+    """Calculate 3D position hints for layer visualization"""
+    # Positioning logic for 3D space arrangement
+```
+
+**Integration Points**:
+- `create_and_train_model()`: Extract metadata after model creation
+- `_train_locally_optimized()`: Emit progress during training epochs
+- Model compilation: Add visualization-specific model introspection
+
+#### **C. Handler.py (RunPod) Real-Time Updates**
+
+**Current State**: `handler.py` processes requests but doesn't emit progress
+**Required Changes**:
+
+```python
+# Enhanced handler with real-time emission
+async def start_training(model_config_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhanced training with real-time progress emission"""
+    
+    # Emit trial start
+    await emit_to_visualization({
+        'event': 'trial_start',
+        'trial_id': trial_id,
+        'architecture': extract_architecture_metadata(model, model_config),
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    # Training with epoch-level progress emission
+    for epoch in range(epochs):
+        # Emit epoch progress
+        await emit_to_visualization({
+            'event': 'epoch_progress',
+            'trial_id': trial_id,
+            'epoch': epoch,
+            'metrics': current_metrics,
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    # Emit final results
+    await emit_to_visualization({
+        'event': 'trial_complete',
+        'trial_id': trial_id,
+        'final_metrics': final_results,
+        'health_analysis': health_metrics,
+        'timestamp': datetime.now().isoformat()
+    })
+```
+
+#### **D. API_Server.py WebSocket Integration**
+
+**Current State**: `api_server.py` provides REST endpoints
+**Required Additions**:
+
+```python
+from fastapi import WebSocket, WebSocketDisconnect
+from typing import List
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    
+    async def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+    
+    async def broadcast(self, data: dict):
+        for connection in self.active_connections:
+            await connection.send_json(data)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive and handle incoming messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+# REST endpoints for historical data
+@app.get("/api/sessions")
+async def get_optimization_sessions():
+    """Return list of all optimization sessions"""
+
+@app.get("/api/sessions/{session_id}/trials")
+async def get_session_trials(session_id: str):
+    """Return detailed trial data for a session"""
+
+@app.get("/api/sessions/{session_id}/architectures")
+async def get_session_architectures(session_id: str):
+    """Return 3D-ready architecture data"""
+```
+
+---
+
+## **🌐 FRONTEND INTEGRATION PHASES**
+
+### **Phase 2A: Real-Time Data Reception (Week 1 of Phase 2)**
+**Objective**: Establish WebSocket connection and process real-time optimization data
+
+#### **Next.js API Routes**
+```typescript
+// app/api/websocket/route.ts
+export async function GET() {
+  // WebSocket proxy to Python backend
+}
+
+// app/api/sessions/route.ts
+export async function GET() {
+  // Fetch optimization sessions from Python API
+}
+
+// app/api/trials/[sessionId]/route.ts
+export async function GET(request: Request, { params }: { params: { sessionId: string } }) {
+  // Fetch trial data for visualization
+}
+```
+
+#### **Real-Time Data Processing**
+```typescript
+// lib/websocket-client.ts
+class OptimizationWebSocket {
+  private ws: WebSocket | null = null;
+  private listeners: Map<string, Function[]> = new Map();
+
+  connect(url: string) {
+    this.ws = new WebSocket(url);
+    this.ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      this.handleMessage(data);
+    };
+  }
+
+  private handleMessage(data: any) {
+    switch (data.event) {
+      case 'trial_start':
+        this.emit('trialStart', data);
+        break;
+      case 'epoch_progress':
+        this.emit('epochProgress', data);
+        break;
+      case 'trial_complete':
+        this.emit('trialComplete', data);
+        break;
+    }
+  }
+}
+```
+
+### **Phase 2B: Architecture Data Transformation (Week 1 of Phase 2)**
+**Objective**: Convert Python model metadata to 3D visualization format
+
+#### **Data Transformation Pipeline**
+```typescript
+// lib/architecture-transformer.ts
+export function transformArchitectureData(pythonArchData: any): Architecture3D {
+  return {
+    id: pythonArchData.architecture_hash,
+    trial_number: pythonArchData.trial_number,
+    layers: pythonArchData.layers.map(transformLayer),
+    performance: {
+      accuracy: pythonArchData.final_metrics.accuracy,
+      health: pythonArchData.health_analysis.overall_health,
+      duration: pythonArchData.training_duration
+    },
+    metadata: {
+      dataset: pythonArchData.dataset,
+      objective_value: pythonArchData.objective_value,
+      hyperparameters: pythonArchData.hyperparameters
+    }
+  };
+}
+
+function transformLayer(pythonLayer: any, index: number): LayerNode {
+  return {
+    id: `layer_${index}`,
+    type: mapLayerType(pythonLayer.type),
+    position: pythonLayer.position_hint || calculateDefaultPosition(index),
+    size: calculateLayerSize(pythonLayer.parameters),
+    parameters: pythonLayer.config,
+    connections: calculateConnections(pythonLayer, index),
+    health_score: pythonLayer.health_score,
+    importance_score: pythonLayer.importance_score
+  };
+}
+```
+
+---
+
+## **📊 IMPLEMENTATION TIMELINE WITH DATA INTEGRATION**
+
+### **Phase 1.5: Backend Data Pipeline (CRITICAL - WEEK 1)**
+**Duration**: 3-4 days **Status**: **IMMEDIATE PRIORITY**
+
+- **Day 1**: Modify `optimizer.py` to add VisualizationEmitter class
+- **Day 2**: Enhance `model_builder.py` with architecture metadata extraction
+- **Day 3**: Update `handler.py` with real-time progress emission
+- **Day 4**: Extend `api_server.py` with WebSocket endpoints
+
+### **Phase 2: 3D Visualization + Real-Time Integration (WEEKS 2-3)**
+
+#### **Week 1: Core 3D + Data Integration**
+- **Days 1-2**: WebSocket client implementation and data transformation
+- **Days 3-4**: Basic 3D architecture rendering with real data
+- **Days 5-7**: Real-time architecture updates as trials progress
+
+#### **Week 2: Interactive Features**
+- **Days 8-9**: Interactive parameter manipulation with backend sync
+- **Days 10-11**: Architecture comparison with historical data
+- **Days 12-14**: Performance integration and health visualization
+
+### **Phase 3: Advanced Analytics (WEEKS 4-5)**
+- Historical trial gallery with 3D previews
+- Parameter importance heatmaps from real optimization data
+- Real-time optimization monitoring dashboard
+
+---
+
+## **🔧 SPECIFIC CODE MODIFICATIONS REQUIRED**
+
+### **Optimizer.py Changes**
+```python
+# Add to imports
+import asyncio
+import websockets
+import json
+from datetime import datetime
+
+# Modify OptimizationConfig
+enable_visualization: bool = True
+visualization_port: int = 3001
+
+# Add to Optimizer.__init__()
+if self.config.enable_visualization:
+    self.viz_emitter = VisualizationEmitter(self.config)
+
+# Modify _objective() method
+async def _objective(self, trial: optuna.Trial) -> float:
+    trial_id = f"{self.session_id}_trial_{trial.number}"
+    
+    # Emit trial start
+    if self.config.enable_visualization:
+        await self.viz_emitter.emit_trial_start(trial.number, hyperparams)
+    
+    # ... existing model creation and training ...
+    
+    # Emit trial completion
+    if self.config.enable_visualization:
+        await self.viz_emitter.emit_trial_complete(trial.number, {
+            'accuracy': accuracy,
+            'health_metrics': health_metrics,
+            'architecture_metadata': architecture_data
+        })
+```
+
+### **Model_Builder.py Changes**
+```python
+# Add method to extract architecture data
+def get_visualization_data(self, model: keras.Model) -> dict:
+    """Extract complete architecture data for 3D visualization"""
+    layers_data = []
+    for i, layer in enumerate(model.layers):
+        layer_data = {
+            'index': i,
+            'name': layer.name,
+            'type': layer.__class__.__name__,
+            'input_shape': layer.input_shape,
+            'output_shape': layer.output_shape,
+            'parameters': layer.count_params(),
+            'config': layer.get_config(),
+            'trainable': layer.trainable
+        }
+        layers_data.append(layer_data)
+    
+    return {
+        'layers': layers_data,
+        'total_params': model.count_params(),
+        'model_summary': self._get_model_summary_dict(model)
+    }
+```
+
+### **Handler.py Changes**
+```python
+# Add WebSocket emission capability
+async def emit_progress_update(trial_id: str, event_type: str, data: dict):
+    """Emit progress update to visualization clients"""
+    message = {
+        'trial_id': trial_id,
+        'event': event_type,
+        'data': data,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    # Send to visualization server
+    try:
+        async with websockets.connect("ws://host.docker.internal:3001/ws") as websocket:
+            await websocket.send(json.dumps(message))
+    except Exception as e:
+        logger.warning(f"Failed to emit visualization update: {e}")
+```
+
+---
+
+## **🎯 VALIDATION AND TESTING STRATEGY**
+
+### **Data Pipeline Validation**
+1. **Unit Tests**: Test architecture metadata extraction accuracy
+2. **Integration Tests**: Verify WebSocket message flow end-to-end
+3. **Performance Tests**: Ensure real-time updates don't impact optimization speed
+4. **Visual Validation**: Confirm 3D architectures match actual model structures
+
+### **Real-Time Performance Requirements**
+- **Latency**: <500ms from trial start to visualization update
+- **Throughput**: Support up to 6 concurrent RunPod workers
+- **Reliability**: 99% message delivery success rate
+- **Fallback**: Graceful degradation when WebSocket unavailable
+
+This comprehensive integration plan ensures that your existing Python optimization pipeline seamlessly feeds real-time data to the 3D visualization frontend, creating a unified system where users can watch neural architectures being explored in real-time as optimization progresses.
