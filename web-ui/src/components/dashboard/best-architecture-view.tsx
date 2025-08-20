@@ -65,7 +65,7 @@ export function BestArchitectureView() {
     const link = document.createElement('a')
     link.href = `/api/download/model/${sessionId}`
     link.download = `best_model_${sessionId}.keras`
-    // link.click() // Uncomment when API is ready
+    // TODO: Trigger download when API is ready, e.g., link.click()
     alert("Model download would start here (API not yet implemented)")
   }
 
