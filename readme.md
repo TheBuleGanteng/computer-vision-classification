@@ -136,6 +136,7 @@ computer-vision-classification/
 ├── Dockerfile.production
 ├── LICENSE
 ├── readme.md                         # ✅ UPDATED: Complete documentation with backend integration
+├── startup.py                        # ✅ COMPLETE: Development server coordination script
 ├── status.md                         # ✅ COMPLETE: All phases documented
 ├── requirements.txt
 ├── web-ui/                           # ✅ NEW: Modern Next.js visualization interface
@@ -496,6 +497,79 @@ python optimizer.py dataset=cifar10 trials=5 use_runpod_service=false max_epochs
 - ✅ **Container deployment success**: RunPod service operational and stable
 - ✅ **Zero data corruption**: Results properly saved and accessible
 - ✅ **Reproducible results**: Deterministic seeding implemented and validated
+
+## 🛠️ **DEVELOPMENT ENVIRONMENT MANAGEMENT**
+
+### **Development Server Coordination Script** ✅ **COMPLETE**
+
+**Location**: `startup.py` (project root)  
+**Status**: Fully tested and operational  
+**Purpose**: Unified management of frontend and backend development servers
+
+#### **Features**
+- **Dual Server Management**: Starts both Next.js frontend (port 3000) and FastAPI backend (port 8000) simultaneously
+- **Process Cleanup**: Automatically kills existing servers before starting new ones to prevent port conflicts
+- **Graceful Shutdown**: Ctrl+C handler cleanly stops both servers and processes
+- **Real-time Output**: Color-coded output streams from both servers with service identification
+- **Dependency Validation**: Checks for required directories, files, and dependencies before startup
+- **Port Conflict Resolution**: Detects and terminates existing processes on target ports
+- **Process Monitoring**: Monitors both servers during execution and handles unexpected crashes
+
+#### **Usage**
+```bash
+# Start both development servers
+python startup.py
+
+# Both servers will start automatically:
+# - Frontend: http://localhost:3000 (Next.js dashboard)
+# - Backend: http://localhost:8000 (FastAPI optimization engine)
+
+# Press Ctrl+C to stop both servers gracefully
+```
+
+#### **Dependencies**
+- **psutil**: Process management and port detection (`pip install psutil`)
+- **Node.js & npm**: Frontend development server
+- **Python 3.7+**: Backend server execution
+
+#### **Output Features**
+- **Color-coded logs**: Frontend (magenta), Backend (blue), System (green/yellow/red)
+- **Timestamp prefix**: All output includes timestamp for debugging
+- **Service identification**: Each log line clearly identifies source server
+- **Status updates**: Real-time server startup, shutdown, and error notifications
+- **Process monitoring**: Automatic detection of server crashes with cleanup
+
+#### **Validation Results**
+✅ **Comprehensive testing completed with excellent results:**
+
+1. **Basic Functionality** ✅ **PASSED**
+   - Both servers start correctly with proper process management
+   - Port detection and cleanup works flawlessly
+   - Ctrl+C graceful shutdown operates perfectly
+
+2. **Server Integration** ✅ **VERIFIED**
+   - Frontend accessible at http://localhost:3000 with full UI
+   - Backend API accessible at http://localhost:8000 with health endpoint
+   - UI-backend communication confirmed working
+
+3. **Process Management** ✅ **EXCELLENT**
+   - Automatic termination of existing processes on target ports
+   - Real-time color-coded output from both servers
+   - Clean shutdown sequence with proper status messages
+
+4. **User Experience** ✅ **PROFESSIONAL**
+   - Clear startup instructions and server URLs provided
+   - Timestamped logs with service identification
+   - Professional error handling and status reporting
+
+#### **Implementation Details**
+- **Thread-safe output**: Separate threads handle output from each server
+- **Signal handling**: Proper SIGINT/SIGTERM handling for clean shutdown
+- **Process isolation**: Each server runs in its proper directory context
+- **Error propagation**: Server failures are properly detected and reported
+- **Cross-platform**: Compatible with Windows, macOS, and Linux
+
+---
 
 ## 🚀 **CURRENT DEVELOPMENT: 3D ARCHITECTURE VISUALIZATION UI**
 
