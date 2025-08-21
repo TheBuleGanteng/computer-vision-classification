@@ -31,7 +31,7 @@ import uvicorn
 import zipfile
 
 # UPDATED IMPORTS - Fixed compatibility
-from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective
+from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, UnifiedProgress
 from dataset_manager import DatasetManager
 from utils.logger import logger, setup_logging
 
@@ -59,37 +59,87 @@ class JobStatus(str, Enum):
 
 class OptimizationRequest(BaseModel):
     """
-    Request model for starting a new hyperparameter optimization job
+    Comprehensive request model for hyperparameter optimization with full configuration control
     
-    UPDATED: Aligned with new optimizer.py parameters
+    ENHANCED: Now supports all optimization and training parameters for complete frontend control
     
-    Attributes:
-        dataset_name: Name of dataset to optimize (e.g., 'cifar10', 'imdb')
+    Core Parameters:
+        dataset_name: Dataset to optimize (e.g., 'cifar10', 'mnist', 'imdb')
         mode: Optimization mode ('simple' or 'health')
         optimize_for: Optimization objective ('val_accuracy', 'accuracy', etc.)
-        trials: Number of optimization trials to run
-        health_weight: Health weighting (0.0-1.0, only used in health mode)
-        config_overrides: Additional configuration parameters
         
-    Example:
-        {
-            "dataset_name": "cifar10",
-            "mode": "health",
-            "optimize_for": "val_accuracy",
-            "trials": 50,
-            "health_weight": 0.3,
-            "config_overrides": {
-                "max_epochs_per_trial": 25,
-                "n_startup_trials": 15
-            }
-        }
+    Optimization Control:
+        trials: Number of optimization trials
+        max_epochs_per_trial: Maximum epochs per trial
+        min_epochs_per_trial: Minimum epochs per trial
+        health_weight: Health weighting for health mode
+        
+    Training Parameters:
+        validation_split: Train/validation split ratio
+        test_size: Test set size ratio
+        batch_size: Training batch size
+        learning_rate: Initial learning rate
+        optimizer_name: Optimizer type ('adam', 'sgd', etc.)
+        
+    Advanced Settings:
+        activation_functions: List of activation functions to try
+        n_startup_trials: Number of startup trials for optimization
+        early_stopping_patience: Early stopping patience
+        random_seed: Random seed for reproducibility
     """
-    dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'imdb')")
+    
+    # Core parameters
+    dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'mnist', 'imdb')")
     mode: str = Field(default="simple", description="Optimization mode ('simple' or 'health')")
     optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
-    trials: int = Field(default=20, ge=1, le=200, description="Number of optimization trials")
+    
+    # Optimization control
+    trials: int = Field(default=20, ge=1, le=500, description="Number of optimization trials")
+    max_epochs_per_trial: int = Field(default=20, ge=1, le=100, description="Maximum epochs per trial")
+    min_epochs_per_trial: int = Field(default=5, ge=1, le=50, description="Minimum epochs per trial")
     health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
-    config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration")
+    
+    # Training parameters
+    validation_split: float = Field(default=0.2, ge=0.1, le=0.5, description="Validation split ratio")
+    test_size: float = Field(default=0.2, ge=0.1, le=0.5, description="Test set size ratio")
+    batch_size: int = Field(default=32, ge=8, le=512, description="Training batch size")
+    learning_rate: float = Field(default=0.001, ge=0.0001, le=0.1, description="Initial learning rate")
+    optimizer_name: str = Field(default="adam", description="Optimizer type ('adam', 'sgd', 'rmsprop')")
+    
+    # Architecture constraints
+    max_parameters: int = Field(default=10_000_000, ge=1000, le=100_000_000, description="Maximum model parameters")
+    min_accuracy_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Minimum accuracy threshold")
+    
+    # Advanced optimization settings
+    activation_functions: List[str] = Field(
+        default=["relu", "tanh", "sigmoid"], 
+        description="List of activation functions to explore"
+    )
+    n_startup_trials: int = Field(default=10, ge=5, le=50, description="Number of startup trials")
+    n_warmup_steps: int = Field(default=5, ge=1, le=20, description="Number of warmup steps")
+    early_stopping_patience: int = Field(default=5, ge=2, le=20, description="Early stopping patience")
+    enable_early_stopping: bool = Field(default=True, description="Enable early stopping")
+    
+    # Resource and timing constraints
+    max_training_time_minutes: float = Field(default=60.0, ge=5.0, le=300.0, description="Max training time per trial")
+    gpu_proxy_sample_percentage: float = Field(default=0.5, ge=0.1, le=1.0, description="GPU sample percentage")
+    
+    # Reproducibility
+    random_seed: int = Field(default=42, ge=1, le=999999, description="Random seed for reproducibility")
+    
+    # Validation and health analysis
+    health_analysis_sample_size: int = Field(default=50, ge=10, le=200, description="Health analysis sample size")
+    enable_stability_checks: bool = Field(default=True, description="Enable training stability checks")
+    stability_window: int = Field(default=3, ge=2, le=10, description="Stability detection window")
+    
+    # RunPod service settings
+    use_runpod_service: bool = Field(default=False, description="Use RunPod cloud service")
+    concurrent_workers: int = Field(default=1, ge=1, le=6, description="Number of concurrent workers")
+    use_multi_gpu: bool = Field(default=False, description="Enable multi-GPU per worker")
+    target_gpus_per_worker: int = Field(default=1, ge=1, le=4, description="GPUs per worker")
+    
+    # Legacy compatibility
+    config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration overrides")
 
 
 class JobResponse(BaseModel):
@@ -282,24 +332,144 @@ class OptimizationJob:
         # Real-time aggregated progress tracking
         self.optimizer: Optional[Any] = None  # Will be ModelOptimizer instance
         self.latest_aggregated_progress: Optional[Dict[str, Any]] = None
+        self._current_epoch_info: Dict[str, Any] = {}
         
         logger.debug(f"running OptimizationJob.__init__ ... Created job {self.job_id} for dataset {request.dataset_name}")
         logger.debug(f"running OptimizationJob.__init__ ... Mode: {request.mode}, Objective: {request.optimize_for}")
         logger.debug(f"running OptimizationJob.__init__ ... Real-time trial tracking enabled")
     
-    def _progress_callback(self, aggregated_progress: Any) -> None:
+    def _progress_callback(self, progress_data: Any) -> None:
         """
-        Callback function to receive real-time aggregated progress updates
+        Callback function to receive real-time progress updates
         
         This method is called by the optimizer whenever progress is updated.
-        The optimizer sends AggregatedProgress objects with consolidated trial status.
+        The optimizer can send either TrialProgress or AggregatedProgress objects.
         
         Args:
-            aggregated_progress: AggregatedProgress object with current optimization state
+            progress_data: Either TrialProgress or AggregatedProgress object with current optimization state
         """
         try:
-            logger.debug(f"running OptimizationJob._progress_callback ... Received aggregated progress update")
+            # Check progress data type - prioritize UnifiedProgress
+            if isinstance(progress_data, UnifiedProgress):
+                # This is the new UnifiedProgress object (Phase 1: unified progress system)
+                logger.debug(f"running OptimizationJob._progress_callback ... Received unified progress update")
+                self._handle_unified_progress(progress_data)
+            elif hasattr(progress_data, 'trial_number'):
+                # Legacy: TrialProgress object (individual trial update) 
+                logger.debug(f"running OptimizationJob._progress_callback ... Received individual trial progress update for trial {progress_data.trial_number}")
+                self._handle_trial_progress(progress_data)
+            else:
+                # Legacy: AggregatedProgress object (consolidated update)
+                logger.debug(f"running OptimizationJob._progress_callback ... Received aggregated progress update")
+                self._handle_aggregated_progress(progress_data)
+                
+        except Exception as e:
+            logger.error(f"running OptimizationJob._progress_callback ... Error processing progress update: {e}")
+            # Don't re-raise to avoid disrupting optimization
+
+    def _handle_unified_progress(self, unified_progress: UnifiedProgress) -> None:
+        """
+        Handle unified progress updates containing both trial statistics and epoch information
+        This replaces the dual callback system and eliminates race conditions
+        """
+        try:
+            # Extract data from UnifiedProgress object
+            completed_count = len(unified_progress.completed_trials)
+            running_count = len(unified_progress.running_trials)
+            failed_count = len(unified_progress.failed_trials)
+            total_trials = unified_progress.total_trials
             
+            # Calculate current trial count for UI display
+            current_trial = completed_count
+            if running_count > 0:
+                current_trial = completed_count + running_count
+            
+            # Calculate elapsed time
+            elapsed_time = 0
+            if self.started_at:
+                start_time = datetime.fromisoformat(self.started_at.replace('Z', '+00:00').replace('T', ' '))
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+            
+            # Store latest progress data
+            self.latest_aggregated_progress = {
+                "completed_trials": unified_progress.completed_trials,
+                "running_trials": unified_progress.running_trials,
+                "failed_trials": unified_progress.failed_trials,
+                "total_trials": total_trials,
+                "current_best_value": unified_progress.current_best_value
+            }
+            
+            # Create progress update with all information
+            progress_update = {
+                "current_trial": current_trial,
+                "total_trials": total_trials,
+                "completed_trials": completed_count,
+                "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
+                "best_value": unified_progress.current_best_value,
+                "elapsed_time": elapsed_time,
+                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
+            }
+            
+            # Include epoch information directly from unified progress (no more race conditions!)
+            if unified_progress.current_epoch is not None:
+                progress_update["current_epoch"] = unified_progress.current_epoch
+            if unified_progress.total_epochs is not None:
+                progress_update["total_epochs"] = unified_progress.total_epochs
+            if unified_progress.epoch_progress is not None:
+                progress_update["epoch_progress"] = unified_progress.epoch_progress
+            
+            self.progress = progress_update
+            
+            # 🔍 UNIFIED PROGRESS DEBUG: Log all data being sent to UI
+            logger.info(f"🚀 UNIFIED PROGRESS UPDATE:")
+            logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_value', 'None')}")
+            logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
+            logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
+            logger.info(f"  ⏱️ Epoch Info:")
+            logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')}")
+            logger.info(f"    - Total Epochs: {progress_update.get('total_epochs', 'None')}")
+            logger.info(f"    - Epoch Progress: {progress_update.get('epoch_progress', 'None')}")
+            logger.info(f"  📊 Complete Progress Object: {progress_update}")
+            
+            # Log best score information
+            best_value = unified_progress.current_best_value
+            if best_value is not None:
+                logger.info(f"📊 BEST SCORE: {best_value:.4f} (after {completed_count} completed trials)")
+            
+            logger.info(f"🔄 UNIFIED PROGRESS: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_value}")
+            
+        except Exception as e:
+            logger.error(f"running OptimizationJob._handle_unified_progress ... Error processing unified progress: {e}")
+            logger.error(f"running OptimizationJob._handle_unified_progress ... Traceback: {traceback.format_exc()}")
+    
+    def _handle_trial_progress(self, trial_progress: Any) -> None:
+        """Handle individual trial progress updates with epoch information"""
+        try:
+            # 🔍 COMPREHENSIVE DEBUG: Log all trial progress data received
+            logger.info(f"🔍 TRIAL PROGRESS UPDATE DEBUG:")
+            logger.info(f"  📊 Trial Number: {getattr(trial_progress, 'trial_number', 'None')}")
+            logger.info(f"  📊 Trial Status: {getattr(trial_progress, 'status', 'None')}")
+            logger.info(f"  📊 Raw Epoch Data:")
+            logger.info(f"    - current_epoch: {getattr(trial_progress, 'current_epoch', 'None')}")
+            logger.info(f"    - total_epochs: {getattr(trial_progress, 'total_epochs', 'None')}")
+            logger.info(f"    - epoch_progress: {getattr(trial_progress, 'epoch_progress', 'None')}")
+            logger.info(f"  📊 All Trial Progress Attributes: {[attr for attr in dir(trial_progress) if not attr.startswith('_')]}")
+            
+            # Store epoch information from individual trial
+            self._current_epoch_info = {
+                'current_epoch': getattr(trial_progress, 'current_epoch', None),
+                'total_epochs': getattr(trial_progress, 'total_epochs', None),
+                'epoch_progress': getattr(trial_progress, 'epoch_progress', None)
+            }
+            logger.info(f"🔍 STORED EPOCH INFO: {self._current_epoch_info}")
+            
+        except Exception as e:
+            logger.error(f"running OptimizationJob._handle_trial_progress ... Error handling trial progress: {e}")
+    
+    def _handle_aggregated_progress(self, aggregated_progress: Any) -> None:
+        """Handle aggregated progress updates and update UI"""
+        try:
             # Extract data from AggregatedProgress object
             completed_count = len(aggregated_progress.completed_trials) if hasattr(aggregated_progress, 'completed_trials') else 0
             running_count = len(aggregated_progress.running_trials) if hasattr(aggregated_progress, 'running_trials') else 0
@@ -328,8 +498,13 @@ class OptimizationJob:
                 "current_best_value": getattr(aggregated_progress, 'current_best_value', None)
             }
             
+            # Extract epoch information from stored trial progress if available
+            current_epoch = self._current_epoch_info.get('current_epoch')
+            total_epochs = self._current_epoch_info.get('total_epochs')  
+            epoch_progress = self._current_epoch_info.get('epoch_progress')
+            
             # Update progress directly from aggregated data
-            self.progress = {
+            progress_update = {
                 "current_trial": current_trial,
                 "total_trials": total_trials,
                 "completed_trials": completed_count,
@@ -339,12 +514,39 @@ class OptimizationJob:
                 "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
             }
             
-            logger.debug(f"running OptimizationJob._progress_callback ... Updated progress: {current_trial}/{total_trials} trials")
-            logger.debug(f"running OptimizationJob._progress_callback ... Best value: {getattr(aggregated_progress, 'current_best_value', None)}")
+            # Add epoch information if available
+            if current_epoch is not None:
+                progress_update["current_epoch"] = current_epoch
+            if total_epochs is not None:
+                progress_update["total_epochs"] = total_epochs
+            if epoch_progress is not None:
+                progress_update["epoch_progress"] = epoch_progress
+                
+            self.progress = progress_update
+            
+            # 🔍 COMPREHENSIVE DEBUG: Log all progress data being sent to UI
+            logger.info(f"🔍 FULL PROGRESS UPDATE DEBUG:")
+            logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_value', 'None')}")
+            logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
+            logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
+            logger.info(f"  📊 Epoch Info:")
+            logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')}")
+            logger.info(f"    - Total Epochs: {progress_update.get('total_epochs', 'None')}")
+            logger.info(f"    - Epoch Progress: {progress_update.get('epoch_progress', 'None')}")
+            logger.info(f"  📊 Stored Epoch Info: {self._current_epoch_info}")
+            logger.info(f"  📊 Complete Progress Object: {progress_update}")
+            
+            # ENHANCED: Log best score information for UI verification
+            best_value = getattr(aggregated_progress, 'current_best_value', None)
+            if best_value is not None:
+                logger.info(f"📊 BEST SCORE UPDATE: Current best value = {best_value:.4f} (after {completed_count} completed trials)")
+            
+            # Log detailed progress summary for verification
+            logger.info(f"🔄 PROGRESS UPDATE: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_value}")
             
         except Exception as e:
-            logger.error(f"running OptimizationJob._progress_callback ... Error processing progress update: {e}")
-            # Don't re-raise to avoid disrupting optimization
+            logger.error(f"running OptimizationJob._handle_aggregated_progress ... Error handling aggregated progress: {e}")
     
     def _update_job_progress(self) -> None:
         """
@@ -529,20 +731,65 @@ class OptimizationJob:
         # FIXED: Use enhanced optimize_model function to avoid duplicating run_name generation logic
         # This ensures consistency and eliminates code duplication
         
-        # Apply config overrides
+        # Build comprehensive config from request parameters
         config_overrides = self.request.config_overrides.copy()
-        config_overrides['health_weight'] = self.request.health_weight
         
-        # FIXED: Configure RunPod GPU acceleration for UI-triggered optimizations
+        # Map all request parameters to config overrides
         config_overrides.update({
-            'use_multi_gpu': True,              # Enable multiple GPUs per RunPod worker
-            'target_gpus_per_worker': 2,        # Number of GPUs per worker
-            'max_gpus_per_worker': 4,          # Maximum GPUs per worker
-            'auto_detect_gpus': True,          # Auto-detect available GPUs
-            'multi_gpu_batch_size_scaling': True  # Scale batch size for multi-GPU
+            # Core optimization parameters
+            'health_weight': self.request.health_weight,
+            'n_trials': self.request.trials,
+            'max_epochs_per_trial': self.request.max_epochs_per_trial,
+            'min_epochs_per_trial': self.request.min_epochs_per_trial,
+            
+            # Training parameters
+            'validation_split': self.request.validation_split,
+            'test_size': self.request.test_size,
+            'max_training_time_minutes': self.request.max_training_time_minutes,
+            'gpu_proxy_sample_percentage': self.request.gpu_proxy_sample_percentage,
+            
+            # Architecture constraints
+            'max_parameters': self.request.max_parameters,
+            'min_accuracy_threshold': self.request.min_accuracy_threshold,
+            
+            # Advanced optimization settings
+            'n_startup_trials': self.request.n_startup_trials,
+            'n_warmup_steps': self.request.n_warmup_steps,
+            'early_stopping_patience': self.request.early_stopping_patience,
+            'enable_early_stopping': self.request.enable_early_stopping,
+            
+            # Reproducibility
+            'random_seed': self.request.random_seed,
+            
+            # Health analysis settings
+            'health_analysis_sample_size': self.request.health_analysis_sample_size,
+            'enable_stability_checks': self.request.enable_stability_checks,
+            'stability_window': self.request.stability_window,
+            
+            # RunPod service settings
+            'use_runpod_service': self.request.use_runpod_service,
+            'concurrent_workers': self.request.concurrent_workers,
+            'use_multi_gpu': self.request.use_multi_gpu,
+            'target_gpus_per_worker': self.request.target_gpus_per_worker,
         })
         
+        # Handle activation functions list - convert to format expected by optimizer
+        # Note: For now we just take the first activation function as the override
+        # TODO: Enhance optimizer to support multiple activation functions
+        if self.request.activation_functions and len(self.request.activation_functions) > 0:
+            config_overrides['activation'] = self.request.activation_functions[0]
+        
+        # FIXED: Remove parameters that are passed directly to avoid "multiple values" error
+        # These parameters are passed as direct arguments, not in config_overrides
+        direct_params = [
+            'use_runpod_service', 'concurrent_workers', 'use_multi_gpu', 
+            'target_gpus_per_worker', 'n_trials', 'trials'
+        ]
+        for param in direct_params:
+            config_overrides.pop(param, None)
+        
         logger.debug(f"running OptimizationJob._execute_optimization ... Using optimize_model function")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Direct params: use_runpod_service={self.request.use_runpod_service}, concurrent_workers={self.request.concurrent_workers}")
         logger.debug(f"running OptimizationJob._execute_optimization ... Config overrides: {config_overrides}")
         
         # Use the enhanced optimize_model function with progress callback support
@@ -555,9 +802,9 @@ class OptimizationJob:
             trials=self.request.trials,
             run_name=None,  # Let optimize_model generate the run_name using its established logic
             progress_callback=self._progress_callback,  # Real-time progress updates
-            use_runpod_service=False,           # FIXED: Enable RunPod GPU proxy for UI optimizations
-            concurrent=True,                   # FIXED: Enable concurrent workers
-            concurrent_workers=2,              # FIXED: Use multiple concurrent workers
+            use_runpod_service=self.request.use_runpod_service,     # Use UI-specified setting
+            concurrent=(self.request.concurrent_workers > 1),       # Enable if multiple workers
+            concurrent_workers=self.request.concurrent_workers,     # Use UI-specified workers
             **config_overrides
         )
         
@@ -1065,36 +1312,21 @@ class OptimizationAPI:
                 detail=f"Cannot use health-only objective '{request.optimize_for}' in simple mode. Available for simple mode: {universal_objectives}"
             )
         
-        # Ensure epoch configuration is sane BEFORE creating the job
-        config_overrides = request.config_overrides.copy()
-        
-        # Ensure the values for max and min epochs are valid to avoid configuration issues
-        max_epochs = config_overrides.get('max_epochs_per_trial', 20)  # Default 20
-        min_epochs = 5  # Always use 3 as minimum for API requests
+        # Validate epoch configuration is sane BEFORE creating the job
+        max_epochs = request.max_epochs_per_trial
+        min_epochs = request.min_epochs_per_trial
         
         # Ensure max_epochs is at least min_epochs
         if max_epochs < min_epochs:
             logger.warning(f"running _start_optimization ... max_epochs_per_trial ({max_epochs}) too low, setting to {min_epochs}")
-            max_epochs = min_epochs
+            # Update the request in place
+            request.max_epochs_per_trial = min_epochs
         
-        # Update config overrides with corrected values
-        config_overrides['max_epochs_per_trial'] = max_epochs
-        config_overrides['min_epochs_per_trial'] = min_epochs
+        logger.debug(f"running _start_optimization ... Using epoch configuration: min={request.min_epochs_per_trial}, max={request.max_epochs_per_trial}")
+        logger.debug(f"running _start_optimization ... Full request parameters: trials={request.trials}, batch_size={request.batch_size}, learning_rate={request.learning_rate}")
         
-        logger.debug(f"running _start_optimization ... Using epoch configuration: min={min_epochs}, max={max_epochs}")
-        
-        # Create optimization request with fixed config
-        fixed_request = OptimizationRequest(
-            dataset_name=request.dataset_name,
-            mode=request.mode,
-            optimize_for=request.optimize_for,
-            trials=request.trials,
-            health_weight=request.health_weight,
-            config_overrides=config_overrides  # Use the fixed config
-        )
-        
-        # Create new job with the fixed request
-        job = OptimizationJob(fixed_request)
+        # Create new job with the comprehensive request (no need to recreate)
+        job = OptimizationJob(request)
         self.jobs[job.job_id] = job
         
         # Start optimization in background

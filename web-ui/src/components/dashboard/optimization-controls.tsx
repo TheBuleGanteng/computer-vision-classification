@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectItem } from "@/components/ui/select"
 import { Card, CardContent } from "@/components/ui/card"
@@ -40,6 +40,29 @@ export function OptimizationControls() {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<any>(null)
+  const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
+  const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
+
+  // Real-time elapsed time counter
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null
+    
+    if (isOptimizationRunning && optimizationStartTime) {
+      interval = setInterval(() => {
+        const now = Date.now()
+        const elapsedSeconds = Math.floor((now - optimizationStartTime) / 1000)
+        setClientElapsedTime(elapsedSeconds)
+      }, 1000) // Update every second
+    } else {
+      setClientElapsedTime(0)
+    }
+
+    return () => {
+      if (interval) {
+        clearInterval(interval)
+      }
+    }
+  }, [isOptimizationRunning, optimizationStartTime])
 
   const handleOptimizationToggle = async () => {
     if (isOptimizationRunning && currentJobId) {
@@ -49,6 +72,8 @@ export function OptimizationControls() {
         setIsOptimizationRunning(false)
         setCurrentJobId(null)
         setProgress(null)
+        setOptimizationStartTime(null) // Clear timer state
+        setClientElapsedTime(0)
         console.log("Optimization cancelled successfully")
       } catch (err) {
         console.error("Failed to cancel optimization:", err)
@@ -60,11 +85,52 @@ export function OptimizationControls() {
         setError(null)
         
         const request = {
+          // Core parameters
           dataset_name: selectedDataset,
           mode: selectedTargetMetric as 'simple' | 'health',
           optimize_for: "val_accuracy", // Default objective
-          trials: 20, // UPDATED: Reduced default trial count for faster testing
-          health_weight: 0.3 // Default health weight
+          
+          // Optimization control (optimized for faster testing)
+          trials: 5, // TESTING: Very low for quick testing
+          max_epochs_per_trial: 3, // TESTING: Very low for quick testing
+          min_epochs_per_trial: 2, // TESTING: Very low for quick testing
+          health_weight: 0.3,
+          
+          // Training parameters (optimized for speed)
+          validation_split: 0.2,
+          test_size: 0.2,
+          batch_size: 64, // Larger batch size for faster training
+          learning_rate: 0.01, // Higher learning rate for faster convergence
+          optimizer_name: "adam",
+          
+          // Architecture constraints (relaxed for testing)
+          max_parameters: 500000, // Lower limit for faster models
+          min_accuracy_threshold: 0.3, // Lower threshold for testing
+          
+          // Advanced optimization settings (optimized for testing)
+          activation_functions: ["relu", "tanh"], // Limited options for faster testing
+          n_startup_trials: 5, // FIXED: Minimum allowed value is 5
+          n_warmup_steps: 1, // Very low for testing
+          early_stopping_patience: 2, // Low for faster testing
+          enable_early_stopping: true,
+          
+          // Resource and timing constraints (for testing)
+          max_training_time_minutes: 5.0, // Very short for testing
+          gpu_proxy_sample_percentage: 0.3, // Lower sample size for speed
+          
+          // Reproducibility
+          random_seed: 42,
+          
+          // Health analysis settings (optimized for speed)
+          health_analysis_sample_size: 20, // Lower for speed
+          enable_stability_checks: true,
+          stability_window: 2, // Lower for speed
+          
+          // RunPod service settings (disabled for testing)
+          use_runpod_service: false, // Local testing
+          concurrent_workers: 1, // Single worker for testing
+          use_multi_gpu: false, // Disabled for testing
+          target_gpus_per_worker: 1
         }
 
         console.log(`Starting optimization:`, request)
@@ -74,6 +140,7 @@ export function OptimizationControls() {
         setIsOptimizationRunning(true)
         setIsOptimizationCompleted(false)
         setCurrentJobId(response.job_id)
+        setOptimizationStartTime(Date.now()) // Record start time for real-time counter
         
         console.log(`Optimization started with job ID: ${response.job_id}`)
         
@@ -82,7 +149,9 @@ export function OptimizationControls() {
         
       } catch (err) {
         console.error("Failed to start optimization:", err)
-        setError(err instanceof Error ? err.message : "Failed to start optimization")
+        const errorMessage = err instanceof Error ? err.message : 
+          (typeof err === 'string' ? err : `Unknown error: ${JSON.stringify(err)}`)
+        setError(errorMessage)
       }
     }
   }
@@ -102,11 +171,13 @@ export function OptimizationControls() {
           setIsOptimizationRunning(false)
           setIsOptimizationCompleted(true)
           setCurrentJobId(null)
+          setOptimizationStartTime(null) // Clear timer state
           clearInterval(pollInterval)
           console.log("Optimization completed successfully")
         } else if (status.status === 'failed' || status.status === 'cancelled') {
           setIsOptimizationRunning(false)
           setCurrentJobId(null)
+          setOptimizationStartTime(null) // Clear timer state
           clearInterval(pollInterval)
           if (status.error) {
             setError(status.error)
@@ -123,6 +194,7 @@ export function OptimizationControls() {
           setIsOptimizationCompleted(false)
           setCurrentJobId(null)
           setProgress(null)
+          setOptimizationStartTime(null) // Clear timer state
           setError("Optimization was interrupted (server restarted). Please start a new optimization.")
           clearInterval(pollInterval)
         }
@@ -134,6 +206,14 @@ export function OptimizationControls() {
     return () => clearInterval(pollInterval)
   }
 
+  // Helper function to format elapsed time and choose appropriate time source
+  const formatElapsedTime = () => {
+    // Use real-time client elapsed time when optimization is running, otherwise use server time
+    const timeToUse = isOptimizationRunning ? clientElapsedTime : (progress?.elapsed_time || 0)
+    const minutes = Math.floor(timeToUse / 60)
+    const seconds = Math.round(timeToUse % 60)
+    return `${minutes}m ${seconds}s`
+  }
 
   return (
     <Card>
@@ -257,7 +337,28 @@ export function OptimizationControls() {
               <div className="text-xs text-gray-600 space-y-1">
                 <div>
                   <span>Progress: </span>
-                  <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20} trials</span>
+                </div>
+                <div className="pl-2 space-y-1">
+                  <div>
+                    <span>Trials: </span>
+                    <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20}</span>
+                  </div>
+                  {progress.current_epoch !== undefined && progress.total_epochs !== undefined && (
+                    <div>
+                      <span>Epoch: </span>
+                      <span className="font-medium">{progress.current_epoch}/{progress.total_epochs}</span>
+                      {progress.epoch_progress !== undefined && (
+                        <div className="ml-2 mt-1">
+                          <div className="w-32 bg-gray-200 rounded-full h-1.5">
+                            <div 
+                              className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
+                              style={{width: `${Math.max(0, Math.min(100, (progress.epoch_progress || 0) * 100))}%`}}
+                            ></div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {progress.best_value !== null && (
                   <div>
@@ -265,10 +366,10 @@ export function OptimizationControls() {
                     <span className="font-medium">{(progress.best_value * 100).toFixed(1)}%</span>
                   </div>
                 )}
-                {progress.elapsed_time && (
+                {(isOptimizationRunning || progress?.elapsed_time) && (
                   <div>
                     <span>Elapsed time: </span>
-                    <span className="font-medium">{Math.round(progress.elapsed_time / 60)}m {Math.round(progress.elapsed_time % 60)}s</span>
+                    <span className="font-medium">{formatElapsedTime()}</span>
                   </div>
                 )}
                 {progress.status_message && (

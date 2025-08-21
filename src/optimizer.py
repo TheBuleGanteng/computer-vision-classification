@@ -77,6 +77,11 @@ class TrialProgress:
     completed_at: Optional[str] = None
     duration_seconds: Optional[float] = None
     
+    # Epoch-level progress tracking
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    epoch_progress: Optional[float] = None  # 0.0 to 1.0 within current epoch
+    
     # Architecture Information
     architecture: Optional[Dict[str, Any]] = None
     hyperparameters: Optional[Dict[str, Any]] = None
@@ -102,6 +107,9 @@ class TrialProgress:
             'started_at': self.started_at,
             'completed_at': self.completed_at,
             'duration_seconds': self.duration_seconds,
+            'current_epoch': self.current_epoch,
+            'total_epochs': self.total_epochs,
+            'epoch_progress': self.epoch_progress,
             'architecture': self.architecture,
             'hyperparameters': self.hyperparameters,
             'model_size': self.model_size,
@@ -465,6 +473,94 @@ class ConcurrentProgressAggregator:
         return None  # Will be populated by the ModelOptimizer instance
 
 
+class EpochProgressCallback(keras.callbacks.Callback):
+    """
+    Real-time epoch progress callback that tracks progress within epochs
+    Updates progress during batch training for live progress updates
+    """
+    
+    def __init__(self, trial_number: int, total_epochs: int, optimizer_instance=None):
+        super().__init__()
+        self.trial_number = trial_number
+        self.total_epochs = total_epochs
+        self.optimizer_instance = optimizer_instance
+        self.current_epoch = 0
+        self.total_batches = 0
+        self.current_batch = 0
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        """Called at the beginning of each epoch"""
+        self.current_epoch = epoch + 1  # Convert 0-based to 1-based
+        self.current_batch = 0
+        
+        # Try to get total batches from params
+        if hasattr(self, 'params') and self.params:
+            self.total_batches = self.params.get('steps', 0)
+        
+        self._update_progress(0.0)
+        logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} started")
+    
+    def on_batch_end(self, batch, logs=None):
+        """Called at the end of each batch - update progress within epoch"""
+        self.current_batch = batch + 1  # Convert 0-based to 1-based
+        
+        if self.total_batches > 0:
+            batch_progress = min(self.current_batch / self.total_batches, 1.0)
+            self._update_progress(batch_progress)
+    
+    def on_epoch_end(self, epoch, logs=None):
+        """Called at the end of each epoch"""
+        self._update_progress(1.0)
+        logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} completed")
+    
+    def _update_progress(self, epoch_progress: float):
+        """Update epoch progress and trigger unified progress update"""
+        # Update epoch info in the optimizer
+        if self.optimizer_instance and hasattr(self.optimizer_instance, '_current_epoch_info'):
+            self.optimizer_instance._current_epoch_info[self.trial_number] = {
+                'current_epoch': self.current_epoch,
+                'total_epochs': self.total_epochs,
+                'epoch_progress': epoch_progress
+            }
+            
+            # Trigger unified progress update every 10 batches or at epoch boundaries
+            if (epoch_progress == 0.0 or epoch_progress == 1.0 or 
+                (self.current_batch > 0 and self.current_batch % 10 == 0)):
+                self._trigger_unified_progress_update()
+    
+    def _trigger_unified_progress_update(self):
+        """Trigger a unified progress update with current epoch information"""
+        if self.optimizer_instance and hasattr(self.optimizer_instance, 'progress_callback') and self.optimizer_instance.progress_callback:
+            try:
+                # Create a mock trial progress for aggregation
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{self.trial_number}",
+                    trial_number=self.trial_number,
+                    status="running",
+                    started_at=datetime.now().isoformat(),
+                    current_epoch=self.current_epoch,
+                    total_epochs=self.total_epochs,
+                    epoch_progress=self.optimizer_instance._current_epoch_info.get(self.trial_number, {}).get('epoch_progress', 0.0)
+                )
+                
+                # Get best trial info for aggregation
+                best_trial_number, best_trial_value = self.optimizer_instance.get_best_trial_info()
+                self.optimizer_instance._progress_aggregator.get_current_best_value = lambda: best_trial_value
+                
+                # Create aggregated progress using the progress aggregator
+                aggregated_progress = self.optimizer_instance._progress_aggregator.aggregate_progress(
+                    current_trial=trial_progress,
+                    all_trial_statuses=self.optimizer_instance._trial_statuses
+                )
+                
+                # Create unified progress and send update
+                unified_progress = self.optimizer_instance._create_unified_progress(aggregated_progress)
+                self.optimizer_instance.progress_callback(unified_progress)
+                
+            except Exception as e:
+                logger.warning(f"EpochProgressCallback._trigger_unified_progress_update error: {e}")
+
+
 @dataclass 
 class AggregatedProgress:
     """Aggregated progress data across multiple concurrent trials"""
@@ -474,6 +570,28 @@ class AggregatedProgress:
     failed_trials: List[int]
     current_best_value: Optional[float]
     estimated_time_remaining: Optional[float]
+
+
+@dataclass
+class UnifiedProgress:
+    """
+    Unified progress data combining trial statistics with epoch information
+    This replaces the dual callback system to eliminate race conditions
+    """
+    # Trial statistics (from AggregatedProgress)
+    total_trials: int
+    running_trials: List[int]
+    completed_trials: List[int]
+    failed_trials: List[int]
+    current_best_value: Optional[float]
+    estimated_time_remaining: Optional[float]
+    
+    # Current epoch information (from most recent TrialProgress)
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    epoch_progress: Optional[float] = None
+    current_trial_id: Optional[str] = None
+    current_trial_status: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API serialization"""
@@ -483,21 +601,41 @@ class AggregatedProgress:
             'completed_trials': self.completed_trials,
             'failed_trials': self.failed_trials,
             'current_best_value': self.current_best_value,
-            'estimated_time_remaining': self.estimated_time_remaining
+            'estimated_time_remaining': self.estimated_time_remaining,
+            'current_epoch': self.current_epoch,
+            'total_epochs': self.total_epochs,
+            'epoch_progress': self.epoch_progress,
+            'current_trial_id': self.current_trial_id,
+            'current_trial_status': self.current_trial_status
         }
 
 
 # Progress callback
-def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress]) -> None:
+def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress, UnifiedProgress]) -> None:
     """Default progress callback that prints progress updates to console"""
-    if isinstance(progress, AggregatedProgress):
+    if isinstance(progress, UnifiedProgress):
+        # New unified progress system
         print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
               f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
         if progress.current_best_value is not None:
-            print(f"   Best value so far: {progress.current_best_value:.4f}")
+            print(f"📈 Best value so far: {progress.current_best_value:.4f}")
+        if progress.current_epoch is not None and progress.total_epochs is not None:
+            print(f"⏱️ Current epoch: {progress.current_epoch}/{progress.total_epochs}")
         if progress.estimated_time_remaining is not None:
             eta_minutes = progress.estimated_time_remaining / 60
             print(f"   ETA: {eta_minutes:.1f} minutes")
+    elif isinstance(progress, AggregatedProgress):
+        # Legacy aggregated progress (deprecated)
+        print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
+              f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
+        if progress.current_best_value is not None:
+            print(f"📈 Best value so far: {progress.current_best_value:.4f}")
+        if progress.estimated_time_remaining is not None:
+            eta_minutes = progress.estimated_time_remaining / 60
+            print(f"   ETA: {eta_minutes:.1f} minutes")
+    else:
+        # TrialProgress (legacy - should not be used anymore)
+        print(f"🔄 Trial {progress.trial_number} ({progress.status})")
 
 
 class ModelOptimizer:
@@ -613,6 +751,7 @@ class ModelOptimizer:
         self._progress_aggregator = ConcurrentProgressAggregator(self.config.n_trials)
         self._trial_start_times: Dict[int, float] = {}
         self._trial_statuses: Dict[int, str] = {}  # "running", "completed", "failed"
+        self._current_epoch_info: Dict[int, Dict[str, Any]] = {}  # Trial -> {current_epoch, total_epochs, epoch_progress}
         
         # Architecture and health trends (protected by _state_lock)
         self._architecture_trends: Dict[str, List[float]] = {}
@@ -621,6 +760,9 @@ class ModelOptimizer:
         # Best trial tracking (protected by _best_trial_lock)
         self._best_trial_number: Optional[int] = None
         self._best_trial_value: Optional[float] = None
+        
+        # Current trial progress for unified progress updates
+        self._current_trial_progress: Optional[TrialProgress] = None
         
         
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
@@ -674,6 +816,48 @@ class ModelOptimizer:
                 self._best_trial_number = trial_number
                 self._best_trial_value = trial_value
 
+    def _create_unified_progress(self, aggregated_progress: AggregatedProgress, trial_progress: Optional[TrialProgress] = None) -> UnifiedProgress:
+        """
+        Create unified progress by combining aggregated progress with current trial progress
+        This eliminates the race condition between dual callbacks
+        """
+        # Use the provided trial_progress or the stored current trial progress
+        current_trial = trial_progress or self._current_trial_progress
+        
+        # Get epoch information from the most recent running trial
+        current_epoch = None
+        total_epochs = None
+        epoch_progress = None
+        
+        # Find the most recent epoch info from any running trial
+        if self._current_epoch_info:
+            for trial_num in aggregated_progress.running_trials:
+                if trial_num in self._current_epoch_info:
+                    epoch_info = self._current_epoch_info[trial_num]
+                    current_epoch = epoch_info.get('current_epoch')
+                    total_epochs = epoch_info.get('total_epochs')
+                    epoch_progress = epoch_info.get('epoch_progress')
+                    break  # Use the first running trial's epoch info
+        
+        current_trial_id = getattr(current_trial, 'trial_id', None) if current_trial else None
+        current_trial_status = getattr(current_trial, 'status', None) if current_trial else None
+        
+        return UnifiedProgress(
+            # Copy all aggregated progress data
+            total_trials=aggregated_progress.total_trials,
+            running_trials=aggregated_progress.running_trials,
+            completed_trials=aggregated_progress.completed_trials,
+            failed_trials=aggregated_progress.failed_trials,
+            current_best_value=aggregated_progress.current_best_value,
+            estimated_time_remaining=aggregated_progress.estimated_time_remaining,
+            # Add epoch information from current trial
+            current_epoch=current_epoch,
+            total_epochs=total_epochs,
+            epoch_progress=epoch_progress,
+            current_trial_id=current_trial_id,
+            current_trial_status=current_trial_status
+        )
+
     def get_best_trial_info(self) -> Tuple[Optional[int], Optional[float]]:
         """Thread-safe method to get best trial info"""
         with self._best_trial_lock:
@@ -714,8 +898,17 @@ class ModelOptimizer:
                     logger.debug(f"running _thread_safe_progress_callback ... - Completed: {len(aggregated_progress.completed_trials)}")
                     logger.debug(f"running _thread_safe_progress_callback ... - Failed: {len(aggregated_progress.failed_trials)}")
                     
-                    # Call the user's progress callback with aggregated progress
-                    self.progress_callback(aggregated_progress)
+                    # PHASE 1: Unified progress callback system
+                    # Store current trial progress for epoch information
+                    self._current_trial_progress = trial_progress
+                    
+                    # Create unified progress combining trial statistics with epoch information
+                    unified_progress = self._create_unified_progress(aggregated_progress, trial_progress)
+                    
+                    # Single call with all information the UI needs
+                    logger.debug(f"running _thread_safe_progress_callback ... calling user progress callback with unified progress")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Epoch info: {unified_progress.current_epoch}/{unified_progress.total_epochs} (progress: {unified_progress.epoch_progress})")
+                    self.progress_callback(unified_progress)
                     
                 except Exception as e:
                     logger.error(f"running _thread_safe_progress_callback ... error in progress callback: {e}")
@@ -1136,6 +1329,21 @@ class ModelOptimizer:
             
             model_builder.model_config.epochs = final_epochs
             
+            # Add epoch progress callback to track training progress
+            epoch_callback = EpochProgressCallback(
+                trial_number=trial.number,
+                total_epochs=final_epochs,
+                optimizer_instance=self
+            )
+            
+            # Add the callback to model_builder's callback setup method
+            original_setup_callbacks = model_builder._setup_training_callbacks_optimized
+            def enhanced_setup_callbacks():
+                callbacks_list = original_setup_callbacks()
+                callbacks_list.append(epoch_callback)
+                return callbacks_list
+            model_builder._setup_training_callbacks_optimized = enhanced_setup_callbacks
+            
             # Train the model
             history = model_builder.train(
                 data=training_data,
@@ -1282,7 +1490,7 @@ class ModelOptimizer:
         """
         trial_start_time = time.time()
     
-        # Track trial start in progress aggregation
+        # Track trial start in progress aggregation (basic info only, epochs added later)
         if self.progress_callback:
             trial_progress = TrialProgress(
                 trial_id=f"trial_{trial.number}",
@@ -1353,6 +1561,28 @@ class ModelOptimizer:
                     
             # Use modular hyperparameter suggestion
             params = self._suggest_hyperparameters(trial)
+            
+            # Update trial progress with epoch information now that we have params
+            if self.progress_callback:
+                # Get expected epochs from params or config
+                trial_epochs = params.get('epochs', self.config.max_epochs_per_trial)
+                if not isinstance(trial_epochs, int):
+                    trial_epochs = int(trial_epochs)
+                
+                min_epochs = self.config.min_epochs_per_trial
+                max_epochs = self.config.max_epochs_per_trial
+                final_epochs = max(min_epochs, min(trial_epochs, max_epochs))
+                
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="running",
+                    started_at=datetime.now().isoformat(),
+                    current_epoch=0,
+                    total_epochs=final_epochs,
+                    epoch_progress=0.0
+                )
+                self._thread_safe_progress_callback(trial_progress)
             
             # Check execution method
             if self._should_use_runpod_service():
