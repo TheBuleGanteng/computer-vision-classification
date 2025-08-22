@@ -107,51 +107,9 @@ export function OptimizationControls() {
         const request = {
           // Core parameters
           dataset_name: selectedDataset,
-          mode: mode,
-          optimize_for: "val_accuracy", // Default objective
-          
-          // Optimization control (optimized for faster testing)
-          trials: 5, // TESTING: Very low for quick testing
-          max_epochs_per_trial: 3, // TESTING: Very low for quick testing
-          min_epochs_per_trial: 2, // TESTING: Very low for quick testing
-          health_weight: 0.3,
-          
-          // Training parameters (optimized for speed)
-          validation_split: 0.2,
-          test_size: 0.2,
-          batch_size: 64, // Larger batch size for faster training
-          learning_rate: 0.01, // Higher learning rate for faster convergence
-          optimizer_name: "adam",
-          
-          // Architecture constraints (relaxed for testing)
-          max_parameters: 500000, // Lower limit for faster models
-          min_accuracy_threshold: 0.3, // Lower threshold for testing
-          
-          // Advanced optimization settings (optimized for testing)
-          activation_functions: ["relu", "tanh"], // Limited options for faster testing
-          n_startup_trials: 5, // FIXED: Minimum allowed value is 5
-          n_warmup_steps: 1, // Very low for testing
-          early_stopping_patience: 2, // Low for faster testing
-          enable_early_stopping: true,
-          
-          // Resource and timing constraints (for testing)
-          max_training_time_minutes: 5.0, // Very short for testing
-          gpu_proxy_sample_percentage: 0.3, // Lower sample size for speed
-          
-          // Reproducibility
-          random_seed: 42,
-          
-          // Health analysis settings (optimized for speed)
-          health_analysis_sample_size: 20, // Lower for speed
-          enable_stability_checks: true,
-          stability_window: 2, // Lower for speed
-          
-          // RunPod service settings (disabled for testing)
-          use_runpod_service: false, // Local testing
-          concurrent_workers: 1, // Single worker for testing
-          use_multi_gpu: false, // Disabled for testing
-          target_gpus_per_worker: 1
+          mode: mode
         }
+        // All other parameters will use API defaults from OptimizationRequest
 
         console.log(`Starting optimization:`, request)
         

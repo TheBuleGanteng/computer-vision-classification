@@ -621,24 +621,57 @@ class HealthAnalyzer:
             Float between 0 and 1 (higher = better efficiency)
         """
         try:
+            logger.info(f"🔍 EFFICIENCY DEBUG - Starting parameter efficiency calculation")
             if total_params is None:
                 total_params = model.count_params()
+                logger.info(f"🔍 EFFICIENCY DEBUG - Calculated total_params from model: {total_params:,}")
+            else:
+                logger.info(f"🔍 EFFICIENCY DEBUG - Using provided total_params: {total_params:,}")
             
             # Get best validation accuracy
             val_accuracy = 0.0
+            logger.info(f"🔍 EFFICIENCY DEBUG - history object: {history}")
             if history and hasattr(history, 'history'):
+                logger.info(f"🔍 EFFICIENCY DEBUG - history.history keys: {list(history.history.keys())}")
                 if 'val_accuracy' in history.history:
                     val_accuracy = max(history.history['val_accuracy'])
+                    logger.info(f"🔍 EFFICIENCY DEBUG - Using val_accuracy: {val_accuracy}")
+                elif 'val_categorical_accuracy' in history.history:
+                    val_accuracy = max(history.history['val_categorical_accuracy'])
+                    logger.info(f"🔍 EFFICIENCY DEBUG - Using val_categorical_accuracy: {val_accuracy}")
                 elif 'accuracy' in history.history:
                     val_accuracy = max(history.history['accuracy'])
+                    logger.info(f"🔍 EFFICIENCY DEBUG - Using accuracy: {val_accuracy}")
+                elif 'categorical_accuracy' in history.history:
+                    val_accuracy = max(history.history['categorical_accuracy'])
+                    logger.info(f"🔍 EFFICIENCY DEBUG - Using categorical_accuracy: {val_accuracy}")
+                else:
+                    logger.info(f"🔍 EFFICIENCY DEBUG - No accuracy data found in history")
+            else:
+                logger.info(f"🔍 EFFICIENCY DEBUG - No history object or no .history attribute")
             
             if total_params is not None and total_params > 0:
-                # Use log scale to avoid penalizing larger models too heavily
-                params_millions = total_params / 1_000_000
-                efficiency_raw = val_accuracy / (1 + np.log10(max(params_millions, 0.001)))
+                # Use log scale to handle models of different sizes properly
+                # Normalize by typical model sizes: small models (~10K) get bonus, large models (>1M) get penalty
+                params_thousands = total_params / 1_000
+                logger.info(f"🔍 EFFICIENCY DEBUG - params_thousands: {params_thousands}")
+                logger.info(f"🔍 EFFICIENCY DEBUG - val_accuracy: {val_accuracy}")
+                
+                # Scale factor that rewards smaller models but doesn't penalize larger ones too heavily
+                if params_thousands <= 100:  # Very small models (≤100K params)
+                    scale_factor = 1.0  # No penalty
+                else:
+                    # Gentle logarithmic penalty for larger models
+                    scale_factor = 1.0 / (1 + np.log10(params_thousands / 100))
+                
+                logger.info(f"🔍 EFFICIENCY DEBUG - scale_factor: {scale_factor}")
+                efficiency_raw = val_accuracy * scale_factor
+                logger.info(f"🔍 EFFICIENCY DEBUG - efficiency_raw: {efficiency_raw}")
                 parameter_efficiency = min(1.0, max(0.0, efficiency_raw))
+                logger.info(f"🔍 EFFICIENCY DEBUG - final parameter_efficiency: {parameter_efficiency}")
             else:
                 parameter_efficiency = val_accuracy
+                logger.info(f"🔍 EFFICIENCY DEBUG - No total_params, using val_accuracy directly: {parameter_efficiency}")
             
             logger.debug(f"running HealthAnalyzer._calculate_parameter_efficiency ... Efficiency: {parameter_efficiency:.3f} (acc: {val_accuracy:.3f}, params: {total_params:,})")
             return parameter_efficiency
@@ -745,18 +778,37 @@ class HealthAnalyzer:
             Float between 0 and 1 (higher = better convergence)
         """
         try:
+            logger.info(f"🔍 CONVERGENCE DEBUG - history object: {history}")
+            logger.info(f"🔍 CONVERGENCE DEBUG - hasattr(history, 'history'): {hasattr(history, 'history') if history else 'history is None'}")
+            
             if not history or not hasattr(history, 'history'):
+                logger.info(f"🔍 CONVERGENCE DEBUG - No history object or no .history attribute, returning 0.5")
                 return 0.5
+            
+            logger.info(f"🔍 CONVERGENCE DEBUG - history.history keys: {list(history.history.keys())}")
+            logger.info(f"🔍 CONVERGENCE DEBUG - val_accuracy available: {'val_accuracy' in history.history}")
+            logger.info(f"🔍 CONVERGENCE DEBUG - accuracy available: {'accuracy' in history.history}")
             
             # Use validation accuracy if available, otherwise training accuracy
             if 'val_accuracy' in history.history and history.history['val_accuracy']:
                 accuracies = np.array(history.history['val_accuracy'])
+                logger.info(f"🔍 CONVERGENCE DEBUG - Using val_accuracy: {accuracies}")
+            elif 'val_categorical_accuracy' in history.history and history.history['val_categorical_accuracy']:
+                accuracies = np.array(history.history['val_categorical_accuracy'])
+                logger.info(f"🔍 CONVERGENCE DEBUG - Using val_categorical_accuracy: {accuracies}")
             elif 'accuracy' in history.history and history.history['accuracy']:
                 accuracies = np.array(history.history['accuracy'])
+                logger.info(f"🔍 CONVERGENCE DEBUG - Using accuracy: {accuracies}")
+            elif 'categorical_accuracy' in history.history and history.history['categorical_accuracy']:
+                accuracies = np.array(history.history['categorical_accuracy'])
+                logger.info(f"🔍 CONVERGENCE DEBUG - Using categorical_accuracy: {accuracies}")
             else:
+                logger.info(f"🔍 CONVERGENCE DEBUG - No accuracy data available, returning 0.5")
                 return 0.5
             
+            logger.info(f"🔍 CONVERGENCE DEBUG - accuracies length: {len(accuracies)}")
             if len(accuracies) < 3:
+                logger.info(f"🔍 CONVERGENCE DEBUG - Insufficient epochs (<3), returning 0.5")
                 return 0.5
             
             # Final performance
@@ -795,15 +847,32 @@ class HealthAnalyzer:
             Float between 0 and 1 (higher = more consistent)
         """
         try:
+            logger.info(f"🔍 CONSISTENCY DEBUG - history object: {history}")
             if not history or not hasattr(history, 'history'):
+                logger.info(f"🔍 CONSISTENCY DEBUG - No history object or no .history attribute, returning 0.5")
                 return 0.5
+            
+            logger.info(f"🔍 CONSISTENCY DEBUG - history.history keys: {list(history.history.keys())}")
             
             # Use validation accuracy if available
             if 'val_accuracy' in history.history and len(history.history['val_accuracy']) >= 5:
                 accuracies = np.array(history.history['val_accuracy'])
+                logger.info(f"🔍 CONSISTENCY DEBUG - Using val_accuracy (len={len(accuracies)}): {accuracies}")
+            elif 'val_categorical_accuracy' in history.history and len(history.history['val_categorical_accuracy']) >= 5:
+                accuracies = np.array(history.history['val_categorical_accuracy'])
+                logger.info(f"🔍 CONSISTENCY DEBUG - Using val_categorical_accuracy (len={len(accuracies)}): {accuracies}")
             elif 'accuracy' in history.history and len(history.history['accuracy']) >= 5:
                 accuracies = np.array(history.history['accuracy'])
+                logger.info(f"🔍 CONSISTENCY DEBUG - Using accuracy (len={len(accuracies)}): {accuracies}")
+            elif 'categorical_accuracy' in history.history and len(history.history['categorical_accuracy']) >= 5:
+                accuracies = np.array(history.history['categorical_accuracy'])
+                logger.info(f"🔍 CONSISTENCY DEBUG - Using categorical_accuracy (len={len(accuracies)}): {accuracies}")
             else:
+                val_len = len(history.history.get('val_accuracy', [])) 
+                val_cat_len = len(history.history.get('val_categorical_accuracy', []))
+                acc_len = len(history.history.get('accuracy', []))
+                cat_len = len(history.history.get('categorical_accuracy', []))
+                logger.info(f"🔍 CONSISTENCY DEBUG - Insufficient data: val_accuracy len={val_len}, val_categorical_accuracy len={val_cat_len}, accuracy len={acc_len}, categorical_accuracy len={cat_len}, returning 0.5")
                 return 0.5
             
             # Calculate consistency as inverse of coefficient of variation

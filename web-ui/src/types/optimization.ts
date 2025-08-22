@@ -128,10 +128,56 @@ export interface OptimizationResults {
   configuration: OptimizationConfiguration
 }
 
+// Trial progress from real-time API
+export interface TrialProgress {
+  trial_id: string
+  trial_number: number
+  status: 'running' | 'completed' | 'failed' | 'pruned'
+  started_at: string
+  completed_at?: string
+  duration_seconds?: number
+  
+  // Epoch-level progress tracking
+  current_epoch?: number
+  total_epochs?: number
+  epoch_progress?: number
+  
+  // Architecture Information
+  architecture?: any
+  hyperparameters?: any
+  model_size?: any
+  
+  // Health Metrics (includes test_loss, overall_health, etc.)
+  health_metrics?: {
+    test_loss?: number
+    test_accuracy?: number
+    overall_health?: number
+    neuron_utilization?: number
+    parameter_efficiency?: number
+    training_stability?: number
+    gradient_health?: number
+    convergence_quality?: number
+    accuracy_consistency?: number
+    [key: string]: any
+  }
+  training_stability?: any
+  
+  // Performance Data
+  performance?: {
+    total_score?: number
+    accuracy?: number
+    [key: string]: any
+  }
+  training_history?: any
+  
+  // Pruning Information
+  pruning_info?: any
+}
+
 // Trial data from CSV
 export interface TrialData {
   trial_number: number
-  objective_value: number
+  total_score: number
   state: 'COMPLETE' | 'FAILED' | 'PRUNED'
   duration_seconds: number
   overall_health: number
@@ -142,7 +188,7 @@ export interface TrialData {
 export interface TrialSummary {
   id: number
   trial_number: number
-  objective_value: number
+  total_score: number
   overall_health: number
   duration_seconds: number
   architecture_type: 'CNN' | 'LSTM'
@@ -176,7 +222,7 @@ export interface Architecture3D {
   }
   metadata: {
     dataset: string
-    objective_value: number
+    total_score: number
     hyperparameters: Hyperparameters
   }
 }

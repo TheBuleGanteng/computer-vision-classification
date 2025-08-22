@@ -344,101 +344,687 @@ def _extract_architecture_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
 - Dense Nodes: 64, 128, 256, 512, 1,024
 - Activation: Relu, Tanh, etc.
 
-##### **📋 NEXT PHASE: TRIAL PERFORMANCE METRICS INTEGRATION**
+#### **✅ TRIAL GALLERY HEALTH METRICS INTEGRATION COMPLETE**
+**Date**: August 22, 2025  
+**Status**: **COMPREHENSIVE HEALTH METRICS DISPLAY WORKING ✅**  
+**Achievement**: **Real-time performance and health analysis fully integrated**
 
-**Objective**: Enhance each trial gallery tile with comprehensive performance metrics including accuracy, total score, and health components.
+##### **✅ Completed: Full Health Metrics Integration**
+Successfully integrated all 6 health metrics from HealthAnalyzer into the trial gallery:
+- ✅ **Health Metrics Backend**: Complete HealthAnalyzer integration with categorical accuracy support
+- ✅ **Real-time Calculation**: All metrics calculated during training with proper accuracy metric detection
+- ✅ **Data Flow Integration**: Health metrics properly stored in `health_metrics` field and passed to frontend
+- ✅ **Frontend Display**: Trial gallery tiles show all performance and health components
+- ✅ **Metric Debugging**: Comprehensive logging system for troubleshooting metric calculations
+- ✅ **Fallback Handling**: Proper 0.5 fallback values when insufficient training data available
 
-#### **🔍 PHASE 1: METRICS ANALYSIS & REQUIREMENTS**
+##### **✅ Health Metrics Data Access Paths**
+**All metrics accessible through trial object in frontend (`trial.health_metrics.*`):**
 
-##### **Required Performance Metrics for Gallery Display**
+**1. Core Performance Metrics (Always Available)**
+```typescript
+// Access via trial.performance and trial.health_metrics
+trial.performance.total_score     // Combined optimization score (0.0-1.0) → 91.7%
+trial.performance.accuracy        // Raw model accuracy (0.0-1.0) → 94.2% 
+trial.health_metrics.test_loss    // Final training loss → 0.143
+trial.health_metrics.test_accuracy // Test set accuracy → 94.2%
+```
 
-**1. Core Performance Metrics**
-- **Accuracy**: Raw model accuracy score (0.0-1.0, display as percentage)
-- **Total Score**: Combined objective value (accuracy + health for health mode, accuracy only for simple mode)
-- **Loss**: Final training/validation loss value
+**2. Health Analysis Components (Health Mode)**
+```typescript
+// Access via trial.health_metrics.*
+trial.health_metrics.overall_health         // Weighted composite (0.0-1.0) → 91.5%
+trial.health_metrics.neuron_utilization     // Dead neuron analysis (25% weight) → 89%
+trial.health_metrics.parameter_efficiency   // Accuracy per parameter (15% weight) → 94%
+trial.health_metrics.training_stability     // Loss curve smoothness (20% weight) → 92%
+trial.health_metrics.gradient_health        // Gradient flow quality (15% weight) → 88%
+trial.health_metrics.convergence_quality    // Learning optimization (15% weight) → 95%
+trial.health_metrics.accuracy_consistency   // Prediction stability (10% weight) → 91%
+```
 
-**2. Health Metrics Components** (for health mode trials)
-- **Gradient Health**: Gradient norm stability and flow quality
-- **Training Stability**: Loss convergence and training dynamics
-- **Dead/Saturated Filters**: Filter activation analysis
-- **Overall Health Score**: Composite health metric (0.0-1.0)
+**3. Architecture Information (Always Available)**
+```typescript
+// Access via trial.architecture.*
+trial.architecture.type                     // "CNN" or "LSTM"
+trial.architecture.conv_layers              // Number of convolutional layers
+trial.architecture.filters_per_layer        // Filters in each conv layer
+trial.architecture.kernel_size              // Convolution kernel dimensions
+trial.architecture.dense_layers             // Number of dense layers
+trial.architecture.first_dense_nodes        // Nodes in first dense layer
+trial.architecture.activation               // Activation function
+trial.architecture.batch_normalization      // Boolean
+trial.architecture.use_global_pooling       // Boolean
+```
 
-##### **Current Metrics Availability Assessment**
+**4. Trial Metadata (Always Available)**
+```typescript
+// Access via trial.* (top level)
+trial.trial_number                          // Trial sequence number
+trial.status                               // "running" | "completed" | "failed"
+trial.started_at                           // ISO timestamp
+trial.completed_at                         // ISO timestamp
+trial.duration_seconds                     // Training duration
+```
 
-**✅ Already Available in Backend:**
-- **Objective Value**: Available in `TrialProgress.performance['objective_value']`
-- **Raw Accuracy**: Tracked in `ModelOptimizer._last_trial_accuracy`
-- **Health Metrics**: Calculated by `HealthAnalyzer` during training
-- **Training History**: Loss and accuracy per epoch stored during training
+##### **✅ Technical Implementation Details**
 
-**❌ Missing from TrialProgress:**
-- **Individual Health Components**: Health breakdown not included in trial data
-- **Final Loss Value**: Training loss not captured in TrialProgress
-- **Validation Metrics**: Validation accuracy/loss not stored separately
+**1. Backend Health Metrics Resolution**
+- **Issue**: HealthAnalyzer was looking for `accuracy`/`val_accuracy` but Keras uses `categorical_accuracy`/`val_categorical_accuracy`
+- **Solution**: Enhanced all health metric functions to check for both naming conventions
+- **Files Modified**: `src/health_analyzer.py` - Updated `_calculate_convergence_quality()`, `_calculate_accuracy_consistency()`, `_calculate_parameter_efficiency()`
+
+**2. Parameter Efficiency Formula Fix**
+- **Issue**: Negative efficiency values for small models due to `log10(small_number)` creating negative denominators  
+- **Solution**: Redesigned scaling to reward small models and gently penalize large models
+- **New Formula**: `efficiency = accuracy * scale_factor` where `scale_factor = 1.0` for models ≤100K parameters
+
+**3. Data Flow Architecture**
+```python
+# optimizer.py - Health metrics calculation and storage
+comprehensive_metrics = health_analyzer.calculate_comprehensive_health(...)
+self._last_trial_health_metrics = comprehensive_metrics
+
+# optimizer.py - TrialProgress creation with health data  
+trial_progress = TrialProgress(..., health_metrics=health_metrics)
+
+# api_server.py - API serialization
+return trial_progress.to_dict()  # Includes all health_metrics
+
+# trial-gallery.tsx - Frontend display
+trial.health_metrics.convergence_quality  // Direct access to all metrics
+```
+
+##### **📋 NEXT PHASE: 3D BEST MODEL VISUALIZATION**
+
+**Objective**: Create interactive 3D visualization of the best performing model architecture with real-time updates and download capability.
+
+#### **🎯 PHASE 1: VISUALIZATION REQUIREMENTS & METRICS ANALYSIS**
+
+##### **📊 Required Metrics for 3D Model Visualization**
+
+**1. Best Model Identification**
+```typescript
+// Track best model across all completed trials
+interface BestModelData {
+  trial_id: string                     // ID of best performing trial
+  trial_number: number                 // Trial sequence number
+  total_score: number                  // Optimization score (0.0-1.0)
+  accuracy: number                     // Raw accuracy (0.0-1.0)
+  
+  // Architecture for 3D visualization
+  architecture: ArchitectureData       // Complete architecture specification
+  
+  // Performance context
+  health_metrics?: HealthMetrics       // Health breakdown (if health mode)
+  training_duration: number            // Training time in seconds
+  updated_at: string                   // ISO timestamp of best model update
+}
+```
+
+**2. 3D Visualization Architecture Data**
+```typescript
+// Enhanced architecture data for 3D rendering
+interface ArchitectureVisualization {
+  // Core architecture
+  type: "CNN" | "LSTM"
+  layers: LayerVisualization[]
+  
+  // 3D rendering parameters  
+  total_parameters: number             // For model complexity visualization
+  model_depth: number                  // Number of layers for 3D depth
+  max_layer_width: number             // Largest layer for scaling
+  
+  // Performance overlay data
+  performance_color: string           // Color coding based on performance
+  health_indicators: HealthIndicators  // Visual health overlays
+}
+
+interface LayerVisualization {
+  layer_id: string
+  layer_type: "conv2d" | "dense" | "lstm" | "pooling" | "dropout"
+  
+  // 3D positioning
+  position_z: number                  // Depth position in model
+  width: number                       // Visual width (nodes/filters)
+  height: number                      // Visual height
+  
+  // Layer-specific data
+  parameters?: number                 // Parameter count for this layer
+  activation?: string                 // Activation function
+  filters?: number                    // Conv layer filters
+  kernel_size?: [number, number]      // Conv kernel dimensions
+  units?: number                      // Dense/LSTM units
+}
+```
 
 #### **🔧 PHASE 2: BACKEND IMPLEMENTATION PLAN**
 
-##### **Step 2.1: Enhance TrialProgress Structure**
+##### **Step 2.1: Best Model Tracking Enhancement**
+**Location**: `src/optimizer.py` - Add best model tracking
+
 ```python
-# Add to TrialProgress class in optimizer.py
-class TrialProgress:
-    # ... existing fields ...
-    
-    # Performance Metrics
-    accuracy: Optional[float] = None  # Raw accuracy (0.0-1.0)
-    total_score: Optional[float] = None  # Objective value
-    final_loss: Optional[float] = None  # Final training loss
-    validation_accuracy: Optional[float] = None  # Validation accuracy
-    validation_loss: Optional[float] = None  # Validation loss
-    
-    # Health Metrics (populated for health mode)
-    health_score: Optional[float] = None  # Overall health (0.0-1.0)
-    gradient_health: Optional[float] = None  # Gradient stability
-    training_stability: Optional[float] = None  # Loss convergence
-    filter_health: Optional[float] = None  # Dead/saturated filters
+class ModelOptimizer:
+    def __init__(self, config: OptimizationConfig):
+        # ... existing init ...
+        
+        # 🆕 BEST MODEL TRACKING
+        self._best_model_data: Optional[Dict[str, Any]] = None
+        self._best_model_lock = threading.Lock()
+        
+    def _update_best_model(self, trial_progress: TrialProgress, total_score: float):
+        """Update best model tracking when new best is found"""
+        with self._best_model_lock:
+            if self._best_model_data is None or total_score > self._best_model_data['total_score']:
+                self._best_model_data = {
+                    'trial_id': trial_progress.trial_id,
+                    'trial_number': trial_progress.trial_number,
+                    'total_score': total_score,
+                    'accuracy': trial_progress.performance.get('accuracy'),
+                    'architecture': trial_progress.architecture,
+                    'health_metrics': trial_progress.health_metrics,
+                    'training_duration': trial_progress.duration_seconds,
+                    'updated_at': datetime.now().isoformat()
+                }
+                logger.info(f"🏆 NEW BEST MODEL: Trial {trial_progress.trial_number} with score {total_score:.4f}")
+                
+    def get_best_model_data(self) -> Optional[Dict[str, Any]]:
+        """Get current best model data for visualization"""
+        with self._best_model_lock:
+            return self._best_model_data.copy() if self._best_model_data else None
 ```
 
-##### **Step 2.2: Capture Metrics During Training**
-**Location**: `optimizer.py` - `_objective_function()` method
+##### **Step 2.2: 3D Visualization Data Preparation**
+**Location**: `src/optimizer.py` - Add visualization data extraction
 
-**For Local Training** (`_train_locally_for_trial`):
 ```python
-# After model training completes
-final_metrics = model_builder.get_final_metrics()  # New method needed
-health_analysis = health_analyzer.get_health_summary()  # New method needed
-
-# Update TrialProgress with performance data
-trial_progress = TrialProgress(
-    # ... existing fields ...
-    accuracy=self._last_trial_accuracy,
-    total_score=objective_value,
-    final_loss=final_metrics.get('loss'),
-    validation_accuracy=final_metrics.get('val_accuracy'),
-    validation_loss=final_metrics.get('val_loss'),
-    health_score=health_analysis.get('overall_health'),
-    gradient_health=health_analysis.get('gradient_health'),
-    training_stability=health_analysis.get('training_stability'),
-    filter_health=health_analysis.get('filter_health')
-)
+def _prepare_visualization_data(self, architecture: Dict[str, Any]) -> Dict[str, Any]:
+    """Prepare architecture data optimized for 3D visualization"""
+    
+    layers = []
+    total_params = 0
+    z_position = 0
+    
+    if architecture['type'] == 'CNN':
+        # Input layer (implicit)
+        layers.append({
+            'layer_id': 'input',
+            'layer_type': 'input',
+            'position_z': z_position,
+            'width': 32,  # Assume 32x32 input for visualization
+            'height': 32,
+            'parameters': 0
+        })
+        z_position += 1
+        
+        # Convolutional layers
+        for i in range(architecture['conv_layers']):
+            layer_params = (
+                architecture['kernel_size'][0] * 
+                architecture['kernel_size'][1] * 
+                architecture['filters_per_layer'] * 
+                (3 if i == 0 else architecture['filters_per_layer'])  # 3 for RGB input
+            )
+            total_params += layer_params
+            
+            layers.append({
+                'layer_id': f'conv_{i+1}',
+                'layer_type': 'conv2d',
+                'position_z': z_position,
+                'width': architecture['filters_per_layer'],
+                'height': max(1, 32 // (2 ** (i+1))),  # Approximate spatial reduction
+                'parameters': layer_params,
+                'filters': architecture['filters_per_layer'],
+                'kernel_size': architecture['kernel_size'],
+                'activation': architecture['activation']
+            })
+            z_position += 1
+            
+        # Global pooling or flatten
+        layers.append({
+            'layer_id': 'pooling',
+            'layer_type': 'pooling',
+            'position_z': z_position,
+            'width': architecture['filters_per_layer'],
+            'height': 1,
+            'parameters': 0
+        })
+        z_position += 1
+        
+        # Dense layers
+        prev_units = architecture['filters_per_layer']
+        for i in range(architecture['dense_layers']):
+            current_units = architecture['first_dense_nodes'] // (2 ** i) if i > 0 else architecture['first_dense_nodes']
+            layer_params = prev_units * current_units
+            total_params += layer_params
+            
+            layers.append({
+                'layer_id': f'dense_{i+1}',
+                'layer_type': 'dense',
+                'position_z': z_position,
+                'width': current_units,
+                'height': 1,
+                'parameters': layer_params,
+                'units': current_units,
+                'activation': architecture['activation']
+            })
+            prev_units = current_units
+            z_position += 1
+            
+    # Output layer
+    output_params = prev_units * 10  # Assume 10-class classification
+    total_params += output_params
+    
+    layers.append({
+        'layer_id': 'output',
+        'layer_type': 'dense',
+        'position_z': z_position,
+        'width': 10,
+        'height': 1,
+        'parameters': output_params,
+        'units': 10,
+        'activation': 'softmax'
+    })
+    
+    return {
+        'type': architecture['type'],
+        'layers': layers,
+        'total_parameters': total_params,
+        'model_depth': len(layers),
+        'max_layer_width': max(layer['width'] for layer in layers)
+    }
 ```
 
-**For RunPod Training** (`_train_via_runpod_service`):
-```python
-# Enhance RunPod response parsing to extract metrics
-runpod_result = response.json()
-result_data = runpod_result.get('output', {})
+##### **Step 2.3: Enhanced API Endpoints**
+**Location**: `src/api_server.py` - Add best model endpoint
 
-# Extract performance metrics from RunPod response
-trial_progress = TrialProgress(
-    # ... existing fields ...
-    accuracy=result_data.get('accuracy'),
-    total_score=result_data.get('objective_value'),
-    final_loss=result_data.get('final_loss'),
-    # Health metrics from RunPod health analysis
-    health_score=result_data.get('health_score'),
-    gradient_health=result_data.get('gradient_health'),
-    # ... other health components
-)
+```python
+@app.get("/jobs/{job_id}/best-model")
+async def get_best_model(job_id: str):
+    """Get best model data for 3D visualization"""
+    optimizer = active_jobs.get(job_id)
+    if not optimizer:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    best_model_data = optimizer.get_best_model_data()
+    if not best_model_data:
+        raise HTTPException(status_code=404, detail="No completed trials yet")
+    
+    # Prepare visualization data
+    viz_data = optimizer._prepare_visualization_data(best_model_data['architecture'])
+    
+    return {
+        **best_model_data,
+        'visualization': viz_data
+    }
+
+@app.get("/jobs/{job_id}/best-model/download")
+async def download_best_model_visualization(job_id: str):
+    """Download 3D visualization data as JSON file"""
+    optimizer = active_jobs.get(job_id)
+    if not optimizer:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    best_model_data = optimizer.get_best_model_data()
+    if not best_model_data:
+        raise HTTPException(status_code=404, detail="No completed trials yet")
+    
+    # Prepare comprehensive download data
+    download_data = {
+        'model_info': best_model_data,
+        'visualization': optimizer._prepare_visualization_data(best_model_data['architecture']),
+        'export_timestamp': datetime.now().isoformat(),
+        'job_id': job_id
+    }
+    
+    return Response(
+        content=json.dumps(download_data, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f"attachment; filename=best_model_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        }
+    )
+```
+
+#### **🎨 PHASE 3: FRONTEND IMPLEMENTATION PLAN**
+
+##### **Step 3.1: 3D Visualization Component Architecture**
+**Location**: `web-ui/src/components/visualization/` - New directory
+
+```typescript
+// BestModelVisualization.tsx - Main 3D visualization component
+interface BestModelVisualizationProps {
+  jobId: string
+  optimizationMode: "simple" | "health"
+}
+
+export function BestModelVisualization({ jobId, optimizationMode }: BestModelVisualizationProps) {
+  const [bestModelData, setBestModelData] = useState<BestModelData | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  
+  // Real-time updates when new best model is found
+  useEffect(() => {
+    const pollBestModel = setInterval(async () => {
+      try {
+        const response = await apiClient.getBestModel(jobId)
+        setBestModelData(response)
+      } catch (error) {
+        console.error("Failed to fetch best model:", error)
+      } finally {
+        setIsLoading(false)
+      }
+    }, 3000) // Poll every 3 seconds for updates
+    
+    return () => clearInterval(pollBestModel)
+  }, [jobId])
+  
+  if (isLoading) return <BestModelSkeleton />
+  if (!bestModelData) return <NoBestModelYet />
+  
+  return (
+    <Card className="w-full h-[600px]">
+      <CardHeader className="pb-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Trophy className="h-5 w-5 text-yellow-500" />
+              Best Model Architecture
+            </CardTitle>
+            <CardDescription>
+              Trial {bestModelData.trial_number} - Score: {(bestModelData.total_score * 100).toFixed(1)}%
+            </CardDescription>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => downloadVisualization(bestModelData)}
+            >
+              <Download className="h-4 w-4 mr-1" />
+              Download
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      
+      <CardContent className="h-[500px]">
+        <Model3DViewer 
+          visualizationData={bestModelData.visualization}
+          performanceData={{
+            accuracy: bestModelData.accuracy,
+            totalScore: bestModelData.total_score,
+            healthMetrics: bestModelData.health_metrics
+          }}
+          optimizationMode={optimizationMode}
+        />
+      </CardContent>
+    </Card>
+  )
+}
+```
+
+##### **Step 3.2: 3D Model Viewer Implementation**
+**Location**: `web-ui/src/components/visualization/Model3DViewer.tsx`
+
+```typescript
+import { Canvas, useFrame } from '@react-three/fiber'
+import { OrbitControls, Box, Cylinder, Sphere } from '@react-three/drei'
+import { useRef, useState } from 'react'
+import { Mesh } from 'three'
+
+interface Model3DViewerProps {
+  visualizationData: ArchitectureVisualization
+  performanceData: PerformanceData
+  optimizationMode: "simple" | "health"
+}
+
+export function Model3DViewer({ visualizationData, performanceData, optimizationMode }: Model3DViewerProps) {
+  const [selectedLayer, setSelectedLayer] = useState<LayerVisualization | null>(null)
+  
+  // Performance-based color scheme
+  const getPerformanceColor = (score: number): string => {
+    if (score >= 0.9) return "#10b981" // green-500
+    if (score >= 0.8) return "#f59e0b" // amber-500
+    if (score >= 0.7) return "#ef4444" // red-500
+    return "#6b7280" // gray-500
+  }
+  
+  const baseColor = getPerformanceColor(performanceData.totalScore)
+  
+  return (
+    <div className="relative w-full h-full">
+      <Canvas camera={{ position: [5, 5, 5], fov: 75 }}>
+        <ambientLight intensity={0.5} />
+        <pointLight position={[10, 10, 10]} />
+        
+        <OrbitControls enablePan={true} enableZoom={true} enableRotate={true} />
+        
+        {/* Render each layer as 3D geometry */}
+        {visualizationData.layers.map((layer, index) => (
+          <LayerMesh
+            key={layer.layer_id}
+            layer={layer}
+            baseColor={baseColor}
+            isSelected={selectedLayer?.layer_id === layer.layer_id}
+            onClick={() => setSelectedLayer(layer)}
+            performanceIntensity={performanceData.totalScore}
+          />
+        ))}
+        
+        {/* Connection lines between layers */}
+        {visualizationData.layers.slice(0, -1).map((layer, index) => (
+          <ConnectionLine
+            key={`connection-${index}`}
+            from={layer}
+            to={visualizationData.layers[index + 1]}
+          />
+        ))}
+      </Canvas>
+      
+      {/* Layer info overlay */}
+      {selectedLayer && (
+        <LayerInfoOverlay 
+          layer={selectedLayer}
+          onClose={() => setSelectedLayer(null)}
+          performanceData={performanceData}
+          optimizationMode={optimizationMode}
+        />
+      )}
+      
+      {/* Model statistics */}
+      <ModelStatsOverlay 
+        visualizationData={visualizationData}
+        performanceData={performanceData}
+      />
+    </div>
+  )
+}
+
+// Individual layer 3D representation
+function LayerMesh({ 
+  layer, 
+  baseColor, 
+  isSelected, 
+  onClick, 
+  performanceIntensity 
+}: {
+  layer: LayerVisualization
+  baseColor: string
+  isSelected: boolean
+  onClick: () => void
+  performanceIntensity: number
+}) {
+  const meshRef = useRef<Mesh>(null)
+  
+  useFrame((state) => {
+    if (meshRef.current && isSelected) {
+      meshRef.current.rotation.y = state.clock.elapsedTime * 0.5
+    }
+  })
+  
+  const getLayerGeometry = () => {
+    switch (layer.layer_type) {
+      case 'conv2d':
+        return (
+          <Box
+            ref={meshRef}
+            position={[0, 0, layer.position_z * 2]}
+            args={[layer.width / 20, layer.height / 10, 0.5]}
+            onClick={onClick}
+          >
+            <meshStandardMaterial 
+              color={baseColor} 
+              opacity={0.7 + performanceIntensity * 0.3}
+              transparent
+            />
+          </Box>
+        )
+      case 'dense':
+        return (
+          <Cylinder
+            ref={meshRef}
+            position={[0, 0, layer.position_z * 2]}
+            args={[layer.width / 50, layer.width / 50, 1, 8]}
+            onClick={onClick}
+          >
+            <meshStandardMaterial 
+              color={baseColor}
+              opacity={0.8 + performanceIntensity * 0.2}
+              transparent
+            />
+          </Cylinder>
+        )
+      case 'pooling':
+        return (
+          <Sphere
+            ref={meshRef}
+            position={[0, 0, layer.position_z * 2]}
+            args={[0.3]}
+            onClick={onClick}
+          >
+            <meshStandardMaterial 
+              color="#8b5cf6" 
+              opacity={0.6}
+              transparent
+            />
+          </Sphere>
+        )
+      default:
+        return null
+    }
+  }
+  
+  return getLayerGeometry()
+}
+```
+
+##### **Step 3.3: Integration with Dashboard**
+**Location**: `web-ui/src/components/dashboard/dashboard.tsx` - Add best model section
+
+```typescript
+// Add to main dashboard layout
+<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+  {/* Existing optimization controls */}
+  <OptimizationControls />
+  
+  {/* 🆕 BEST MODEL VISUALIZATION */}
+  {currentJobId && (
+    <BestModelVisualization 
+      jobId={currentJobId}
+      optimizationMode={optimizationMode}
+    />
+  )}
+</div>
+```
+
+#### **🧪 PHASE 4: TESTING & VALIDATION STRATEGY**
+
+##### **Step 4.1: Backend Best Model Tracking**
+```bash
+# Test best model identification and updates
+python -c "
+import json
+from src.optimizer import ModelOptimizer
+from src.config import OptimizationConfig
+
+# Start optimization and verify best model tracking
+config = OptimizationConfig(dataset_name='mnist', trials=3, mode='health')
+optimizer = ModelOptimizer(config)
+
+# Verify best model updates during optimization
+print('Testing best model tracking...')
+# Run optimization and check _best_model_data updates
+"
+
+# Test API endpoints
+curl -X GET "http://localhost:8000/jobs/{job_id}/best-model" | jq '.visualization.layers | length'
+curl -X GET "http://localhost:8000/jobs/{job_id}/best-model/download" -o best_model.json
+```
+
+##### **Step 4.2: 3D Visualization Testing**
+```typescript
+// Test visualization data transformation
+const testArchitecture = {
+  type: "CNN",
+  conv_layers: 2,
+  filters_per_layer: 32,
+  kernel_size: [3, 3],
+  dense_layers: 1,
+  first_dense_nodes: 128
+}
+
+const vizData = prepareVisualizationData(testArchitecture)
+console.log('Layers generated:', vizData.layers.length)
+console.log('Total parameters:', vizData.total_parameters)
+```
+
+#### **📋 SUCCESS CRITERIA FOR 3D VISUALIZATION**
+
+**✅ Backend Integration**
+- [ ] Best model tracking updates correctly when better models found
+- [ ] Visualization data preparation creates proper 3D layer representations
+- [ ] API endpoints return complete best model and visualization data
+- [ ] Download functionality generates proper JSON files
+
+**✅ Frontend 3D Visualization** 
+- [ ] 3D model renders correctly showing architecture layers
+- [ ] Performance-based color coding reflects model quality
+- [ ] Interactive layer selection shows detailed information
+- [ ] Real-time updates when new best model is discovered
+- [ ] Download button saves visualization data to user's disk
+
+**✅ User Experience**
+- [ ] Smooth 3D navigation (pan, zoom, rotate)
+- [ ] Clear visual distinction between layer types
+- [ ] Performance overlays are informative and non-intrusive
+- [ ] Loading states and error handling work properly
+```
+
+**📋 Step 2.2d: RunPod Service Response Enhancement**
+**Requires**: Update `runpod_service/handler.py` to include health breakdown
+```python
+# Location: runpod_service/handler.py - enhance response
+return {
+    "accuracy": final_accuracy,
+    "total_score": total_score,
+    "final_loss": training_history.history['loss'][-1],
+    "validation_accuracy": training_history.history.get('val_accuracy', [None])[-1],
+    "validation_loss": training_history.history.get('val_loss', [None])[-1],
+    
+    # 🆕 DETAILED HEALTH BREAKDOWN
+    "health_metrics": {
+        "overall_health": health_analysis.get('overall_health'),
+        "neuron_utilization": health_analysis.get('neuron_utilization'),
+        "parameter_efficiency": health_analysis.get('parameter_efficiency'),
+        "training_stability": health_analysis.get('training_stability'),
+        "gradient_health": health_analysis.get('gradient_health'),
+        "convergence_quality": health_analysis.get('convergence_quality'),
+        "accuracy_consistency": health_analysis.get('accuracy_consistency')
+    },
+    
+    # Existing fields...
+    "training_time": training_time,
+    "model_summary": model_summary
+}
 ```
 
 ##### **Step 2.3: Enhance ModelBuilder for Metrics Extraction**
@@ -482,7 +1068,7 @@ class HealthAnalyzer:
 # Enhance response to include detailed metrics
 return {
     "accuracy": final_accuracy,
-    "objective_value": objective_value,
+    "total_score": total_score,
     "final_loss": training_history.history['loss'][-1],
     "validation_accuracy": training_history.history.get('val_accuracy', [None])[-1],
     "validation_loss": training_history.history.get('val_loss', [None])[-1],
@@ -502,118 +1088,404 @@ return {
 #### **🎨 PHASE 3: FRONTEND IMPLEMENTATION PLAN**
 
 ##### **Step 3.1: Add Performance Metrics Section to Trial Gallery**
-**Location**: `trial-gallery.tsx`
+**Location**: `web-ui/src/components/dashboard/trial-gallery.tsx` (after Architecture Info section ~line 295)
 
 ```typescript
-{/* Performance Metrics */}
+{/* 🆕 PERFORMANCE METRICS SECTION */}
 <div className="space-y-2 mb-3">
   <div className="flex items-center gap-1 text-sm">
     <Target className="h-3 w-3 text-green-500" />
     <span className="text-muted-foreground">Performance</span>
   </div>
   
-  {trial.accuracy !== undefined && (
-    <div className="flex justify-between text-xs">
+  {/* Core Performance - Always Show Structure */}
+  <div className="text-xs space-y-1">
+    <div className="flex justify-between">
       <span className="text-muted-foreground">Accuracy:</span>
-      <span className="font-medium">{(trial.accuracy * 100).toFixed(1)}%</span>
+      <span className="font-medium">
+        {trial.accuracy !== undefined ? `${(trial.accuracy * 100).toFixed(1)}%` : 'N/A'}
+      </span>
     </div>
-  )}
-  
-  {trial.total_score !== undefined && (
-    <div className="flex justify-between text-xs">
+    
+    <div className="flex justify-between">
       <span className="text-muted-foreground">Total Score:</span>
-      <span className="font-medium">{(trial.total_score * 100).toFixed(1)}%</span>
+      <span className="font-medium">
+        {trial.total_score !== undefined ? `${(trial.total_score * 100).toFixed(1)}%` : 'N/A'}
+      </span>
     </div>
-  )}
-  
-  {trial.health_score !== undefined && (
-    <div className="flex justify-between text-xs">
-      <span className="text-muted-foreground">Health Score:</span>
-      <span className="font-medium">{(trial.health_score * 100).toFixed(1)}%</span>
-    </div>
-  )}
+    
+    {/* Show loss for completed trials */}
+    {trial.final_loss !== undefined && (
+      <div className="flex justify-between">
+        <span className="text-muted-foreground">Final Loss:</span>
+        <span className="font-medium">{trial.final_loss.toFixed(3)}</span>
+      </div>
+    )}
+  </div>
 </div>
-```
 
-##### **Step 3.2: Health Metrics Breakdown (Optional Expandable)**
-```typescript
-{/* Health Details (expandable) */}
-{trial.health_score !== undefined && (
-  <div className="text-xs space-y-1 border-t pt-2">
-    <div className="flex justify-between">
-      <span className="text-muted-foreground">Gradient Health:</span>
-      <span className="font-medium">{(trial.gradient_health * 100).toFixed(0)}%</span>
+{/* 🆕 HEALTH ANALYSIS SECTION (Health Mode Only) */}
+{trial.overall_health !== undefined && (
+  <div className="space-y-2 mb-3">
+    <div className="flex items-center gap-1 text-sm">
+      <Activity className="h-3 w-3 text-purple-500" />
+      <span className="text-muted-foreground">Health Analysis</span>
     </div>
-    <div className="flex justify-between">
-      <span className="text-muted-foreground">Training Stability:</span>
-      <span className="font-medium">{(trial.training_stability * 100).toFixed(0)}%</span>
-    </div>
-    <div className="flex justify-between">
-      <span className="text-muted-foreground">Filter Health:</span>
-      <span className="font-medium">{(trial.filter_health * 100).toFixed(0)}%</span>
+    
+    <div className="text-xs space-y-1">
+      <div className="flex justify-between">
+        <span className="text-muted-foreground">Overall Health:</span>
+        <span className="font-medium text-purple-600">
+          {(trial.overall_health * 100).toFixed(1)}%
+        </span>
+      </div>
+      
+      {/* Health Components with Weights */}
+      <div className="pl-2 space-y-1 border-l border-purple-200">
+        {trial.neuron_utilization !== undefined && (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Neuron Usage:</span>
+            <span className="font-medium">{(trial.neuron_utilization * 100).toFixed(0)}%</span>
+          </div>
+        )}
+        
+        {trial.parameter_efficiency !== undefined && (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Efficiency:</span>
+            <span className="font-medium">{(trial.parameter_efficiency * 100).toFixed(0)}%</span>
+          </div>
+        )}
+        
+        {trial.training_stability !== undefined && (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Stability:</span>
+            <span className="font-medium">{(trial.training_stability * 100).toFixed(0)}%</span>
+          </div>
+        )}
+        
+        {trial.gradient_health !== undefined && (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Gradients:</span>
+            <span className="font-medium">{(trial.gradient_health * 100).toFixed(0)}%</span>
+          </div>
+        )}
+        
+        {trial.convergence_quality !== undefined && (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Convergence:</span>
+            <span className="font-medium">{(trial.convergence_quality * 100).toFixed(0)}%</span>
+          </div>
+        )}
+        
+        {trial.accuracy_consistency !== undefined && (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Consistency:</span>
+            <span className="font-medium">{(trial.accuracy_consistency * 100).toFixed(0)}%</span>
+          </div>
+        )}
+      </div>
     </div>
   </div>
 )}
 ```
 
+##### **Step 3.2: Import Required Icons**
+**Location**: `web-ui/src/components/dashboard/trial-gallery.tsx` (import section ~line 10)
+
+```typescript
+import { 
+  Eye,
+  Target,      // ✅ Already imported
+  Activity,    // 🆕 ADD for health metrics
+  Clock,
+  Layers,
+  Hash,
+  Download,
+  RotateCcw,
+  ZoomIn,
+  ZoomOut,
+  Loader2
+} from "lucide-react"
+```
+
+##### **Step 3.3: Trial Card Height Adjustment**
+**Location**: `web-ui/src/components/dashboard/trial-gallery.tsx` (trial card styling ~line 159)
+
+```typescript
+// Adjust card height to accommodate new sections
+<Card 
+  key={uniqueKey} 
+  className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50 min-h-[400px]" // 🆕 Increased height
+  onClick={() => handleTrialClick(trial)}
+>
+  <CardContent className="p-4 flex flex-col h-full"> {/* 🆕 Full height flex */}
+    {/* Existing content... */}
+    
+    {/* 🆕 Spacer to push Trial ID to bottom */}
+    <div className="flex-grow"></div>
+    
+    {/* Trial ID - now at bottom */}
+    <div className="mt-3 pt-2 border-t border-border/50">
+      <p className="text-xs text-muted-foreground">
+        ID: {trial.trial_id || 'N/A'}
+      </p>
+    </div>
+  </CardContent>
+</Card>
+```
+
+##### **Step 3.4: TypeScript Interface Updates**
+**Location**: `web-ui/src/types/optimization.ts` (existing types)
+
+```typescript
+// 🆕 ADD to existing interface or create new TrialWithMetrics interface
+interface TrialWithMetrics {
+  // ... existing trial fields ...
+  
+  // Core Performance Metrics
+  accuracy?: number;
+  total_score?: number;
+  final_loss?: number;
+  validation_accuracy?: number;
+  validation_loss?: number;
+  
+  // Health Analysis Metrics
+  overall_health?: number;
+  neuron_utilization?: number;
+  parameter_efficiency?: number;
+  training_stability?: number;
+  gradient_health?: number;
+  convergence_quality?: number;
+  accuracy_consistency?: number;
+  
+  // Extended Metadata
+  training_time_minutes?: number;
+}
+```
+
 #### **🧪 PHASE 4: TESTING & VALIDATION STRATEGY**
 
 ##### **Step 4.1: Backend Metrics Verification**
-**Testing Approach**:
-1. **Unit Tests**: Verify `get_final_metrics()` and `get_health_summary()` return correct data
-2. **Integration Tests**: Confirm TrialProgress includes all performance fields
-3. **API Endpoint Tests**: Validate `/jobs/{job_id}/trials` returns enhanced trial data
-4. **RunPod Service Tests**: Ensure remote training returns complete metrics
 
-**Validation Commands**:
+**📋 Unit Testing Strategy**:
 ```bash
-# Test local optimization with metrics capture
-python optimizer.py dataset=mnist trials=3 mode=health max_epochs_per_trial=5
+# Test 1: TrialProgress Enhancement Verification
+python -c "
+from src.optimizer import TrialProgress
+import json
 
-# Verify API response includes performance data
-curl http://localhost:8000/jobs/{job_id}/trials | jq '.trials[0].performance'
+# Create enhanced TrialProgress
+trial = TrialProgress(
+    trial_id='test_1',
+    trial_number=1,
+    status='completed',
+    started_at='2025-01-01T10:00:00',
+    accuracy=0.942,
+    total_score=0.917,
+    overall_health=0.891,
+    neuron_utilization=0.845
+)
 
-# Test RunPod service with metrics
-python optimizer.py dataset=cifar10 trials=2 use_runpod_service=true mode=health
+# Verify serialization includes new fields
+result = trial.to_dict()
+assert 'accuracy' in result
+assert 'total_score' in result  
+assert 'overall_health' in result
+print('✅ TrialProgress enhancement successful')
+"
+
+# Test 2: Health Metrics Extraction
+python -c "
+from src.health_analyzer import HealthAnalyzer
+import numpy as np
+
+analyzer = HealthAnalyzer()
+# Mock health analysis results
+mock_results = analyzer._get_default_health_metrics()
+required_fields = ['neuron_utilization', 'parameter_efficiency', 'training_stability', 
+                  'gradient_health', 'convergence_quality', 'accuracy_consistency']
+
+for field in required_fields:
+    assert field in mock_results
+print('✅ Health analyzer provides all required metrics')
+"
+```
+
+**🔗 Integration Testing**:
+```bash
+# Test 3: Local Training with Enhanced Metrics
+python optimizer.py \
+  --dataset mnist \
+  --trials 2 \
+  --mode health \
+  --max_epochs_per_trial 3 \
+  --validate_metrics_capture
+
+# Test 4: API Response Validation
+# Start optimization and capture job_id, then test API
+curl -X GET "http://localhost:8000/jobs/{job_id}/trials" | jq '
+  .trials[0] | {
+    accuracy: .accuracy,
+    total_score: .total_score,
+    overall_health: .overall_health,
+    neuron_utilization: .neuron_utilization,
+    parameter_efficiency: .parameter_efficiency,
+    training_stability: .training_stability,
+    gradient_health: .gradient_health,
+    convergence_quality: .convergence_quality,
+    accuracy_consistency: .accuracy_consistency
+  }
+'
+
+# Expected response validation
+# ✅ All fields should be present with numeric values 0.0-1.0
+# ✅ Health fields should be null for simple mode, populated for health mode
 ```
 
 ##### **Step 4.2: Frontend Display Verification**
-**UI Testing Checklist**:
-- [ ] Accuracy displays as percentage with 1 decimal place
-- [ ] Total Score shows correctly for both simple and health modes
-- [ ] Health Score only appears for health mode trials
-- [ ] N/A displayed for running trials without completed metrics
-- [ ] Number formatting includes commas where appropriate
-- [ ] Health breakdown components display correctly
+
+**🎨 UI Testing Checklist**:
+- **Performance Section**:
+  - [ ] "Performance" header with Target icon displays
+  - [ ] Accuracy shows as `94.2%` (1 decimal place) or `N/A`
+  - [ ] Total Score shows as `91.7%` (1 decimal place) or `N/A`  
+  - [ ] Final Loss shows as `0.143` (3 decimal places) for completed trials only
+  
+- **Health Analysis Section** (Health Mode Only):
+  - [ ] "Health Analysis" header with Activity icon displays
+  - [ ] Overall Health shows as `91.5%` with purple color
+  - [ ] Health components show indented with left border
+  - [ ] All percentages display as whole numbers (0 decimal places)
+  - [ ] Section completely hidden for simple mode trials
+  
+- **Layout & Formatting**:
+  - [ ] Trial cards maintain consistent height (~400px minimum)
+  - [ ] Trial ID remains at bottom of card
+  - [ ] No horizontal scrolling in health breakdown
+  - [ ] Proper spacing between sections
+  - [ ] Performance and Health sections visually distinct
+
+**🧪 Browser Testing Matrix**:
+```typescript
+// Test data structure for verification
+const testTrial = {
+  trial_id: "trial_1",
+  trial_number: 1,
+  status: "completed",
+  accuracy: 0.942,
+  total_score: 0.917,
+  final_loss: 0.143,
+  overall_health: 0.891,
+  neuron_utilization: 0.845,
+  parameter_efficiency: 0.923,
+  training_stability: 0.867,
+  gradient_health: 0.798,
+  convergence_quality: 0.934,
+  accuracy_consistency: 0.856
+};
+
+// Verify display formatting
+expect(formatPercentage(testTrial.accuracy)).toBe("94.2%");
+expect(formatPercentage(testTrial.overall_health)).toBe("89.1%");
+expect(formatLoss(testTrial.final_loss)).toBe("0.143");
+```
 
 ##### **Step 4.3: End-to-End Integration Testing**
-**Complete Workflow Tests**:
-1. **Start Optimization via UI** → Verify initial trial tiles show "N/A" for performance
-2. **Monitor Running Trials** → Confirm architecture data appears immediately
-3. **Trial Completion** → Validate all performance metrics populate correctly
-4. **Mode Comparison** → Test simple vs health mode metric differences
-5. **Cancellation Behavior** → Ensure completed trial metrics remain visible
 
-#### **📅 IMPLEMENTATION TIMELINE**
+**🔄 Complete Workflow Validation**:
 
-**Phase 1 (Analysis)**: 0.5 days - Requirements and current state analysis ✅
-**Phase 2 (Backend)**: 2-3 days - Metrics extraction and TrialProgress enhancement  
-**Phase 3 (Frontend)**: 1-2 days - UI integration and display formatting
-**Phase 4 (Testing)**: 1-2 days - Comprehensive validation and debugging
+**Test Scenario 1: Simple Mode Optimization**
+1. Select "Accuracy" target metric → Start optimization
+2. **Verify**: Performance section shows Accuracy + Total Score only
+3. **Verify**: No Health Analysis section appears
+4. **Verify**: Total Score equals Accuracy value
+5. **Verify**: Running trials show "N/A" for metrics
 
-**Total Estimated Time**: 4.5-7.5 days
+**Test Scenario 2: Health Mode Optimization** 
+1. Select "Accuracy + model health" target metric → Start optimization
+2. **Verify**: Performance section shows all core metrics
+3. **Verify**: Health Analysis section appears with all 6 components
+4. **Verify**: Total Score ≠ Accuracy (weighted combination)
+5. **Verify**: Health percentages are reasonable (30-95% range)
 
-**Dependencies**: 
-- Health analyzer must provide summary methods
-- ModelBuilder must capture final training metrics  
-- RunPod handler must return enhanced response data
+**Test Scenario 3: Trial State Transitions**
+1. Start optimization → **Verify**: "N/A" for performance metrics
+2. Trial completes → **Verify**: Real values populate immediately  
+3. Cancel optimization → **Verify**: Completed trial metrics preserved
+4. Start new optimization → **Verify**: Previous trials remain, new trials reset
 
-**Success Criteria**:
-- All trial tiles display accuracy, total score, and health metrics (when applicable)
-- Metrics update in real-time as trials complete
-- Professional formatting with proper units and precision
-- Health mode shows detailed health breakdown
-- Simple mode shows accuracy-focused metrics only
+**🔍 Data Consistency Validation**:
+```bash
+# Verify backend-frontend consistency
+# Compare API response with UI display
+python scripts/validate_trial_data_consistency.py \
+  --job_id {job_id} \
+  --frontend_capture screenshots/trial_gallery.png \
+  --verify_metrics accuracy,total_score,health_components
+```
+
+#### **📅 DETAILED IMPLEMENTATION TIMELINE**
+
+**📋 Phase 1 (Analysis & Planning)**: ✅ **COMPLETE** - 0.5 days
+- [x] Analyzed HealthAnalyzer metrics availability
+- [x] Identified specific health components and weights  
+- [x] Defined UI display requirements and formatting
+- [x] Created comprehensive implementation plan
+
+**🔧 Phase 2 (Backend Implementation)**: 3-4 days
+- **Day 1**: TrialProgress structure enhancement + helper methods (2.1, 2.2b)
+- **Day 2**: Local training metrics extraction (2.2a, 2.2c) 
+- **Day 3**: RunPod service response enhancement (2.2d)
+- **Day 4**: Integration testing and bug fixes
+
+**🎨 Phase 3 (Frontend Implementation)**: 2-3 days  
+- **Day 1**: Performance metrics section + TypeScript types (3.1, 3.4)
+- **Day 2**: Health analysis section + card layout adjustments (3.1, 3.3)
+- **Day 3**: Icon imports, styling refinements, responsiveness testing
+
+**🧪 Phase 4 (Testing & Validation)**: 2-3 days
+- **Day 1**: Backend metrics verification + unit tests (4.1)
+- **Day 2**: Frontend display testing + browser compatibility (4.2)  
+- **Day 3**: End-to-end integration testing + data consistency (4.3)
+
+**📊 Total Estimated Time**: **7.5-10.5 days**
+
+#### **🎯 SUCCESS CRITERIA & ACCEPTANCE REQUIREMENTS**
+
+**✅ Backend Integration Success**:
+- [ ] TrialProgress includes all 13 performance/health fields
+- [ ] Local training captures health analysis breakdown
+- [ ] RunPod service returns enhanced metrics response
+- [ ] API endpoint `/jobs/{job_id}/trials` provides complete trial data
+- [ ] Simple vs Health mode correctly populate different field sets
+
+**✅ Frontend Display Success**:
+- [ ] Performance section displays on every trial tile (with N/A for running)
+- [ ] Health Analysis section appears only for health mode trials
+- [ ] All percentages formatted correctly (1 decimal for scores, 0 for health)
+- [ ] Trial cards maintain consistent, professional appearance
+- [ ] Real-time updates work during optimization progress
+
+**✅ User Experience Success**:
+- [ ] Simple mode: Shows Accuracy + Total Score (equal values)
+- [ ] Health mode: Shows Accuracy + Total Score (different values) + Health breakdown
+- [ ] Running trials: Show structure with "N/A" values
+- [ ] Completed trials: Show all available metrics immediately
+- [ ] Cancelled optimization: Preserve completed trial metrics
+
+**✅ Technical Quality Success**:
+- [ ] No TypeScript errors or warnings
+- [ ] Responsive design works on mobile/tablet/desktop
+- [ ] Performance impact minimal (no UI lag during polling)
+- [ ] Error handling graceful (missing metrics don't break display)
+- [ ] Code maintainable with clear separation of concerns
+
+**🚀 Go-Live Readiness**:
+- [ ] All 4 test scenarios pass end-to-end validation
+- [ ] UI matches design specifications in all browsers
+- [ ] Backend API responses verified with production data
+- [ ] No console errors in browser developer tools
+- [ ] Trial gallery loads and updates smoothly during live optimization
 
 #### **⚠️ Legacy Integration Issues**
 - ⚠️ **Testing Coverage**: Comprehensive end-to-end testing required
@@ -1703,7 +2575,7 @@ export function transformArchitectureData(pythonArchData: any): Architecture3D {
     },
     metadata: {
       dataset: pythonArchData.dataset,
-      objective_value: pythonArchData.objective_value,
+      total_score: pythonArchData.total_score,
       hyperparameters: pythonArchData.hyperparameters
     }
   };

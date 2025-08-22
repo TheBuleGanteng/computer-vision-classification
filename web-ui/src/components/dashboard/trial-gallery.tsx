@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog"
 import { useDashboard } from "./dashboard-provider"
 import { apiClient } from "@/lib/api-client"
+import { TrialProgress } from "@/types/optimization"
 import { 
   Eye,
   Target,
@@ -22,9 +23,9 @@ import {
 } from "lucide-react"
 
 export function TrialGallery() {
-  const { progress, isOptimizationRunning, currentJobId } = useDashboard()
-  const [selectedTrial, setSelectedTrial] = useState<any | null>(null)
-  const [trials, setTrials] = useState<any[]>([])
+  const { isOptimizationRunning, currentJobId } = useDashboard()
+  const [selectedTrial, setSelectedTrial] = useState<TrialProgress | null>(null)
+  const [trials, setTrials] = useState<TrialProgress[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [lastJobId, setLastJobId] = useState<string | null>(null)
@@ -43,6 +44,22 @@ export function TrialGallery() {
       const response = await apiClient.getTrialHistory(jobId)
       const rawTrials = response.trials || []
       
+      // 🔍 DEBUG: Log all trial data received from API
+      console.log('🔍 FRONTEND TRIAL DATA DEBUG:')
+      console.log(`  📊 Total trials received: ${rawTrials.length}`)
+      if (rawTrials.length > 0) {
+        const sampleTrial = rawTrials[0]
+        console.log(`  📊 Sample trial structure:`, sampleTrial)
+        console.log(`  📊 Sample performance:`, sampleTrial.performance)
+        console.log(`  📊 Sample health_metrics:`, sampleTrial.health_metrics)
+        if (sampleTrial.health_metrics) {
+          console.log(`  📊 Health metrics keys:`, Object.keys(sampleTrial.health_metrics))
+          console.log(`  📊 convergence_quality:`, sampleTrial.health_metrics.convergence_quality)
+          console.log(`  📊 accuracy_consistency:`, sampleTrial.health_metrics.accuracy_consistency)
+          console.log(`  📊 gradient_health:`, sampleTrial.health_metrics.gradient_health)
+        }
+      }
+
       // Deduplicate trials by trial_id and trial_number to prevent duplicate keys
       const uniqueTrials = rawTrials.filter((trial, index, array) => {
         const firstIndex = array.findIndex(t => 
@@ -163,10 +180,10 @@ export function TrialGallery() {
                 return (
                 <Card 
                   key={uniqueKey} 
-                  className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50"
+                  className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50 min-h-[500px]"
                   onClick={() => handleTrialClick(trial)}
               >
-                <CardContent className="p-4">
+                <CardContent className="p-4 flex flex-col h-full">
                   {/* Trial Header */}
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
@@ -178,21 +195,21 @@ export function TrialGallery() {
                         trial.status === 'completed' ? "default" : 
                         trial.status === 'running' ? "secondary" : 
                         trial.status === 'failed' ? "destructive" : 
-                        trial.status === 'cancelled' ? "outline" : 
+                        trial.status === 'pruned' ? "outline" : 
                         "secondary"
                       }
                       className={
                         trial.status === 'completed' ? "bg-green-500 hover:bg-green-600 text-white font-normal" :
                         trial.status === 'running' ? "bg-yellow-500 hover:bg-yellow-600 text-white font-normal" :
                         trial.status === 'failed' ? "bg-red-500 hover:bg-red-600 text-white font-normal" :
-                        trial.status === 'cancelled' ? "bg-gray-500 hover:bg-gray-600 text-white font-normal" :
+                        trial.status === 'pruned' ? "bg-gray-500 hover:bg-gray-600 text-white font-normal" :
                         "bg-gray-400 hover:bg-gray-500 text-white font-normal"
                       }
                     >
                       {trial.status === 'running' ? 'In Progress' : 
                        trial.status === 'completed' ? 'Completed' :
                        trial.status === 'failed' ? 'Failed' :
-                       trial.status === 'cancelled' ? 'Cancelled' :
+                       trial.status === 'pruned' ? 'Pruned' :
                        'Unknown'}
                     </Badge>
                   </div>
@@ -294,6 +311,104 @@ export function TrialGallery() {
                     )}
                   </div>
 
+                  {/* Performance Metrics */}
+                  <div className="space-y-2 mb-3">
+                    <div className="flex items-center gap-1 text-sm">
+                      <Target className="h-3 w-3 text-green-500" />
+                      <span className="text-muted-foreground">Performance</span>
+                    </div>
+                    
+                    {/* Core Performance - Always Show Structure */}
+                    <div className="text-xs space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Total Score:</span>
+                        <span className="font-medium">
+                          {trial.performance?.total_score ? `${(trial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}
+                        </span>
+                      </div>
+                      
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Accuracy:</span>
+                        <span className="font-medium">
+                          {trial.performance?.accuracy ? `${(trial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}
+                        </span>
+                      </div>
+                      
+                      {/* Show loss for completed trials */}
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Final Loss:</span>
+                        <span className="font-medium">
+                          {trial.health_metrics?.test_loss ? trial.health_metrics.test_loss.toFixed(4) : 'N/A'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Health Analysis Section (Health Mode Only) */}
+                  <div className="space-y-2 mb-3">
+                    <div className="flex items-center gap-1 text-sm">
+                      <Activity className="h-3 w-3 text-purple-500" />
+                      <span className="text-muted-foreground">Health Analysis</span>
+                    </div>
+                    
+                    <div className="text-xs space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Overall Health:</span>
+                        <span className="font-medium text-purple-600">
+                          {trial.health_metrics?.overall_health ? `${(trial.health_metrics.overall_health * 100).toFixed(1)}%` : 'N/A'}
+                        </span>
+                      </div>
+                      
+                      {/* Health Components with Weights */}
+                      <div className="pl-2 space-y-1 border-l border-purple-200">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Neuron Usage:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.neuron_utilization ? `${(trial.health_metrics.neuron_utilization * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Efficiency:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.parameter_efficiency ? `${(trial.health_metrics.parameter_efficiency * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Stability:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.training_stability ? `${(trial.health_metrics.training_stability * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Gradients:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.gradient_health ? `${(trial.health_metrics.gradient_health * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Convergence:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.convergence_quality ? `${(trial.health_metrics.convergence_quality * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Consistency:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.accuracy_consistency ? `${(trial.health_metrics.accuracy_consistency * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Spacer to push Trial ID to bottom */}
+                  <div className="flex-grow"></div>
+
                   {/* Trial ID */}
                   <div className="mt-3 pt-2 border-t border-border/50">
                     <p className="text-xs text-muted-foreground">
@@ -314,7 +429,7 @@ export function TrialGallery() {
         <DialogContent className="max-w-4xl w-full max-h-[90vh] overflow-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-3">
-              Trial #{selectedTrial?.trialNumber} - 3D Architecture
+              Trial #{selectedTrial?.trial_number} - 3D Architecture
               <Badge variant="outline">{selectedTrial?.architecture.type}</Badge>
             </DialogTitle>
             <DialogClose onClose={handleCloseDialog} />
@@ -326,15 +441,15 @@ export function TrialGallery() {
               <div className="grid grid-cols-3 gap-4 p-4 bg-muted/20 rounded-lg">
                 <div className="text-center">
                   <p className="text-sm text-muted-foreground">Overall Score</p>
-                  <p className="text-lg font-bold">{(selectedTrial.overallScore * 100).toFixed(1)}%</p>
+                  <p className="text-lg font-bold">{selectedTrial.performance?.total_score ? `${(selectedTrial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}</p>
                 </div>
                 <div className="text-center">
                   <p className="text-sm text-muted-foreground">Accuracy</p>
-                  <p className="text-lg font-bold">{(selectedTrial.accuracyScore * 100).toFixed(1)}%</p>
+                  <p className="text-lg font-bold">{selectedTrial.performance?.accuracy ? `${(selectedTrial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}</p>
                 </div>
                 <div className="text-center">
                   <p className="text-sm text-muted-foreground">Duration</p>
-                  <p className="text-lg font-bold">{formatDuration(selectedTrial.duration)}</p>
+                  <p className="text-lg font-bold">{selectedTrial.duration_seconds ? formatDuration(selectedTrial.duration_seconds) : 'N/A'}</p>
                 </div>
               </div>
 
@@ -345,7 +460,7 @@ export function TrialGallery() {
                     <Layers className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
                     <p className="text-xl font-medium text-muted-foreground">3D Architecture Visualization</p>
                     <p className="text-sm text-muted-foreground mt-2">
-                      Interactive 3D model for Trial #{selectedTrial.trialNumber}
+                      Interactive 3D model for Trial #{selectedTrial.trial_number}
                     </p>
                     <p className="text-xs text-muted-foreground mt-2">
                       Will be implemented with React Three Fiber in Phase 2
@@ -395,7 +510,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Filter Sizes:</p>
                   <div className="flex gap-2">
-                    {selectedTrial.architecture.filterSizes.map((size, index) => (
+                    {selectedTrial.architecture.filterSizes.map((size: any, index: number) => (
                       <Badge key={index} variant="outline">{size}</Badge>
                     ))}
                   </div>
@@ -404,7 +519,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Activations:</p>
                   <div className="flex gap-2">
-                    {selectedTrial.architecture.activations.map((activation, index) => (
+                    {selectedTrial.architecture.activations.map((activation: any, index: number) => (
                       <Badge key={index} variant="outline">{activation}</Badge>
                     ))}
                   </div>
@@ -413,7 +528,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Key Features:</p>
                   <div className="flex flex-wrap gap-2">
-                    {selectedTrial.architecture.keyFeatures.map((feature, index) => (
+                    {selectedTrial.architecture.keyFeatures.map((feature: any, index: number) => (
                       <Badge key={index} variant="secondary">{feature}</Badge>
                     ))}
                   </div>
