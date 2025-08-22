@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectItem } from "@/components/ui/select"
 import { Card, CardContent } from "@/components/ui/card"
@@ -29,20 +29,20 @@ const DATASETS = [
 
 // Target metric options for optimization
 const TARGET_METRICS = [
-  { value: "health", label: "Accuracy + model health" },
-  { value: "simple", label: "Accuracy only" }
+  { value: "Accuracy + model health", label: "Accuracy + model health", mode: "health" },
+  { value: "Accuracy", label: "Accuracy", mode: "simple" }
 ]
 
 export function OptimizationControls() {
-  const { progress, optimizationMode, isOptimizationRunning, setProgress, setOptimizationMode, setIsOptimizationRunning } = useDashboard()
+  const { progress, optimizationMode, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
   
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
   const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
-  const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
   const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   // Real-time elapsed time counter
   useEffect(() => {
@@ -68,7 +68,10 @@ export function OptimizationControls() {
   // Sync selectedTargetMetric with shared optimization mode
   useEffect(() => {
     if (selectedTargetMetric && selectedTargetMetric !== "") {
-      setOptimizationMode(selectedTargetMetric as "simple" | "health")
+      const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
+      if (targetMetric) {
+        setOptimizationMode(targetMetric.mode as "simple" | "health")
+      }
     }
   }, [selectedTargetMetric, setOptimizationMode])
 
@@ -77,9 +80,15 @@ export function OptimizationControls() {
       // Cancel optimization
       try {
         await apiClient.cancelJob(currentJobId)
+        
+        // Clear polling interval to prevent further updates
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current)
+          pollingIntervalRef.current = null
+        }
+        
         setIsOptimizationRunning(false)
         setCurrentJobId(null)
-        setProgress(null)
         setOptimizationStartTime(null) // Clear timer state
         setClientElapsedTime(0)
         console.log("Optimization cancelled successfully")
@@ -92,10 +101,13 @@ export function OptimizationControls() {
       try {
         setError(null)
         
+        const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
+        const mode = targetMetric?.mode as 'simple' | 'health'
+        
         const request = {
           // Core parameters
           dataset_name: selectedDataset,
-          mode: selectedTargetMetric as 'simple' | 'health',
+          mode: mode,
           optimize_for: "val_accuracy", // Default objective
           
           // Optimization control (optimized for faster testing)
@@ -165,6 +177,11 @@ export function OptimizationControls() {
   }
 
   const startProgressPolling = (jobId: string) => {
+    // Clear any existing polling interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current)
+    }
+    
     const pollInterval = setInterval(async () => {
       try {
         const status = await apiClient.getJobStatus(jobId)
@@ -180,13 +197,20 @@ export function OptimizationControls() {
           setIsOptimizationCompleted(true)
           setCurrentJobId(null)
           setOptimizationStartTime(null) // Clear timer state
-          clearInterval(pollInterval)
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
           console.log("Optimization completed successfully")
         } else if (status.status === 'failed' || status.status === 'cancelled') {
           setIsOptimizationRunning(false)
           setCurrentJobId(null)
+          setProgress(null) // Reset progress data to clear UI statistics
           setOptimizationStartTime(null) // Clear timer state
-          clearInterval(pollInterval)
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
           if (status.error) {
             setError(status.error)
           }
@@ -204,14 +228,25 @@ export function OptimizationControls() {
           setProgress(null)
           setOptimizationStartTime(null) // Clear timer state
           setError("Optimization was interrupted (server restarted). Please start a new optimization.")
-          clearInterval(pollInterval)
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
         }
         // Don't clear interval on other polling errors - backend might be temporarily unavailable
       }
     }, 2000) // Poll every 2 seconds
+    
+    // Store the interval reference
+    pollingIntervalRef.current = pollInterval
 
     // Cleanup polling on component unmount or job completion
-    return () => clearInterval(pollInterval)
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
   }
 
   // Helper function to format elapsed time and choose appropriate time source
@@ -338,7 +373,7 @@ export function OptimizationControls() {
             <div className="flex items-center gap-2 text-sm text-blue-600">
               <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse" />
               Optimization in progress for {DATASETS.find(d => d.value === selectedDataset)?.label}{" "} 
-              using {TARGET_METRICS.find(m => m.value === selectedTargetMetric)?.label.toLowerCase()}...
+              using {selectedTargetMetric.toLowerCase()}...
             </div>
             
             {progress && (
@@ -370,7 +405,7 @@ export function OptimizationControls() {
                 </div>
                 {progress.best_total_score !== null && progress.best_total_score !== undefined && (
                   <div>
-                    <span>Best total score {selectedTargetMetric === 'health' ? 'accuracy + model health' : 'accuracy'}: </span>
+                    <span>Best total score {selectedTargetMetric === 'Accuracy + model health' ? 'accuracy + model health' : 'accuracy'}: </span>
                     <span className="font-medium">{(progress.best_total_score * 100).toFixed(1)}%</span>
                   </div>
                 )}

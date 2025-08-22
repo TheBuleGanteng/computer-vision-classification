@@ -904,6 +904,58 @@ class ModelOptimizer:
     def is_cancelled(self) -> bool:
         """Check if cancellation has been requested"""
         return self._cancelled.is_set()
+    
+    def get_trial_history(self) -> List[Dict[str, Any]]:
+        """
+        Get complete trial history for UI visualization
+        
+        Returns all trials from _trial_progress_history as API-friendly dictionaries
+        sorted by trial number (most recent first for UI display)
+        
+        Returns:
+            List of trial dictionaries with trial_number, status, timestamps, etc.
+        """
+        with self._progress_lock:
+            trials = []
+            for trial_progress in self._trial_progress_history:
+                trial_dict = trial_progress.to_dict()
+                trials.append(trial_dict)
+            
+            # Sort by trial number descending (most recent first)
+            trials.sort(key=lambda x: x.get('trial_number', 0), reverse=True)
+            return trials
+    
+    def get_current_trial(self) -> Optional[Dict[str, Any]]:
+        """
+        Get currently running trial if any exists
+        
+        Returns:
+            Trial dictionary for currently running trial, or None
+        """
+        with self._progress_lock:
+            for trial_progress in self._trial_progress_history:
+                if trial_progress.status == "running":
+                    return trial_progress.to_dict()
+            return None
+    
+    def get_best_trial(self) -> Optional[Dict[str, Any]]:
+        """
+        Get best completed trial based on _best_trial_number
+        
+        Returns:
+            Trial dictionary for best trial, or None if no trials completed
+        """
+        with self._best_trial_lock:
+            best_number = self._best_trial_number
+        
+        if best_number is None:
+            return None
+        
+        with self._progress_lock:
+            for trial_progress in self._trial_progress_history:
+                if trial_progress.trial_number == best_number:
+                    return trial_progress.to_dict()
+            return None
         
     def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
         """
@@ -919,8 +971,22 @@ class ModelOptimizer:
             self._trial_statuses[trial_progress.trial_number] = trial_progress.status
             logger.debug(f"running _thread_safe_progress_callback ... updated trial {trial_progress.trial_number} status to '{trial_progress.status}'")
             
-            # Add trial progress to history for duration calculations
-            self._trial_progress_history.append(trial_progress)
+            # Update or add trial progress to history
+            # Find existing trial and update it, or append if it's new
+            existing_trial_index = None
+            for i, existing_trial in enumerate(self._trial_progress_history):
+                if existing_trial.trial_number == trial_progress.trial_number:
+                    existing_trial_index = i
+                    break
+            
+            if existing_trial_index is not None:
+                # Update existing trial with latest status and data
+                self._trial_progress_history[existing_trial_index] = trial_progress
+                logger.debug(f"running _thread_safe_progress_callback ... updated existing trial {trial_progress.trial_number} in history")
+            else:
+                # Add new trial to history
+                self._trial_progress_history.append(trial_progress)
+                logger.debug(f"running _thread_safe_progress_callback ... added new trial {trial_progress.trial_number} to history")
             
             # Call user-provided progress callback if available
             if self.progress_callback:
@@ -1657,7 +1723,7 @@ class ModelOptimizer:
                     status="completed",
                     started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
                     completed_at=datetime.now().isoformat(),
-                    duration_seconds=trial_end_time - trial_start_time,
+                    duration_seconds=round(trial_end_time - trial_start_time),
                     performance={'objective_value': objective_value}
                 )
                 self._thread_safe_progress_callback(trial_progress)
@@ -1676,7 +1742,7 @@ class ModelOptimizer:
                     status="failed",
                     started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
                     completed_at=datetime.now().isoformat(),
-                    duration_seconds=time.time() - trial_start_time
+                    duration_seconds=round(time.time() - trial_start_time)
                 )
                 self._thread_safe_progress_callback(trial_progress)
             

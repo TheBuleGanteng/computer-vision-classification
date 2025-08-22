@@ -28,13 +28,13 @@ export function SummaryStats() {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-      {/* Trials Performed */}
+      {/* Trials Completed */}
       <Card>
         <CardContent className="p-4">
           <div className="flex items-center space-x-2">
             <Hash className="h-5 w-5 text-blue-500" />
             <div>
-              <p className="text-sm font-medium text-muted-foreground">Trials Performed</p>
+              <p className="text-sm font-medium text-muted-foreground">Trials Completed</p>
               <p className="text-2xl font-bold">{trialsPerformed}</p>
             </div>
           </div>

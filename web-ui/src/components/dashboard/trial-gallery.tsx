@@ -1,10 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog"
+import { useDashboard } from "./dashboard-provider"
+import { apiClient } from "@/lib/api-client"
 import { 
   Eye,
   Target,
@@ -15,117 +17,17 @@ import {
   Download,
   RotateCcw,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  Loader2
 } from "lucide-react"
 
-// Mock trial data - matches your optimization results structure
-const mockTrials = [
-  {
-    trialNumber: 25,
-    overallScore: 0.8956,
-    accuracyScore: 0.9247,
-    duration: 142,
-    architecture: {
-      type: "CNN",
-      convLayers: 3,
-      denseLayers: 2,
-      totalLayers: 8,
-      filterSizes: ["3x3", "5x5", "3x3"],
-      activations: ["relu", "sigmoid"],
-      parameters: 124567,
-      keyFeatures: ["Batch Norm", "Global Pool", "Dropout: 0.35"]
-    },
-    timestamp: "2 minutes ago"
-  },
-  {
-    trialNumber: 24,
-    overallScore: 0.8834,
-    accuracyScore: 0.9156,
-    duration: 156,
-    architecture: {
-      type: "CNN",
-      convLayers: 2,
-      denseLayers: 3,
-      totalLayers: 9,
-      filterSizes: ["5x5", "3x3"],
-      activations: ["relu", "tanh"],
-      parameters: 98432,
-      keyFeatures: ["Batch Norm", "Max Pool", "Dropout: 0.42"]
-    },
-    timestamp: "5 minutes ago"
-  },
-  {
-    trialNumber: 23,
-    overallScore: 0.8723,
-    accuracyScore: 0.9034,
-    duration: 134,
-    architecture: {
-      type: "CNN",
-      convLayers: 4,
-      denseLayers: 1,
-      totalLayers: 7,
-      filterSizes: ["3x3", "3x3", "5x5", "3x3"],
-      activations: ["relu"],
-      parameters: 156789,
-      keyFeatures: ["No Batch Norm", "Average Pool", "Dropout: 0.28"]
-    },
-    timestamp: "8 minutes ago"
-  },
-  {
-    trialNumber: 22,
-    overallScore: 0.8567,
-    accuracyScore: 0.8945,
-    duration: 98,
-    architecture: {
-      type: "CNN",
-      convLayers: 2,
-      denseLayers: 2,
-      totalLayers: 6,
-      filterSizes: ["5x5", "5x5"],
-      activations: ["swish", "sigmoid"],
-      parameters: 67890,
-      keyFeatures: ["Batch Norm", "Global Pool", "Dropout: 0.50"]
-    },
-    timestamp: "12 minutes ago"
-  },
-  {
-    trialNumber: 21,
-    overallScore: 0.8445,
-    accuracyScore: 0.8823,
-    duration: 189,
-    architecture: {
-      type: "CNN",
-      convLayers: 3,
-      denseLayers: 3,
-      totalLayers: 10,
-      filterSizes: ["3x3", "3x3", "3x3"],
-      activations: ["relu", "tanh"],
-      parameters: 203456,
-      keyFeatures: ["Batch Norm", "Max Pool", "Dropout: 0.33"]
-    },
-    timestamp: "15 minutes ago"
-  },
-  {
-    trialNumber: 20,
-    overallScore: 0.8234,
-    accuracyScore: 0.8756,
-    duration: 167,
-    architecture: {
-      type: "CNN",
-      convLayers: 1,
-      denseLayers: 4,
-      totalLayers: 8,
-      filterSizes: ["7x7"],
-      activations: ["relu", "sigmoid"],
-      parameters: 89012,
-      keyFeatures: ["No Batch Norm", "Average Pool", "Dropout: 0.45"]
-    },
-    timestamp: "18 minutes ago"
-  }
-]
-
 export function TrialGallery() {
-  const [selectedTrial, setSelectedTrial] = useState<typeof mockTrials[0] | null>(null)
+  const { progress, isOptimizationRunning, currentJobId } = useDashboard()
+  const [selectedTrial, setSelectedTrial] = useState<any | null>(null)
+  const [trials, setTrials] = useState<any[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [lastJobId, setLastJobId] = useState<string | null>(null)
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -133,7 +35,71 @@ export function TrialGallery() {
     return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
   }
 
-  const handleTrialClick = (trial: typeof mockTrials[0]) => {
+  // Fetch trial data from API
+  const fetchTrialHistory = async (jobId: string) => {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await apiClient.getTrialHistory(jobId)
+      const rawTrials = response.trials || []
+      
+      // Deduplicate trials by trial_id and trial_number to prevent duplicate keys
+      const uniqueTrials = rawTrials.filter((trial, index, array) => {
+        const firstIndex = array.findIndex(t => 
+          (t.trial_id && trial.trial_id && t.trial_id === trial.trial_id) ||
+          (t.trial_number !== undefined && trial.trial_number !== undefined && t.trial_number === trial.trial_number)
+        )
+        return firstIndex === index
+      })
+      
+      setTrials(uniqueTrials)
+      console.log('Fetched trial history:', response)
+      console.log('Deduplicated trials:', uniqueTrials)
+    } catch (err) {
+      console.error('Failed to fetch trial history:', err)
+      setError(err instanceof Error ? err.message : 'Failed to fetch trial data')
+      // Fallback to empty array on error
+      setTrials([])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Effect to fetch trial data when job ID changes
+  useEffect(() => {
+    if (currentJobId) {
+      // If this is a new job ID (different from the last one), clear previous trials
+      if (lastJobId && currentJobId !== lastJobId) {
+        setTrials([])
+      }
+      setLastJobId(currentJobId)
+      fetchTrialHistory(currentJobId)
+    }
+    // Note: Don't clear trials when currentJobId becomes null to preserve them after cancellation
+  }, [currentJobId, lastJobId])
+
+  // Polling effect to update trial data during optimization
+  useEffect(() => {
+    if (!currentJobId) return
+
+    // Poll more frequently during optimization, less frequently when not running
+    const pollFrequency = isOptimizationRunning ? 2000 : 10000 // 2s when running, 10s when idle
+    
+    const pollInterval = setInterval(() => {
+      fetchTrialHistory(currentJobId)
+    }, pollFrequency)
+
+    return () => clearInterval(pollInterval)
+  }, [currentJobId, isOptimizationRunning])
+
+  // Also poll immediately when optimization status changes
+  useEffect(() => {
+    if (currentJobId && isOptimizationRunning) {
+      fetchTrialHistory(currentJobId)
+    }
+  }, [isOptimizationRunning, currentJobId])
+
+  const handleTrialClick = (trial: any) => {
     setSelectedTrial(trial)
   }
 
@@ -153,104 +119,129 @@ export function TrialGallery() {
               </p>
             </div>
             <Badge variant="outline">
-              {mockTrials.length} trials completed
+              {trials.filter(trial => trial.status === 'completed').length} trials completed
             </Badge>
           </div>
 
+          {/* Loading State */}
+          {isLoading && (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin mr-2" />
+              <span>Loading trial data...</span>
+            </div>
+          )}
+
+          {/* Error State */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+              <p className="text-red-700 text-sm">
+                Error loading trial data: {error}
+              </p>
+            </div>
+          )}
+
+          {/* Empty State */}
+          {!isLoading && !error && trials.length === 0 && (
+            <div className="text-center py-8 text-muted-foreground">
+              <Layers className="h-12 w-12 mx-auto mb-4 opacity-50" />
+              <p>No trials available yet.</p>
+              <p className="text-sm">Trials will appear here as optimization progresses.</p>
+            </div>
+          )}
+
           {/* Trial Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {mockTrials.map((trial) => (
-              <Card 
-                key={trial.trialNumber} 
-                className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50"
-                onClick={() => handleTrialClick(trial)}
+          {!isLoading && !error && trials.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {trials.map((trial, index) => {
+                // Calculate trial number for display
+                const displayTrialNumber = trial.trial_number !== undefined && trial.trial_number !== null 
+                  ? trial.trial_number 
+                  : trials.length - index  // For in-progress trials, calculate based on position
+                
+                // Create a robust unique key combining multiple identifiers
+                const uniqueKey = `trial_${trial.trial_id || ''}_${displayTrialNumber}_${index}`
+                return (
+                <Card 
+                  key={uniqueKey} 
+                  className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50"
+                  onClick={() => handleTrialClick(trial)}
               >
                 <CardContent className="p-4">
                   {/* Trial Header */}
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
                       <Hash className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-semibold">Trial {trial.trialNumber}</span>
+                      <span className="font-semibold">Trial {displayTrialNumber}</span>
                     </div>
-                    <Badge variant={trial.overallScore > 0.85 ? "default" : "secondary"}>
-                      {trial.architecture.type}
+                    <Badge 
+                      variant={
+                        trial.status === 'completed' ? "default" : 
+                        trial.status === 'running' ? "secondary" : 
+                        trial.status === 'failed' ? "destructive" : 
+                        trial.status === 'cancelled' ? "outline" : 
+                        "secondary"
+                      }
+                      className={
+                        trial.status === 'completed' ? "bg-green-500 hover:bg-green-600 text-white font-normal" :
+                        trial.status === 'running' ? "bg-yellow-500 hover:bg-yellow-600 text-white font-normal" :
+                        trial.status === 'failed' ? "bg-red-500 hover:bg-red-600 text-white font-normal" :
+                        trial.status === 'cancelled' ? "bg-gray-500 hover:bg-gray-600 text-white font-normal" :
+                        "bg-gray-400 hover:bg-gray-500 text-white font-normal"
+                      }
+                    >
+                      {trial.status === 'running' ? 'In Progress' : 
+                       trial.status === 'completed' ? 'Completed' :
+                       trial.status === 'failed' ? 'Failed' :
+                       trial.status === 'cancelled' ? 'Cancelled' :
+                       'Unknown'}
                     </Badge>
                   </div>
 
-                  {/* Scores */}
+                  {/* Basic Info */}
                   <div className="space-y-2 mb-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-1">
-                        <Activity className="h-3 w-3 text-purple-500" />
-                        <span className="text-muted-foreground">Overall Score</span>
+                    {trial.started_at && (
+                      <div className="flex items-center justify-between text-sm">
+                        <div className="flex items-center gap-1">
+                          <Eye className="h-3 w-3 text-blue-500" />
+                          <span className="text-muted-foreground">Started</span>
+                        </div>
+                        <span className="font-medium text-xs">{new Date(trial.started_at).toLocaleTimeString()}</span>
                       </div>
-                      <span className="font-medium">{(trial.overallScore * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-1">
-                        <Target className="h-3 w-3 text-green-500" />
-                        <span className="text-muted-foreground">Accuracy</span>
+                    )}
+                    {trial.duration_seconds && (
+                      <div className="flex items-center justify-between text-sm">
+                        <div className="flex items-center gap-1">
+                          <Clock className="h-3 w-3 text-orange-500" />
+                          <span className="text-muted-foreground">Duration</span>
+                        </div>
+                        <span className="font-medium">{formatDuration(trial.duration_seconds)}</span>
                       </div>
-                      <span className="font-medium">{(trial.accuracyScore * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-1">
-                        <Clock className="h-3 w-3 text-orange-500" />
-                        <span className="text-muted-foreground">Duration</span>
-                      </div>
-                      <span className="font-medium">{formatDuration(trial.duration)}</span>
-                    </div>
+                    )}
                   </div>
 
-                  {/* Architecture Summary */}
+                  {/* Architecture Info */}
                   <div className="space-y-2 mb-3">
                     <div className="flex items-center gap-1 text-sm">
                       <Layers className="h-3 w-3 text-indigo-500" />
                       <span className="text-muted-foreground">Architecture</span>
                     </div>
-                    <div className="text-xs space-y-1">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Conv Layers:</span>
-                        <span>{trial.architecture.convLayers}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Dense Layers:</span>
-                        <span>{trial.architecture.denseLayers}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Filters:</span>
-                        <span>{trial.architecture.filterSizes.join(", ")}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Parameters:</span>
-                        <span>{(trial.architecture.parameters / 1000).toFixed(0)}K</span>
-                      </div>
+                    <div className="text-xs text-muted-foreground">
+                      {trial.architecture ? 'Architecture details available' : 'Architecture data pending...'}
                     </div>
                   </div>
 
-                  {/* Key Features */}
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">Key features:</p>
-                    <div className="flex flex-wrap gap-1">
-                      {trial.architecture.keyFeatures.map((feature, index) => (
-                        <Badge key={index} variant="outline" className="text-xs">
-                          {feature}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Timestamp */}
+                  {/* Trial ID */}
                   <div className="mt-3 pt-2 border-t border-border/50">
-                    <p className="text-xs text-muted-foreground flex items-center gap-1">
-                      <Eye className="h-3 w-3" />
-                      {trial.timestamp}
+                    <p className="text-xs text-muted-foreground">
+                      ID: {trial.trial_id || 'N/A'}
                     </p>
                   </div>
                 </CardContent>
               </Card>
-            ))}
-          </div>
+              )
+              })}
+            </div>
+          )}
         </CardContent>
       </Card>
 
