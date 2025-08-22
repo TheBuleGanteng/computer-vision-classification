@@ -203,20 +203,20 @@ export function TrialGallery() {
                       <div className="flex items-center justify-between text-sm">
                         <div className="flex items-center gap-1">
                           <Eye className="h-3 w-3 text-blue-500" />
-                          <span className="text-muted-foreground">Started</span>
+                          <span className="text-muted-foreground">Started:</span>
                         </div>
                         <span className="font-medium text-xs">{new Date(trial.started_at).toLocaleTimeString()}</span>
                       </div>
                     )}
-                    {trial.duration_seconds && (
-                      <div className="flex items-center justify-between text-sm">
-                        <div className="flex items-center gap-1">
-                          <Clock className="h-3 w-3 text-orange-500" />
-                          <span className="text-muted-foreground">Duration</span>
-                        </div>
-                        <span className="font-medium">{formatDuration(trial.duration_seconds)}</span>
+                    <div className="flex items-center justify-between text-sm">
+                      <div className="flex items-center gap-1">
+                        <Clock className="h-3 w-3 text-orange-500" />
+                        <span className="text-muted-foreground">Duration:</span>
                       </div>
-                    )}
+                      <span className="font-medium">
+                        {trial.duration_seconds ? formatDuration(trial.duration_seconds) : 'N/A'}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Architecture Info */}
@@ -225,9 +225,73 @@ export function TrialGallery() {
                       <Layers className="h-3 w-3 text-indigo-500" />
                       <span className="text-muted-foreground">Architecture</span>
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {trial.architecture ? 'Architecture details available' : 'Architecture data pending...'}
-                    </div>
+                    
+                    {trial.architecture ? (
+                      <div className="text-xs space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Type:</span>
+                          <span className="font-medium">{trial.architecture.type}</span>
+                        </div>
+                        
+                        {trial.architecture.type === 'CNN' && (
+                          <>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Conv Layers:</span>
+                              <span className="font-medium">{trial.architecture.conv_layers?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Filters:</span>
+                              <span className="font-medium">{trial.architecture.filters_per_layer?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Kernel Size (pixels):</span>
+                              <span className="font-medium">
+                                {Array.isArray(trial.architecture.kernel_size) 
+                                  ? `${trial.architecture.kernel_size[0]}×${trial.architecture.kernel_size[1]}`
+                                  : trial.architecture.kernel_size}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Layers:</span>
+                              <span className="font-medium">{trial.architecture.dense_layers?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Nodes:</span>
+                              <span className="font-medium">{trial.architecture.first_dense_nodes?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Activation:</span>
+                              <span className="font-medium capitalize">{trial.architecture.activation}</span>
+                            </div>
+                          </>
+                        )}
+                        
+                        {trial.architecture.type === 'LSTM' && (
+                          <>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">LSTM Units:</span>
+                              <span className="font-medium">{trial.architecture.lstm_units?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Layers:</span>
+                              <span className="font-medium">{trial.architecture.dense_layers?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Nodes:</span>
+                              <span className="font-medium">{trial.architecture.first_dense_nodes?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Activation:</span>
+                              <span className="font-medium capitalize">{trial.architecture.activation}</span>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">
+                        Architecture data pending...
+                      </div>
+                    )}
                   </div>
 
                   {/* Trial ID */}

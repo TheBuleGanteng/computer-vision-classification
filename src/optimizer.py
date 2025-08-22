@@ -1095,6 +1095,47 @@ class ModelOptimizer:
         
         return params
 
+    def _extract_architecture_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract architecture information from hyperparameters for display in trial gallery
+        
+        Args:
+            params: Hyperparameter dictionary from _suggest_hyperparameters
+            
+        Returns:
+            Dictionary containing structured architecture information
+        """
+        architecture_type = params.get('architecture_type', 'unknown')
+        
+        if architecture_type == 'cnn':
+            return {
+                'type': 'CNN',
+                'conv_layers': params.get('num_layers_conv', 0),
+                'filters_per_layer': params.get('filters_per_conv_layer', 0),
+                'kernel_size': params.get('kernel_size', (0, 0)),
+                'dense_layers': params.get('num_layers_hidden', 0),
+                'first_dense_nodes': params.get('first_hidden_layer_nodes', 0),
+                'activation': params.get('activation', 'unknown'),
+                'batch_normalization': params.get('batch_normalization', False),
+                'use_global_pooling': params.get('use_global_pooling', False),
+                'kernel_initializer': params.get('kernel_initializer', 'unknown')
+            }
+        elif architecture_type == 'lstm':
+            return {
+                'type': 'LSTM',
+                'lstm_units': params.get('lstm_units', 0),
+                'dense_layers': params.get('num_layers_hidden', 0),
+                'first_dense_nodes': params.get('first_hidden_layer_nodes', 0),
+                'activation': params.get('activation', 'unknown'),
+                'dropout_rate': params.get('dropout_rate', 0.0),
+                'recurrent_dropout': params.get('recurrent_dropout', 0.0)
+            }
+        else:
+            return {
+                'type': 'Unknown',
+                'raw_params': params
+            }
+
     # RunPod Service Methods (replacing GPU proxy)
     
     def _should_use_runpod_service(self) -> bool:
@@ -1695,6 +1736,9 @@ class ModelOptimizer:
                 max_epochs = self.config.max_epochs_per_trial
                 final_epochs = max(min_epochs, min(trial_epochs, max_epochs))
                 
+                # Extract architecture information for display
+                architecture_info = self._extract_architecture_info(params)
+                
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{trial.number}",
                     trial_number=trial.number,
@@ -1702,7 +1746,9 @@ class ModelOptimizer:
                     started_at=datetime.now().isoformat(),
                     current_epoch=0,
                     total_epochs=final_epochs,
-                    epoch_progress=0.0
+                    epoch_progress=0.0,
+                    architecture=architecture_info,
+                    hyperparameters=params
                 )
                 self._thread_safe_progress_callback(trial_progress)
             
@@ -1717,6 +1763,9 @@ class ModelOptimizer:
             # Track trial completion in progress aggregation
             if self.progress_callback:
                 trial_end_time = time.time()
+                # Extract architecture information for display
+                architecture_info = self._extract_architecture_info(params)
+                
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{trial.number}",
                     trial_number=trial.number,
@@ -1724,6 +1773,8 @@ class ModelOptimizer:
                     started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
                     completed_at=datetime.now().isoformat(),
                     duration_seconds=round(trial_end_time - trial_start_time),
+                    architecture=architecture_info,
+                    hyperparameters=params,
                     performance={'objective_value': objective_value}
                 )
                 self._thread_safe_progress_callback(trial_progress)
@@ -1736,13 +1787,25 @@ class ModelOptimizer:
         except Exception as e:
             # Track trial failure in progress aggregation
             if self.progress_callback:
+                # Extract architecture information if params are available
+                architecture_info = None
+                hyperparameters = None
+                try:
+                    if 'params' in locals():
+                        architecture_info = self._extract_architecture_info(params)
+                        hyperparameters = params
+                except:
+                    pass  # If architecture extraction fails, proceed without it
+                
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{trial.number}",
                     trial_number=trial.number,
                     status="failed",
                     started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
                     completed_at=datetime.now().isoformat(),
-                    duration_seconds=round(time.time() - trial_start_time)
+                    duration_seconds=round(time.time() - trial_start_time),
+                    architecture=architecture_info,
+                    hyperparameters=hyperparameters
                 )
                 self._thread_safe_progress_callback(trial_progress)
             

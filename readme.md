@@ -241,45 +241,379 @@ class EpochProgressCallback:
 ```
 
 
-#### **⚠️ TRIAL GALLERY BACKEND CONNECTION - PARTIAL PROGRESS**
+#### **✅ TRIAL GALLERY ARCHITECTURE INTEGRATION COMPLETE**
 **Date**: August 22, 2025  
-**Status**: **BASIC TRIAL METADATA CONNECTED - ARCHITECTURE DATA PENDING ⚠️**  
-**Achievement**: **Basic trial display working - architecture details required**
+**Status**: **COMPREHENSIVE ARCHITECTURE DATA DISPLAY WORKING ✅**  
+**Achievement**: **Real-time trial architecture details fully integrated**
 
-##### **✅ Completed: Basic Trial Connection**
-Successfully connected trial gallery to basic backend optimization data:
+##### **✅ Completed: Full Architecture Connection**
+Successfully connected trial gallery to comprehensive backend architecture data:
 
-- ✅ **Trial History API**: New `/jobs/{job_id}/trials` endpoint provides basic trial data
-- ✅ **Real-time Updates**: Gallery polls backend every 2 seconds during optimization 
+- ✅ **Trial History API**: Enhanced `/jobs/{job_id}/trials` endpoint with complete architecture data
+- ✅ **Real-time Updates**: Gallery polls backend every 2 seconds with full architecture details
 - ✅ **Trial Status Display**: Live status updates (Running → Completed) with color-coded badges
-- ✅ **Basic Metadata**: Trial numbers, timestamps, duration, and IDs displayed correctly
-- ✅ **Deduplication Logic**: Robust trial filtering to prevent duplicate entries
-- ✅ **Cancellation Preservation**: Trials remain visible after optimization cancellation
-- ✅ **UI Enhancements**: Proper polling cleanup, target metric labels, duration integers
+- ✅ **Complete Metadata**: Trial numbers, timestamps, duration display, and IDs
+- ✅ **Architecture Extraction**: Backend method extracts structured architecture from hyperparameters
+- ✅ **CNN Architecture Display**: Conv layers, filters, kernel size, dense layers, nodes, activation
+- ✅ **LSTM Architecture Display**: LSTM units, dense layers, nodes, activation functions
+- ✅ **Professional Formatting**: Number commas, kernel size units, consistent field labels
+- ✅ **Always-Visible Fields**: Duration shows "N/A" for running trials, actual time when complete
 
-##### **⚠️ Pending: Architecture Data Integration**
-**Target**: Connect detailed architecture information to trial gallery tiles:
-- ❌ **Convolutional Layers**: Number of conv layers per trial
-- ❌ **Filter Sizes**: Conv layer filter dimensions (3x3, 5x5, etc.)
-- ❌ **Dense/Hidden Layers**: Number and configuration of dense layers  
-- ❌ **Node Counts**: Neurons per dense layer
-- ❌ **Activation Functions**: ReLU, Tanh, etc. used in each trial
-- ❌ **Parameter Counts**: Total trainable parameters per architecture
-- ❌ **Performance Metrics**: Accuracy, loss, health scores per trial
-- ❌ **Architecture Serialization**: Structured data for 3D visualization preparation
+##### **✅ Technical Implementation Complete**
 
-##### **Implementation Plan - Next Steps**
-**Step 2**: Connect trial performance data (accuracy, overall scores, health metrics)
-**Step 3**: Parse and display architecture details from backend optimization data
-**Step 4**: Connect detailed architecture breakdown (layers, filters, activations)
-**Step 5**: Implement comprehensive modal view with architecture visualization
-**Step 6**: Prepare architecture data structure for 3D rendering integration
+**1. Backend Architecture Data Extraction**
+```python
+# New method in optimizer.py
+def _extract_architecture_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract architecture information from hyperparameters for display"""
+    architecture_type = params.get('architecture_type', 'unknown')
+    
+    if architecture_type == 'cnn':
+        return {
+            'type': 'CNN',
+            'conv_layers': params.get('num_layers_conv', 0),
+            'filters_per_layer': params.get('filters_per_conv_layer', 0),
+            'kernel_size': params.get('kernel_size', (0, 0)),
+            'dense_layers': params.get('num_layers_hidden', 0),
+            'first_dense_nodes': params.get('first_hidden_layer_nodes', 0),
+            'activation': params.get('activation', 'unknown'),
+            # Additional CNN-specific fields...
+        }
+    elif architecture_type == 'lstm':
+        return {
+            'type': 'LSTM',
+            'lstm_units': params.get('lstm_units', 0),
+            'dense_layers': params.get('num_layers_hidden', 0),
+            # Additional LSTM-specific fields...
+        }
+```
 
-**Data Requirements Still Needed:**
-- Enhanced trial history with architecture serialization
-- Backend extraction of model layer details from optimization results
-- API endpoints for detailed architecture data per trial
-- Frontend parsing of complex architecture structures
+**2. Enhanced TrialProgress Data**
+- Updated all TrialProgress creation points to include `architecture` and `hyperparameters`
+- Architecture data populated for running, completed, and failed trials
+- Graceful handling when architecture extraction fails
+
+**3. Frontend Architecture Display**
+```typescript
+// Comprehensive architecture display with conditional rendering
+{trial.architecture ? (
+  <div className="text-xs space-y-1">
+    <div className="flex justify-between">
+      <span className="text-muted-foreground">Type:</span>
+      <span className="font-medium">{trial.architecture.type}</span>
+    </div>
+    
+    {trial.architecture.type === 'CNN' && (
+      // CNN-specific fields with proper formatting
+      <>
+        <div className="flex justify-between">
+          <span className="text-muted-foreground">Kernel Size (pixels):</span>
+          <span className="font-medium">3×3</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-muted-foreground">Dense Nodes:</span>
+          <span className="font-medium">1,024</span>
+        </div>
+      </>
+    )}
+  </div>
+) : 'Architecture data pending...'}
+```
+
+**4. Professional UI Formatting**
+- **Number Formatting**: All numeric values use `.toLocaleString()` for comma separation
+- **Unit Clarity**: "Kernel Size (pixels): 3×3" clearly indicates measurement units
+- **Field Consistency**: "Started:" and "Duration:" use colons for professional appearance
+- **Always-Visible Duration**: Shows "N/A" for running trials, actual time when complete
+
+##### **✅ Architecture Information Now Displayed**
+
+**For CNN Trials:**
+- Type: CNN
+- Conv Layers: 1, 2, 3, 4
+- Filters: 16, 32, 64, 128, 256
+- Kernel Size (pixels): 3×3, 5×5
+- Dense Layers: 1, 2, 3, 4
+- Dense Nodes: 64, 128, 256, 512, 1,024
+- Activation: Relu, Leakyrelu, Swish
+
+**For LSTM Trials:**
+- Type: LSTM
+- LSTM Units: 32, 64, 128, 256
+- Dense Layers: 1, 2, 3, 4
+- Dense Nodes: 64, 128, 256, 512, 1,024
+- Activation: Relu, Tanh, etc.
+
+##### **📋 NEXT PHASE: TRIAL PERFORMANCE METRICS INTEGRATION**
+
+**Objective**: Enhance each trial gallery tile with comprehensive performance metrics including accuracy, total score, and health components.
+
+#### **🔍 PHASE 1: METRICS ANALYSIS & REQUIREMENTS**
+
+##### **Required Performance Metrics for Gallery Display**
+
+**1. Core Performance Metrics**
+- **Accuracy**: Raw model accuracy score (0.0-1.0, display as percentage)
+- **Total Score**: Combined objective value (accuracy + health for health mode, accuracy only for simple mode)
+- **Loss**: Final training/validation loss value
+
+**2. Health Metrics Components** (for health mode trials)
+- **Gradient Health**: Gradient norm stability and flow quality
+- **Training Stability**: Loss convergence and training dynamics
+- **Dead/Saturated Filters**: Filter activation analysis
+- **Overall Health Score**: Composite health metric (0.0-1.0)
+
+##### **Current Metrics Availability Assessment**
+
+**✅ Already Available in Backend:**
+- **Objective Value**: Available in `TrialProgress.performance['objective_value']`
+- **Raw Accuracy**: Tracked in `ModelOptimizer._last_trial_accuracy`
+- **Health Metrics**: Calculated by `HealthAnalyzer` during training
+- **Training History**: Loss and accuracy per epoch stored during training
+
+**❌ Missing from TrialProgress:**
+- **Individual Health Components**: Health breakdown not included in trial data
+- **Final Loss Value**: Training loss not captured in TrialProgress
+- **Validation Metrics**: Validation accuracy/loss not stored separately
+
+#### **🔧 PHASE 2: BACKEND IMPLEMENTATION PLAN**
+
+##### **Step 2.1: Enhance TrialProgress Structure**
+```python
+# Add to TrialProgress class in optimizer.py
+class TrialProgress:
+    # ... existing fields ...
+    
+    # Performance Metrics
+    accuracy: Optional[float] = None  # Raw accuracy (0.0-1.0)
+    total_score: Optional[float] = None  # Objective value
+    final_loss: Optional[float] = None  # Final training loss
+    validation_accuracy: Optional[float] = None  # Validation accuracy
+    validation_loss: Optional[float] = None  # Validation loss
+    
+    # Health Metrics (populated for health mode)
+    health_score: Optional[float] = None  # Overall health (0.0-1.0)
+    gradient_health: Optional[float] = None  # Gradient stability
+    training_stability: Optional[float] = None  # Loss convergence
+    filter_health: Optional[float] = None  # Dead/saturated filters
+```
+
+##### **Step 2.2: Capture Metrics During Training**
+**Location**: `optimizer.py` - `_objective_function()` method
+
+**For Local Training** (`_train_locally_for_trial`):
+```python
+# After model training completes
+final_metrics = model_builder.get_final_metrics()  # New method needed
+health_analysis = health_analyzer.get_health_summary()  # New method needed
+
+# Update TrialProgress with performance data
+trial_progress = TrialProgress(
+    # ... existing fields ...
+    accuracy=self._last_trial_accuracy,
+    total_score=objective_value,
+    final_loss=final_metrics.get('loss'),
+    validation_accuracy=final_metrics.get('val_accuracy'),
+    validation_loss=final_metrics.get('val_loss'),
+    health_score=health_analysis.get('overall_health'),
+    gradient_health=health_analysis.get('gradient_health'),
+    training_stability=health_analysis.get('training_stability'),
+    filter_health=health_analysis.get('filter_health')
+)
+```
+
+**For RunPod Training** (`_train_via_runpod_service`):
+```python
+# Enhance RunPod response parsing to extract metrics
+runpod_result = response.json()
+result_data = runpod_result.get('output', {})
+
+# Extract performance metrics from RunPod response
+trial_progress = TrialProgress(
+    # ... existing fields ...
+    accuracy=result_data.get('accuracy'),
+    total_score=result_data.get('objective_value'),
+    final_loss=result_data.get('final_loss'),
+    # Health metrics from RunPod health analysis
+    health_score=result_data.get('health_score'),
+    gradient_health=result_data.get('gradient_health'),
+    # ... other health components
+)
+```
+
+##### **Step 2.3: Enhance ModelBuilder for Metrics Extraction**
+**Location**: `model_builder.py`
+
+```python
+class ModelBuilder:
+    def get_final_metrics(self) -> Dict[str, float]:
+        """Extract final training metrics for trial display"""
+        if not hasattr(self, 'training_history') or not self.training_history:
+            return {}
+        
+        history = self.training_history.history
+        return {
+            'loss': history['loss'][-1] if 'loss' in history else None,
+            'accuracy': history['accuracy'][-1] if 'accuracy' in history else None,
+            'val_loss': history['val_loss'][-1] if 'val_loss' in history else None,
+            'val_accuracy': history['val_accuracy'][-1] if 'val_accuracy' in history else None
+        }
+```
+
+##### **Step 2.4: Enhance HealthAnalyzer for Summary Data**
+**Location**: `health_analyzer.py`
+
+```python
+class HealthAnalyzer:
+    def get_health_summary(self) -> Dict[str, float]:
+        """Get summarized health metrics for trial display"""
+        return {
+            'overall_health': self.calculate_overall_health(),
+            'gradient_health': self.get_gradient_stability_score(),
+            'training_stability': self.get_training_stability_score(),
+            'filter_health': self.get_filter_health_score()
+        }
+```
+
+##### **Step 2.5: Enhance RunPod Handler Response**
+**Location**: `runpod_service/handler.py`
+
+```python
+# Enhance response to include detailed metrics
+return {
+    "accuracy": final_accuracy,
+    "objective_value": objective_value,
+    "final_loss": training_history.history['loss'][-1],
+    "validation_accuracy": training_history.history.get('val_accuracy', [None])[-1],
+    "validation_loss": training_history.history.get('val_loss', [None])[-1],
+    
+    # Health metrics (for health mode)
+    "health_score": health_analysis.get('overall_health'),
+    "gradient_health": health_analysis.get('gradient_health'),
+    "training_stability": health_analysis.get('training_stability'),
+    "filter_health": health_analysis.get('filter_health'),
+    
+    # Existing fields...
+    "training_time": training_time,
+    "model_summary": model_summary
+}
+```
+
+#### **🎨 PHASE 3: FRONTEND IMPLEMENTATION PLAN**
+
+##### **Step 3.1: Add Performance Metrics Section to Trial Gallery**
+**Location**: `trial-gallery.tsx`
+
+```typescript
+{/* Performance Metrics */}
+<div className="space-y-2 mb-3">
+  <div className="flex items-center gap-1 text-sm">
+    <Target className="h-3 w-3 text-green-500" />
+    <span className="text-muted-foreground">Performance</span>
+  </div>
+  
+  {trial.accuracy !== undefined && (
+    <div className="flex justify-between text-xs">
+      <span className="text-muted-foreground">Accuracy:</span>
+      <span className="font-medium">{(trial.accuracy * 100).toFixed(1)}%</span>
+    </div>
+  )}
+  
+  {trial.total_score !== undefined && (
+    <div className="flex justify-between text-xs">
+      <span className="text-muted-foreground">Total Score:</span>
+      <span className="font-medium">{(trial.total_score * 100).toFixed(1)}%</span>
+    </div>
+  )}
+  
+  {trial.health_score !== undefined && (
+    <div className="flex justify-between text-xs">
+      <span className="text-muted-foreground">Health Score:</span>
+      <span className="font-medium">{(trial.health_score * 100).toFixed(1)}%</span>
+    </div>
+  )}
+</div>
+```
+
+##### **Step 3.2: Health Metrics Breakdown (Optional Expandable)**
+```typescript
+{/* Health Details (expandable) */}
+{trial.health_score !== undefined && (
+  <div className="text-xs space-y-1 border-t pt-2">
+    <div className="flex justify-between">
+      <span className="text-muted-foreground">Gradient Health:</span>
+      <span className="font-medium">{(trial.gradient_health * 100).toFixed(0)}%</span>
+    </div>
+    <div className="flex justify-between">
+      <span className="text-muted-foreground">Training Stability:</span>
+      <span className="font-medium">{(trial.training_stability * 100).toFixed(0)}%</span>
+    </div>
+    <div className="flex justify-between">
+      <span className="text-muted-foreground">Filter Health:</span>
+      <span className="font-medium">{(trial.filter_health * 100).toFixed(0)}%</span>
+    </div>
+  </div>
+)}
+```
+
+#### **🧪 PHASE 4: TESTING & VALIDATION STRATEGY**
+
+##### **Step 4.1: Backend Metrics Verification**
+**Testing Approach**:
+1. **Unit Tests**: Verify `get_final_metrics()` and `get_health_summary()` return correct data
+2. **Integration Tests**: Confirm TrialProgress includes all performance fields
+3. **API Endpoint Tests**: Validate `/jobs/{job_id}/trials` returns enhanced trial data
+4. **RunPod Service Tests**: Ensure remote training returns complete metrics
+
+**Validation Commands**:
+```bash
+# Test local optimization with metrics capture
+python optimizer.py dataset=mnist trials=3 mode=health max_epochs_per_trial=5
+
+# Verify API response includes performance data
+curl http://localhost:8000/jobs/{job_id}/trials | jq '.trials[0].performance'
+
+# Test RunPod service with metrics
+python optimizer.py dataset=cifar10 trials=2 use_runpod_service=true mode=health
+```
+
+##### **Step 4.2: Frontend Display Verification**
+**UI Testing Checklist**:
+- [ ] Accuracy displays as percentage with 1 decimal place
+- [ ] Total Score shows correctly for both simple and health modes
+- [ ] Health Score only appears for health mode trials
+- [ ] N/A displayed for running trials without completed metrics
+- [ ] Number formatting includes commas where appropriate
+- [ ] Health breakdown components display correctly
+
+##### **Step 4.3: End-to-End Integration Testing**
+**Complete Workflow Tests**:
+1. **Start Optimization via UI** → Verify initial trial tiles show "N/A" for performance
+2. **Monitor Running Trials** → Confirm architecture data appears immediately
+3. **Trial Completion** → Validate all performance metrics populate correctly
+4. **Mode Comparison** → Test simple vs health mode metric differences
+5. **Cancellation Behavior** → Ensure completed trial metrics remain visible
+
+#### **📅 IMPLEMENTATION TIMELINE**
+
+**Phase 1 (Analysis)**: 0.5 days - Requirements and current state analysis ✅
+**Phase 2 (Backend)**: 2-3 days - Metrics extraction and TrialProgress enhancement  
+**Phase 3 (Frontend)**: 1-2 days - UI integration and display formatting
+**Phase 4 (Testing)**: 1-2 days - Comprehensive validation and debugging
+
+**Total Estimated Time**: 4.5-7.5 days
+
+**Dependencies**: 
+- Health analyzer must provide summary methods
+- ModelBuilder must capture final training metrics  
+- RunPod handler must return enhanced response data
+
+**Success Criteria**:
+- All trial tiles display accuracy, total score, and health metrics (when applicable)
+- Metrics update in real-time as trials complete
+- Professional formatting with proper units and precision
+- Health mode shows detailed health breakdown
+- Simple mode shows accuracy-focused metrics only
 
 #### **⚠️ Legacy Integration Issues**
 - ⚠️ **Testing Coverage**: Comprehensive end-to-end testing required
