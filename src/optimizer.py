@@ -450,7 +450,7 @@ class ConcurrentProgressAggregator:
             running_trials=running_trials,
             completed_trials=completed_trials,
             failed_trials=failed_trials,
-            current_best_value=current_best_value,
+            current_best_total_score=current_best_value,
             estimated_time_remaining=estimated_time_remaining
         )
     
@@ -490,6 +490,12 @@ class EpochProgressCallback(keras.callbacks.Callback):
         
     def on_epoch_begin(self, epoch, logs=None):
         """Called at the beginning of each epoch"""
+        # Check for cancellation first
+        if self.optimizer_instance and self.optimizer_instance.is_cancelled():
+            logger.info(f"EpochProgressCallback.on_epoch_begin ... Cancellation detected, stopping training")
+            self.model.stop_training = True
+            return
+        
         self.current_epoch = epoch + 1  # Convert 0-based to 1-based
         self.current_batch = 0
         
@@ -502,6 +508,12 @@ class EpochProgressCallback(keras.callbacks.Callback):
     
     def on_batch_end(self, batch, logs=None):
         """Called at the end of each batch - update progress within epoch"""
+        # Check for cancellation first
+        if self.optimizer_instance and self.optimizer_instance.is_cancelled():
+            logger.info(f"EpochProgressCallback.on_batch_end ... Cancellation detected, stopping training")
+            self.model.stop_training = True
+            return
+        
         self.current_batch = batch + 1  # Convert 0-based to 1-based
         
         if self.total_batches > 0:
@@ -568,7 +580,7 @@ class AggregatedProgress:
     running_trials: List[int]
     completed_trials: List[int]
     failed_trials: List[int]
-    current_best_value: Optional[float]
+    current_best_total_score: Optional[float]
     estimated_time_remaining: Optional[float]
 
 
@@ -583,7 +595,9 @@ class UnifiedProgress:
     running_trials: List[int]
     completed_trials: List[int]
     failed_trials: List[int]
-    current_best_value: Optional[float]
+    current_best_total_score: Optional[float]  # Optimization objective (accuracy or weighted score)
+    current_best_accuracy: Optional[float]     # Raw accuracy for comparison
+    average_duration_per_trial: Optional[float]  # Average duration in seconds
     estimated_time_remaining: Optional[float]
     
     # Current epoch information (from most recent TrialProgress)
@@ -600,7 +614,8 @@ class UnifiedProgress:
             'running_trials': self.running_trials,
             'completed_trials': self.completed_trials,
             'failed_trials': self.failed_trials,
-            'current_best_value': self.current_best_value,
+            'current_best_total_score': self.current_best_total_score,
+            'current_best_accuracy': self.current_best_accuracy,
             'estimated_time_remaining': self.estimated_time_remaining,
             'current_epoch': self.current_epoch,
             'total_epochs': self.total_epochs,
@@ -749,6 +764,9 @@ class ModelOptimizer:
         
         # Progress aggregation infrastructure
         self._progress_aggregator = ConcurrentProgressAggregator(self.config.n_trials)
+        
+        # Cancellation flag for graceful shutdown
+        self._cancelled = threading.Event()
         self._trial_start_times: Dict[int, float] = {}
         self._trial_statuses: Dict[int, str] = {}  # "running", "completed", "failed"
         self._current_epoch_info: Dict[int, Dict[str, Any]] = {}  # Trial -> {current_epoch, total_epochs, epoch_progress}
@@ -760,6 +778,8 @@ class ModelOptimizer:
         # Best trial tracking (protected by _best_trial_lock)
         self._best_trial_number: Optional[int] = None
         self._best_trial_value: Optional[float] = None
+        self._best_trial_accuracy: Optional[float] = None
+        self._last_trial_accuracy: Optional[float] = None  # Temporary storage for latest trial accuracy
         
         # Current trial progress for unified progress updates
         self._current_trial_progress: Optional[TrialProgress] = None
@@ -809,12 +829,13 @@ class ModelOptimizer:
         with self._state_lock:
             return self._best_trial_health
 
-    def update_best_trial(self, trial_number: int, trial_value: float) -> None:
+    def update_best_trial(self, trial_number: int, trial_value: float, trial_accuracy: Optional[float] = None) -> None:
         """Thread-safe method to update best trial tracking"""
         with self._best_trial_lock:
             if self._best_trial_value is None or trial_value > self._best_trial_value:
                 self._best_trial_number = trial_number
                 self._best_trial_value = trial_value
+                self._best_trial_accuracy = trial_accuracy
 
     def _create_unified_progress(self, aggregated_progress: AggregatedProgress, trial_progress: Optional[TrialProgress] = None) -> UnifiedProgress:
         """
@@ -842,13 +863,25 @@ class ModelOptimizer:
         current_trial_id = getattr(current_trial, 'trial_id', None) if current_trial else None
         current_trial_status = getattr(current_trial, 'status', None) if current_trial else None
         
+        # Calculate average duration per trial for completed trials
+        average_duration = None
+        if self._trial_progress_history:
+            completed_durations = [
+                trial.duration_seconds for trial in self._trial_progress_history 
+                if trial.status == "completed" and trial.duration_seconds is not None
+            ]
+            if completed_durations:
+                average_duration = round(sum(completed_durations) / len(completed_durations))
+        
         return UnifiedProgress(
             # Copy all aggregated progress data
             total_trials=aggregated_progress.total_trials,
             running_trials=aggregated_progress.running_trials,
             completed_trials=aggregated_progress.completed_trials,
             failed_trials=aggregated_progress.failed_trials,
-            current_best_value=aggregated_progress.current_best_value,
+            current_best_total_score=aggregated_progress.current_best_total_score,
+            current_best_accuracy=self._best_trial_accuracy,  # Track raw accuracy separately
+            average_duration_per_trial=average_duration,
             estimated_time_remaining=aggregated_progress.estimated_time_remaining,
             # Add epoch information from current trial
             current_epoch=current_epoch,
@@ -862,6 +895,15 @@ class ModelOptimizer:
         """Thread-safe method to get best trial info"""
         with self._best_trial_lock:
             return self._best_trial_number, self._best_trial_value
+    
+    def cancel(self) -> None:
+        """Request cancellation of the optimization process"""
+        logger.info("running ModelOptimizer.cancel ... Cancellation requested")
+        self._cancelled.set()
+    
+    def is_cancelled(self) -> bool:
+        """Check if cancellation has been requested"""
+        return self._cancelled.is_set()
         
     def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
         """
@@ -876,6 +918,9 @@ class ModelOptimizer:
             # Update trial status tracking
             self._trial_statuses[trial_progress.trial_number] = trial_progress.status
             logger.debug(f"running _thread_safe_progress_callback ... updated trial {trial_progress.trial_number} status to '{trial_progress.status}'")
+            
+            # Add trial progress to history for duration calculations
+            self._trial_progress_history.append(trial_progress)
             
             # Call user-provided progress callback if available
             if self.progress_callback:
@@ -1146,6 +1191,9 @@ class ModelOptimizer:
             logger.debug(f"running _calculate_objective_from_service_response ... Basic metrics: acc={test_accuracy:.4f}, loss={test_loss:.4f}")
             logger.debug(f"running _calculate_objective_from_service_response ... Health metrics: overall={overall_health:.3f}")
             
+            # Store the raw accuracy for best trial tracking
+            self._last_trial_accuracy = test_accuracy
+            
             # Calculate objective based on optimization mode and target
             if self.config.objective == OptimizationObjective.VAL_ACCURACY:
                 primary_value = test_accuracy
@@ -1371,6 +1419,9 @@ class ModelOptimizer:
             logger.debug(f"running _train_locally_for_trial ... - Test accuracy: {test_accuracy:.4f}")
             logger.debug(f"running _train_locally_for_trial ... - Overall health: {overall_health:.3f}")
             
+            # Store the raw accuracy for best trial tracking
+            self._last_trial_accuracy = test_accuracy
+            
             # Calculate objective (reuse same logic as service response)
             if self.config.objective == OptimizationObjective.VAL_ACCURACY:
                 if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
@@ -1488,6 +1539,11 @@ class ModelOptimizer:
         Returns:
             Objective value (higher is better for maximization objectives)
         """
+        # Check for cancellation at the start of each trial
+        if self.is_cancelled():
+            logger.info(f"running ModelOptimizer._objective_function ... Trial {trial.number} cancelled")
+            raise optuna.TrialPruned()
+        
         trial_start_time = time.time()
     
         # Track trial start in progress aggregation (basic info only, epochs added later)
@@ -1606,8 +1662,8 @@ class ModelOptimizer:
                 )
                 self._thread_safe_progress_callback(trial_progress)
             
-            # Update best trial tracking
-            self.update_best_trial(trial.number, objective_value)
+            # Update best trial tracking with both objective value and raw accuracy
+            self.update_best_trial(trial.number, objective_value, self._last_trial_accuracy)
             
             return objective_value
             

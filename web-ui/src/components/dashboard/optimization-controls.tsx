@@ -6,6 +6,7 @@ import { Select, SelectItem } from "@/components/ui/select"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tooltip } from "@/components/ui/tooltip"
 import { apiClient } from "@/lib/api-client"
+import { useDashboard } from "./dashboard-provider"
 import { 
   Play, 
   Square, 
@@ -28,18 +29,18 @@ const DATASETS = [
 
 // Target metric options for optimization
 const TARGET_METRICS = [
-  { value: "health", label: "Accuracy + model health (recommended)" },
+  { value: "health", label: "Accuracy + model health" },
   { value: "simple", label: "Accuracy only" }
 ]
 
 export function OptimizationControls() {
+  const { progress, optimizationMode, isOptimizationRunning, setProgress, setOptimizationMode, setIsOptimizationRunning } = useDashboard()
+  
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
-  const [isOptimizationRunning, setIsOptimizationRunning] = useState(false)
   const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [progress, setProgress] = useState<any>(null)
   const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
   const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
 
@@ -63,6 +64,13 @@ export function OptimizationControls() {
       }
     }
   }, [isOptimizationRunning, optimizationStartTime])
+
+  // Sync selectedTargetMetric with shared optimization mode
+  useEffect(() => {
+    if (selectedTargetMetric && selectedTargetMetric !== "") {
+      setOptimizationMode(selectedTargetMetric as "simple" | "health")
+    }
+  }, [selectedTargetMetric, setOptimizationMode])
 
   const handleOptimizationToggle = async () => {
     if (isOptimizationRunning && currentJobId) {
@@ -329,7 +337,7 @@ export function OptimizationControls() {
           <div className="mt-4 space-y-2">
             <div className="flex items-center gap-2 text-sm text-blue-600">
               <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse" />
-              Optimization in progress for {DATASETS.find(d => d.value === selectedDataset)?.label} 
+              Optimization in progress for {DATASETS.find(d => d.value === selectedDataset)?.label}{" "} 
               using {TARGET_METRICS.find(m => m.value === selectedTargetMetric)?.label.toLowerCase()}...
             </div>
             
@@ -360,10 +368,10 @@ export function OptimizationControls() {
                     </div>
                   )}
                 </div>
-                {progress.best_value !== null && (
+                {progress.best_total_score !== null && progress.best_total_score !== undefined && (
                   <div>
-                    <span>Best score: </span>
-                    <span className="font-medium">{(progress.best_value * 100).toFixed(1)}%</span>
+                    <span>Best total score {selectedTargetMetric === 'health' ? 'accuracy + model health' : 'accuracy'}: </span>
+                    <span className="font-medium">{(progress.best_total_score * 100).toFixed(1)}%</span>
                   </div>
                 )}
                 {(isOptimizationRunning || progress?.elapsed_time) && (

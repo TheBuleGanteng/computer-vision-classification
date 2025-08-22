@@ -74,7 +74,7 @@ export interface HealthMetrics {
 }
 
 export interface BestResults {
-  best_value: number
+  best_total_score: number
   best_params: Hyperparameters
   best_trial_health: HealthMetrics
 }

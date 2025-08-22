@@ -12,6 +12,7 @@ Designed for deployment on RunPod with GPU acceleration and local development.
 """
 
 import asyncio
+import concurrent.futures
 from datetime import datetime
 from enum import Enum
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status
@@ -23,6 +24,7 @@ import os
 from pathlib import Path
 from pydantic import BaseModel, Field
 import shutil
+from optimizer import ModelOptimizer, OptimizationConfig, OptimizationMode, OptimizationObjective
 import tempfile
 import traceback
 from typing import Dict, Any, List, Optional, Union
@@ -169,7 +171,7 @@ class JobResponse(BaseModel):
             "progress": {
                 "current_trial": 15,
                 "total_trials": 50,
-                "best_value": 0.8750,
+                "best_total_score": 0.8750,
                 "elapsed_time": 1800.5
             },
             "result": null,
@@ -396,7 +398,7 @@ class OptimizationJob:
                 "running_trials": unified_progress.running_trials,
                 "failed_trials": unified_progress.failed_trials,
                 "total_trials": total_trials,
-                "current_best_value": unified_progress.current_best_value
+                "current_best_total_score": unified_progress.current_best_total_score
             }
             
             # Create progress update with all information
@@ -405,7 +407,10 @@ class OptimizationJob:
                 "total_trials": total_trials,
                 "completed_trials": completed_count,
                 "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
-                "best_value": unified_progress.current_best_value,
+                "best_total_score": unified_progress.current_best_total_score,
+                "best_accuracy": unified_progress.current_best_accuracy,
+                "trials_performed": completed_count,
+                "average_duration_per_trial": unified_progress.average_duration_per_trial,
                 "elapsed_time": elapsed_time,
                 "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
             }
@@ -423,7 +428,7 @@ class OptimizationJob:
             # 🔍 UNIFIED PROGRESS DEBUG: Log all data being sent to UI
             logger.info(f"🚀 UNIFIED PROGRESS UPDATE:")
             logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
-            logger.info(f"  📊 Best Score: {progress_update.get('best_value', 'None')}")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')}")
             logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
             logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
             logger.info(f"  ⏱️ Epoch Info:")
@@ -433,11 +438,11 @@ class OptimizationJob:
             logger.info(f"  📊 Complete Progress Object: {progress_update}")
             
             # Log best score information
-            best_value = unified_progress.current_best_value
-            if best_value is not None:
-                logger.info(f"📊 BEST SCORE: {best_value:.4f} (after {completed_count} completed trials)")
+            best_total_score = unified_progress.current_best_total_score
+            if best_total_score is not None:
+                logger.info(f"📊 BEST SCORE: {best_total_score:.4f} (after {completed_count} completed trials)")
             
-            logger.info(f"🔄 UNIFIED PROGRESS: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_value}")
+            logger.info(f"🔄 UNIFIED PROGRESS: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_total_score}")
             
         except Exception as e:
             logger.error(f"running OptimizationJob._handle_unified_progress ... Error processing unified progress: {e}")
@@ -495,7 +500,7 @@ class OptimizationJob:
                 "running_trials": aggregated_progress.running_trials if hasattr(aggregated_progress, 'running_trials') else [],
                 "failed_trials": aggregated_progress.failed_trials if hasattr(aggregated_progress, 'failed_trials') else [],
                 "total_trials": total_trials,
-                "current_best_value": getattr(aggregated_progress, 'current_best_value', None)
+                "current_best_total_score": getattr(aggregated_progress, 'current_best_total_score', None)
             }
             
             # Extract epoch information from stored trial progress if available
@@ -509,7 +514,7 @@ class OptimizationJob:
                 "total_trials": total_trials,
                 "completed_trials": completed_count,
                 "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
-                "best_value": getattr(aggregated_progress, 'current_best_value', None),
+                "best_total_score": getattr(aggregated_progress, 'current_best_total_score', None),
                 "elapsed_time": elapsed_time,
                 "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
             }
@@ -527,7 +532,7 @@ class OptimizationJob:
             # 🔍 COMPREHENSIVE DEBUG: Log all progress data being sent to UI
             logger.info(f"🔍 FULL PROGRESS UPDATE DEBUG:")
             logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
-            logger.info(f"  📊 Best Score: {progress_update.get('best_value', 'None')}")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')}")
             logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
             logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
             logger.info(f"  📊 Epoch Info:")
@@ -538,12 +543,12 @@ class OptimizationJob:
             logger.info(f"  📊 Complete Progress Object: {progress_update}")
             
             # ENHANCED: Log best score information for UI verification
-            best_value = getattr(aggregated_progress, 'current_best_value', None)
-            if best_value is not None:
-                logger.info(f"📊 BEST SCORE UPDATE: Current best value = {best_value:.4f} (after {completed_count} completed trials)")
+            best_total_score = getattr(aggregated_progress, 'current_best_total_score', None)
+            if best_total_score is not None:
+                logger.info(f"📊 BEST SCORE UPDATE: Current best value = {best_total_score:.4f} (after {completed_count} completed trials)")
             
             # Log detailed progress summary for verification
-            logger.info(f"🔄 PROGRESS UPDATE: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_value}")
+            logger.info(f"🔄 PROGRESS UPDATE: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_total_score}")
             
         except Exception as e:
             logger.error(f"running OptimizationJob._handle_aggregated_progress ... Error handling aggregated progress: {e}")
@@ -567,7 +572,7 @@ class OptimizationJob:
                 "total_trials": opt_progress["total_trials"],
                 "completed_trials": opt_progress["completed_trials"],
                 "success_rate": opt_progress["success_rate"],
-                "best_value": opt_progress["best_value"],
+                "best_total_score": opt_progress["best_total_score"],
                 "elapsed_time": opt_progress["elapsed_time"],
                 "status_message": f"Trial {opt_progress['current_trial']}/{opt_progress['total_trials']} running"
             }
@@ -643,7 +648,7 @@ class OptimizationJob:
                 "total_trials": self.request.trials,
                 "completed_trials": 0,
                 "success_rate": 0.0,
-                "best_value": None,
+                "best_total_score": None,
                 "elapsed_time": 0,
                 "status_message": "Initializing optimization..."
             }
@@ -655,11 +660,42 @@ class OptimizationJob:
             self.progress["status_message"] = "Loading dataset and initializing optimizer..."
             logger.debug(f"running OptimizationJob._run_optimization ... Loading dataset {self.request.dataset_name}")
             
-            # Execute optimization
-            result = await loop.run_in_executor(
-                None,  # Use default thread pool
-                self._execute_optimization
-            )
+            # Execute optimization with cancellation handling
+            # Use a dedicated executor so we can control cancellation better
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                try:
+                    future = executor.submit(self._execute_optimization)
+                    
+                    # Check for cancellation periodically while waiting for result
+                    while not future.done():
+                        if self.status == JobStatus.CANCELLED:
+                            logger.info(f"running OptimizationJob._run_optimization ... Cancellation detected, requesting optimizer stop")
+                            if hasattr(self, 'optimizer') and self.optimizer:
+                                self.optimizer.cancel()
+                            
+                            # Give the optimization a short time to stop gracefully
+                            try:
+                                result = await asyncio.wait_for(
+                                    asyncio.wrap_future(future), 
+                                    timeout=5.0
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(f"running OptimizationJob._run_optimization ... Optimization didn't stop gracefully, forcing cancellation")
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                raise asyncio.CancelledError("Optimization forcefully cancelled")
+                            break
+                        
+                        await asyncio.sleep(0.5)  # Check every 500ms
+                    
+                    if future.done():
+                        result = future.result()
+                    
+                except asyncio.CancelledError:
+                    logger.info(f"running OptimizationJob._run_optimization ... Job {self.job_id} was cancelled")
+                    self.status = JobStatus.CANCELLED
+                    self.completed_at = datetime.now().isoformat()
+                    self.progress["status_message"] = "Optimization cancelled by user"
+                    raise
             
             # Convert OptimizationResult to API format
             api_result = self._convert_optimization_result(result)
@@ -672,10 +708,10 @@ class OptimizationJob:
             # Update final progress
             self.progress["status_message"] = "Optimization completed successfully"
             self.progress["current_trial"] = self.request.trials
-            self.progress["best_value"] = result.best_value
+            self.progress["best_total_score"] = result.best_total_score
             
             logger.debug(f"running OptimizationJob._run_optimization ... Job {self.job_id} completed successfully")
-            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.best_value:.4f}")
+            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.best_total_score:.4f}")
             
         except Exception as e:
             # Handle any optimization errors
@@ -792,29 +828,34 @@ class OptimizationJob:
         logger.debug(f"running OptimizationJob._execute_optimization ... Direct params: use_runpod_service={self.request.use_runpod_service}, concurrent_workers={self.request.concurrent_workers}")
         logger.debug(f"running OptimizationJob._execute_optimization ... Config overrides: {config_overrides}")
         
-        # Use the enhanced optimize_model function with progress callback support
-        from optimizer import optimize_model
-        
-        result = optimize_model(
-            dataset_name=self.request.dataset_name,
-            mode=self.request.mode,
-            optimize_for=self.request.optimize_for,
-            trials=self.request.trials,
-            run_name=None,  # Let optimize_model generate the run_name using its established logic
-            progress_callback=self._progress_callback,  # Real-time progress updates
-            use_runpod_service=self.request.use_runpod_service,     # Use UI-specified setting
-            concurrent=(self.request.concurrent_workers > 1),       # Enable if multiple workers
-            concurrent_workers=self.request.concurrent_workers,     # Use UI-specified workers
-            **config_overrides
+        # Create optimizer directly so we can store reference for cancellation
+        opt_config = OptimizationConfig(
+            mode=OptimizationMode(self.request.mode),
+            objective=OptimizationObjective(self.request.optimize_for or "val_accuracy"),
+            n_trials=self.request.trials or 50,
+            use_runpod_service=self.request.use_runpod_service,
+            concurrent_workers=self.request.concurrent_workers
         )
         
-        # Note: The optimizer instance is not directly accessible when using optimize_model
-        # but that's okay since the progress_callback handles real-time updates
-        self.optimizer = None  # Will be set by the optimize_model function if needed
+        # Apply config overrides
+        for key, value in config_overrides.items():
+            if hasattr(opt_config, key):
+                setattr(opt_config, key, value)
+        
+        # Create optimizer instance and store reference for cancellation
+        self.optimizer = ModelOptimizer(
+            dataset_name=self.request.dataset_name,
+            optimization_config=opt_config,
+            run_name=None,
+            progress_callback=self._progress_callback,
+            activation_override=self.request.activation_functions[0] if self.request.activation_functions else None
+        )
+        
+        result = self.optimizer.optimize()
         
         logger.debug(f"running OptimizationJob._execute_optimization ... Optimization completed for job {self.job_id}")
         logger.debug(f"running OptimizationJob._execute_optimization ... Results directory: {result.results_dir}")
-        logger.debug(f"running OptimizationJob._execute_optimization ... Best value: {result.best_value:.4f}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Best value: {result.best_total_score:.4f}")
         
         return result
             
@@ -834,7 +875,7 @@ class OptimizationJob:
             # Convert to API format
             api_result = {
                 "optimization_result": {
-                    "best_value": result.best_value,
+                    "best_total_score": result.best_total_score,
                     "best_params": result.best_params,
                     "total_trials": result.total_trials,
                     "successful_trials": result.successful_trials,
@@ -849,11 +890,11 @@ class OptimizationJob:
                 },
                 "model_result": {
                     "model_path": result.best_model_path,
-                    "test_accuracy": result.best_value if (result.optimization_config and "accuracy" in str(result.optimization_config.objective)) else None,
+                    "test_accuracy": result.best_total_score if (result.optimization_config and "accuracy" in str(result.optimization_config.objective)) else None,
                     "results_dir": str(result.results_dir) if result.results_dir else None
                 } if result.best_model_path else None,
                 "run_name": self.job_id,
-                "best_value": result.best_value,
+                "best_total_score": result.best_total_score,
                 "best_params": result.best_params,
                 "health_data": {
                     "best_trial_health": result.best_trial_health,
@@ -870,7 +911,7 @@ class OptimizationJob:
             # Return minimal result on conversion error
             return {
                 "optimization_result": {
-                    "best_value": result.best_value,
+                    "best_total_score": result.best_total_score,
                     "best_params": result.best_params,
                     "total_trials": result.total_trials,
                     "successful_trials": result.successful_trials,
@@ -878,7 +919,7 @@ class OptimizationJob:
                     "optimization_mode": result.optimization_mode
                 },
                 "run_name": self.job_id,
-                "best_value": result.best_value,
+                "best_total_score": result.best_total_score,
                 "best_params": result.best_params,
                 "conversion_error": str(e)
             }
@@ -955,11 +996,11 @@ class OptimizationJob:
             return self.optimizer.get_best_trial()
         else:
             # Fallback: use aggregated progress data if available
-            if self.latest_aggregated_progress and self.latest_aggregated_progress.get('current_best_value') is not None:
+            if self.latest_aggregated_progress and self.latest_aggregated_progress.get('current_best_total_score') is not None:
                 return {
                     "trial_id": "best_trial", 
                     "status": "completed",
-                    "best_value": self.latest_aggregated_progress['current_best_value']
+                    "best_total_score": self.latest_aggregated_progress['current_best_total_score']
                 }
             return None
     
@@ -1022,6 +1063,11 @@ class OptimizationJob:
         
         if self.task:
             self.task.cancel()
+        
+        # Cancel the optimizer if it exists
+        if hasattr(self, 'optimizer') and self.optimizer:
+            logger.debug(f"running OptimizationJob.cancel ... Cancelling optimizer for job {self.job_id}")
+            self.optimizer.cancel()
         
         if self.progress:
             self.progress["status_message"] = "Job cancelled by user"
@@ -1372,7 +1418,7 @@ class OptimizationAPI:
                 job_status.progress.update({
                     "total_trials": optimization_result.get("total_trials", 0),
                     "completed_trials": optimization_result.get("successful_trials", 0),
-                    "best_value": optimization_result.get("best_value", 0.0),
+                    "best_total_score": optimization_result.get("best_total_score", 0.0),
                     "success_rate": (
                         optimization_result.get("successful_trials", 0) / 
                         max(optimization_result.get("total_trials", 1), 1)
@@ -1380,14 +1426,14 @@ class OptimizationAPI:
                     "status_message": "Optimization completed successfully"
                 })
                 
-                # FIXED: Also update the main result best_value for monitor display
-                if "best_value" in optimization_result:
+                # FIXED: Also update the main result best_total_score for monitor display
+                if "best_total_score" in optimization_result:
                     # Ensure the job result reflects the actual best value
                     if isinstance(job_status.result, dict):
-                        job_status.result["best_value"] = optimization_result["best_value"]
+                        job_status.result["best_total_score"] = optimization_result["best_total_score"]
                 
                 logger.debug(f"running OptimizationAPI._get_job_status ... "
-                            f"Enhanced completed job status: best_value={optimization_result.get('best_value', 'N/A')}")
+                            f"Enhanced completed job status: best_total_score={optimization_result.get('best_total_score', 'N/A')}")
                 
             except Exception as e:
                 logger.warning(f"running OptimizationAPI._get_job_status ... "

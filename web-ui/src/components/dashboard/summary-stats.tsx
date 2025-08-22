@@ -8,24 +8,16 @@ import {
   Clock,
   Hash
 } from "lucide-react"
-
-// Mock summary data - matches your optimization results structure
-const mockSummaryData = {
-  trialsPerformed: 25,
-  bestAccuracy: 0.9247, // 92.47%
-  bestTotalScore: 0.8956, // Health-weighted score in health mode
-  avgDurationPerTrial: 127, // seconds
-  optimizationMode: "health" as "simple" | "health" // or "simple"
-}
+import { useDashboard } from "./dashboard-provider"
 
 export function SummaryStats() {
-  const { 
-    trialsPerformed, 
-    bestAccuracy, 
-    bestTotalScore, 
-    avgDurationPerTrial,
-    optimizationMode
-  } = mockSummaryData
+  const { progress, optimizationMode } = useDashboard()
+  
+  // Use real data if available, fallback to default values
+  const trialsPerformed = progress?.trials_performed ?? 0
+  const bestAccuracy = progress?.best_accuracy ?? 0
+  const bestTotalScore = progress?.best_total_score ?? 0
+  const avgDurationPerTrial = progress?.average_duration_per_trial ?? 0
 
   // Format duration to readable format
   const formatDuration = (seconds: number) => {
