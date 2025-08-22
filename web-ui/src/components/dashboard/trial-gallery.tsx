@@ -124,6 +124,35 @@ export function TrialGallery() {
     setSelectedTrial(null)
   }
 
+  // Find the best trial based on highest total_score
+  const findBestTrial = () => {
+    if (!trials || trials.length === 0) return null
+    
+    // Only consider completed trials for best trial selection
+    const completedTrials = trials.filter(trial => 
+      trial.status === 'completed' && 
+      trial.performance?.total_score !== undefined && 
+      trial.performance?.total_score !== null
+    )
+    
+    if (completedTrials.length === 0) return null
+    
+    return completedTrials.reduce((best, current) => {
+      const bestScore = best.performance?.total_score || 0
+      const currentScore = current.performance?.total_score || 0
+      return currentScore > bestScore ? current : best
+    })
+  }
+
+  const bestTrial = findBestTrial()
+
+  // Debug logging for best trial identification
+  useEffect(() => {
+    if (bestTrial) {
+      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${(bestTrial.performance?.total_score * 100).toFixed(1)}%`)
+    }
+  }, [bestTrial?.trial_id, bestTrial?.trial_number])
+
   return (
     <>
       <Card>
@@ -177,10 +206,21 @@ export function TrialGallery() {
                 
                 // Create a robust unique key combining multiple identifiers
                 const uniqueKey = `trial_${trial.trial_id || ''}_${displayTrialNumber}_${index}`
+                
+                // Check if this is the best trial
+                const isBestTrial = bestTrial && (
+                  (trial.trial_id && trial.trial_id === bestTrial.trial_id) ||
+                  (trial.trial_number !== undefined && trial.trial_number === bestTrial.trial_number)
+                )
+                
                 return (
                 <Card 
                   key={uniqueKey} 
-                  className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50 min-h-[500px]"
+                  className={`cursor-pointer transition-all duration-300 min-h-[500px] ${
+                    isBestTrial 
+                      ? "border-4 border-orange-500 shadow-lg shadow-orange-500/25 hover:shadow-xl hover:shadow-orange-500/30 ring-4 ring-orange-200 dark:ring-orange-500/20" 
+                      : "border hover:shadow-md hover:border-primary/50"
+                  }`}
                   onClick={() => handleTrialClick(trial)}
               >
                 <CardContent className="p-4 flex flex-col h-full">
@@ -189,6 +229,11 @@ export function TrialGallery() {
                     <div className="flex items-center gap-2">
                       <Hash className="h-4 w-4 text-muted-foreground" />
                       <span className="font-semibold">Trial {displayTrialNumber}</span>
+                      {isBestTrial && (
+                        <Badge className="bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold animate-pulse">
+                          🏆 BEST
+                        </Badge>
+                      )}
                     </div>
                     <Badge 
                       variant={
