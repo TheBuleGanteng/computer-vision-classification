@@ -1258,6 +1258,17 @@ class OptimizationAPI:
             """Get best performing trial so far"""
             return await self._get_best_trial(job_id)
         
+        # 3D Visualization endpoints
+        @self.app.get("/jobs/{job_id}/best-model")
+        async def get_best_model_visualization(job_id: str):
+            """Get best model data with 3D visualization information"""
+            return await self._get_best_model_visualization(job_id)
+        
+        @self.app.get("/jobs/{job_id}/best-model/download")
+        async def download_best_model_visualization(job_id: str):
+            """Download 3D visualization data as JSON file"""
+            return await self._download_best_model_visualization(job_id)
+        
         @self.app.get("/jobs/{job_id}/trends")
         async def get_trends(job_id: str):
             """Get architecture and health trends for visualization"""
@@ -1671,6 +1682,102 @@ class OptimizationAPI:
             "job_id": job_id,
             "best_trial": best_trial
         }
+    
+    async def _get_best_model_visualization(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get best model data with 3D visualization information
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with best model data and 3D visualization information
+            
+        Raises:
+            HTTPException: If job not found or no completed trials
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._get_best_model_visualization ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        # Get the 3D visualization data from the optimizer
+        if not hasattr(job, 'optimizer') or not job.optimizer:
+            logger.error(f"running OptimizationAPI._get_best_model_visualization ... No optimizer instance for job {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No optimizer instance found for job {job_id}"
+            )
+        
+        visualization_data = job.optimizer.get_best_model_visualization_data()
+        
+        if not visualization_data:
+            logger.warning(f"running OptimizationAPI._get_best_model_visualization ... No visualization data available for job {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No completed trials yet for job {job_id}"
+            )
+        
+        logger.debug(f"running OptimizationAPI._get_best_model_visualization ... Returning 3D visualization data for job {job_id}, trial {visualization_data.get('trial_number')}")
+        
+        return {
+            "job_id": job_id,
+            **visualization_data
+        }
+    
+    async def _download_best_model_visualization(self, job_id: str) -> FileResponse:
+        """
+        Download 3D visualization data as JSON file
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            FileResponse with JSON file containing visualization data
+            
+        Raises:
+            HTTPException: If job not found or no completed trials
+        """
+        # Get the visualization data (reuse existing method)
+        visualization_data = await self._get_best_model_visualization(job_id)
+        
+        # Create temporary file for download
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        trial_number = visualization_data.get('trial_number', 'unknown')
+        filename = f"best_model_visualization_job_{job_id}_trial_{trial_number}_{timestamp}.json"
+        
+        # Create temporary directory if it doesn't exist
+        temp_dir = Path(tempfile.gettempdir()) / "model_visualizations"
+        temp_dir.mkdir(exist_ok=True)
+        temp_file_path = temp_dir / filename
+        
+        try:
+            # Write visualization data to temporary file
+            with open(temp_file_path, 'w', encoding='utf-8') as f:
+                json.dump(visualization_data, f, indent=2, default=str)
+            
+            logger.info(f"running OptimizationAPI._download_best_model_visualization ... Created download file: {temp_file_path}")
+            
+            return FileResponse(
+                path=str(temp_file_path),
+                filename=filename,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}",
+                    "Cache-Control": "no-cache"
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._download_best_model_visualization ... Failed to create download file: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare visualization download: {str(e)}"
+            )
     
     async def _get_trends(self, job_id: str) -> Dict[str, Any]:
         """

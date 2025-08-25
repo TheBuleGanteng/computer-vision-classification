@@ -45,6 +45,7 @@ from utils.logger import logger
 
 # Import modular components
 from hyperparameter_selector import HyperparameterSelector
+from model_visualizer import ModelVisualizer, ArchitectureVisualization
 from plot_generator import PlotGenerator
 
 
@@ -739,6 +740,11 @@ class ModelOptimizer:
         )
         logger.debug(f"running ModelOptimizer.__init__ ... PlotGenerator initialized for data type: {self.plot_generator.data_type}")
         
+        # Initialize ModelVisualizer for 3D architecture visualization
+        logger.debug(f"running ModelOptimizer.__init__ ... Initializing ModelVisualizer")
+        self.model_visualizer = ModelVisualizer()
+        logger.debug(f"running ModelOptimizer.__init__ ... ModelVisualizer initialized for 3D architecture preparation")
+        
         # Initialize optimization state
         self.study: Optional[optuna.Study] = None
         self.optimization_start_time: Optional[float] = None
@@ -956,6 +962,97 @@ class ModelOptimizer:
             for trial_progress in self._trial_progress_history:
                 if trial_progress.trial_number == best_number:
                     return trial_progress.to_dict()
+            return None
+    
+    def get_best_model_visualization_data(self) -> Optional[Dict[str, Any]]:
+        """
+        Get 3D visualization data for the best performing model
+        
+        Returns:
+            Dictionary containing best model data with 3D visualization information,
+            or None if no completed trials exist
+        """
+        # Get the best trial data
+        best_trial = self.get_best_trial()
+        if not best_trial:
+            logger.debug("No best trial available for visualization")
+            return None
+        
+        # Extract architecture and performance data
+        architecture = best_trial.get('architecture')
+        if not architecture:
+            logger.warning(f"Best trial {best_trial.get('trial_number')} has no architecture data")
+            return None
+        
+        # Get performance scores
+        performance = best_trial.get('performance', {})
+        health_metrics = best_trial.get('health_metrics', {})
+        
+        performance_score = performance.get('total_score', 0.0)
+        health_score = health_metrics.get('overall_health') if health_metrics else None
+        
+        logger.debug(f"Preparing 3D visualization for best trial {best_trial.get('trial_number')} "
+                    f"(score: {performance_score:.3f}, health: {health_score})")
+        
+        try:
+            # Generate 3D visualization data
+            visualization_data = self.model_visualizer.prepare_visualization_data(
+                architecture=architecture,
+                performance_score=performance_score,
+                health_score=health_score
+            )
+            
+            # Get color scheme
+            color_scheme = self.model_visualizer.get_performance_color_scheme(
+                performance_score, health_score
+            )
+            
+            # Combine all data for API response
+            return {
+                'trial_id': best_trial.get('trial_id'),
+                'trial_number': best_trial.get('trial_number'),
+                'total_score': performance_score,
+                'accuracy': performance.get('accuracy'),
+                'architecture': architecture,
+                'health_metrics': health_metrics,
+                'training_duration': best_trial.get('duration_seconds'),
+                'updated_at': best_trial.get('completed_at'),
+                
+                # 3D visualization data
+                'visualization': {
+                    'type': visualization_data.type,
+                    'layers': [
+                        {
+                            'layer_id': layer.layer_id,
+                            'layer_type': layer.layer_type,
+                            'position_z': layer.position_z,
+                            'width': layer.width,
+                            'height': layer.height,
+                            'depth': layer.depth,
+                            'parameters': layer.parameters,
+                            'activation': layer.activation,
+                            'filters': layer.filters,
+                            'kernel_size': layer.kernel_size,
+                            'units': layer.units,
+                            'color_intensity': layer.color_intensity,
+                            'opacity': layer.opacity
+                        }
+                        for layer in visualization_data.layers
+                    ],
+                    'total_parameters': visualization_data.total_parameters,
+                    'model_depth': visualization_data.model_depth,
+                    'max_layer_width': visualization_data.max_layer_width,
+                    'max_layer_height': visualization_data.max_layer_height,
+                    'performance_score': visualization_data.performance_score,
+                    'health_score': visualization_data.health_score
+                },
+                
+                # Color scheme for 3D rendering
+                'color_scheme': color_scheme
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to generate 3D visualization data: {e}")
             return None
         
     def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
