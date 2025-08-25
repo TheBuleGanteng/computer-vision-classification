@@ -153,7 +153,7 @@ export function OptimizationControls() {
         if (status.status === 'completed') {
           setIsOptimizationRunning(false)
           setIsOptimizationCompleted(true)
-          setCurrentJobId(null)
+          // Keep currentJobId for 3D visualization access - don't set to null
           setOptimizationStartTime(null) // Clear timer state
           if (pollingIntervalRef.current) {
             clearInterval(pollingIntervalRef.current)

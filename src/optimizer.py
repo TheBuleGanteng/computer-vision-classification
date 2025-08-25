@@ -338,7 +338,7 @@ class OptimizationResult:
     """Results from optimization process"""
     
     # Best trial results
-    best_value: float
+    best_total_score: float
     best_params: Dict[str, Any]
     best_model_path: Optional[str] = None
     
@@ -386,7 +386,7 @@ class OptimizationResult:
 Optimization Summary for {self.dataset_name}:
 ===========================================
 Optimization Mode: {mode_name}
-Best {objective_name}: {self.best_value:.4f}
+Best {objective_name}: {self.best_total_score:.4f}
 Successful trials: {self.successful_trials}/{self.total_trials}
 Optimization time: {self.optimization_time_hours:.2f} hours{health_summary}
 
@@ -444,7 +444,7 @@ class ConcurrentProgressAggregator:
         estimated_time_remaining = self.calculate_eta(all_trial_statuses)
         
         # Get current best value (this will be implemented in the callback)
-        current_best_value = self.get_current_best_value()
+        current_best_value = self.get_current_best_total_score()
         
         return AggregatedProgress(
             total_trials=self.total_trials,
@@ -469,7 +469,7 @@ class ConcurrentProgressAggregator:
         
         return remaining_trials * avg_time_per_trial
     
-    def get_current_best_value(self) -> Optional[float]:
+    def get_current_best_total_score(self) -> Optional[float]:
         """Get current best value - placeholder for now"""
         return None  # Will be populated by the ModelOptimizer instance
 
@@ -558,7 +558,7 @@ class EpochProgressCallback(keras.callbacks.Callback):
                 
                 # Get best trial info for aggregation
                 best_trial_number, best_trial_value = self.optimizer_instance.get_best_trial_info()
-                self.optimizer_instance._progress_aggregator.get_current_best_value = lambda: best_trial_value
+                self.optimizer_instance._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
                 
                 # Create aggregated progress using the progress aggregator
                 aggregated_progress = self.optimizer_instance._progress_aggregator.aggregate_progress(
@@ -1019,8 +1019,8 @@ class ModelOptimizer:
                 'updated_at': best_trial.get('completed_at'),
                 
                 # 3D visualization data
-                'visualization': {
-                    'type': visualization_data.type,
+                'visualization_data': {
+                    'type': visualization_data.architecture_type,
                     'layers': [
                         {
                             'layer_id': layer.layer_id,
@@ -1093,7 +1093,7 @@ class ModelOptimizer:
                     best_trial_number, best_trial_value = self.get_best_trial_info()
                     
                     # Update the progress aggregator with current best value
-                    self._progress_aggregator.get_current_best_value = lambda: best_trial_value
+                    self._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
                     
                     # Create aggregated progress
                     aggregated_progress = self._progress_aggregator.aggregate_progress(
@@ -1977,7 +1977,7 @@ class ModelOptimizer:
         if not completed_trials:
             logger.warning(f"running ModelOptimizer._compile_results ... No trials completed successfully")
             return OptimizationResult(
-                best_value=0.0,
+                best_total_score=0.0,
                 best_params={},
                 total_trials=len(self.study.trials),
                 successful_trials=0,
@@ -2009,7 +2009,7 @@ class ModelOptimizer:
             importance = {}
         
         return OptimizationResult(
-            best_value=self.study.best_value,
+            best_total_score=self.study.best_value,
             best_params=best_params,
             total_trials=len(self.study.trials),
             successful_trials=len(completed_trials),
@@ -2050,7 +2050,7 @@ class ModelOptimizer:
                 "optimization_mode": results.optimization_mode,
                 "objective": results.optimization_config.objective.value if results.optimization_config else "unknown",
                 "health_weight": results.health_weight,
-                "best_value": float(results.best_value),
+                "best_total_score": float(results.best_total_score),
                 "hyperparameters": best_params,
                 "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # Track execution method
             }

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog"
 import { useDashboard } from "./dashboard-provider"
 import { apiClient } from "@/lib/api-client"
-import { TrialProgress } from "@/types/optimization"
+import { TrialProgress, TrialData } from "@/types/optimization"
 import { 
   Eye,
   Target,
@@ -16,11 +16,61 @@ import {
   Layers,
   Hash,
   Download,
-  RotateCcw,
-  ZoomIn,
-  ZoomOut,
   Loader2
 } from "lucide-react"
+import { Model3DViewer } from "@/components/visualization/model-3d-viewer"
+import { useModelVisualization, useVisualizationDownload } from "@/hooks/use-model-visualization"
+
+// 3D Visualization Container Component
+function Model3DVisualizationContainer({ 
+  jobId, 
+  selectedTrial 
+}: { 
+  jobId: string | null; 
+  selectedTrial: TrialProgress | null;
+}) {
+  const { data: visualizationData, isLoading, error } = useModelVisualization(
+    jobId, 
+    !!jobId && !!selectedTrial
+  );
+
+  const downloadMutation = useVisualizationDownload();
+
+  const handleDownload = () => {
+    if (jobId) {
+      downloadMutation.mutate({ jobId });
+    }
+  };
+
+  return (
+    <>
+      <div className="w-full h-96 bg-gradient-to-br from-gray-900 to-black rounded-lg border overflow-hidden">
+        <Model3DViewer
+          visualizationData={visualizationData?.visualization_data}
+          isLoading={isLoading}
+          error={error?.message}
+          className="w-full h-full"
+        />
+      </div>
+      
+      {/* 3D Controls */}
+      <div className="absolute top-4 right-4 flex gap-2">
+        <Button 
+          variant="outline" 
+          size="sm"
+          onClick={handleDownload}
+          disabled={!visualizationData || downloadMutation.isPending}
+        >
+          {downloadMutation.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
+        </Button>
+      </div>
+    </>
+  );
+}
 
 export function TrialGallery() {
   const { isOptimizationRunning, currentJobId } = useDashboard()
@@ -116,7 +166,7 @@ export function TrialGallery() {
     }
   }, [isOptimizationRunning, currentJobId])
 
-  const handleTrialClick = (trial: any) => {
+  const handleTrialClick = (trial: TrialData) => {
     setSelectedTrial(trial)
   }
 
@@ -454,11 +504,27 @@ export function TrialGallery() {
                   {/* Spacer to push Trial ID to bottom */}
                   <div className="flex-grow"></div>
 
-                  {/* Trial ID */}
-                  <div className="mt-3 pt-2 border-t border-border/50">
+                  {/* Trial ID and 3D Model Button */}
+                  <div className="mt-3 pt-2 border-t border-border/50 space-y-2">
                     <p className="text-xs text-muted-foreground">
                       ID: {trial.trial_id || 'N/A'}
                     </p>
+                    
+                    {/* 3D Model Button for Best Trial */}
+                    {isBestTrial && (
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        className="w-full text-xs bg-orange-50 border-orange-200 hover:bg-orange-100 dark:bg-orange-950/20 dark:border-orange-800 dark:hover:bg-orange-900/30"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTrialClick(trial);
+                        }}
+                      >
+                        <Layers className="h-3 w-3 mr-1" />
+                        View 3D Model
+                      </Button>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -474,7 +540,7 @@ export function TrialGallery() {
         <DialogContent className="max-w-4xl w-full max-h-[90vh] overflow-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-3">
-              Trial #{selectedTrial?.trial_number} - 3D Architecture
+              Model visualization: Trial #{selectedTrial?.trial_number}
               <Badge variant="outline">{selectedTrial?.architecture.type}</Badge>
             </DialogTitle>
             <DialogClose onClose={handleCloseDialog} />
@@ -485,7 +551,7 @@ export function TrialGallery() {
               {/* Trial Summary */}
               <div className="grid grid-cols-3 gap-4 p-4 bg-muted/20 rounded-lg">
                 <div className="text-center">
-                  <p className="text-sm text-muted-foreground">Overall Score</p>
+                  <p className="text-sm text-muted-foreground">Total Score</p>
                   <p className="text-lg font-bold">{selectedTrial.performance?.total_score ? `${(selectedTrial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}</p>
                 </div>
                 <div className="text-center">
@@ -493,41 +559,17 @@ export function TrialGallery() {
                   <p className="text-lg font-bold">{selectedTrial.performance?.accuracy ? `${(selectedTrial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-sm text-muted-foreground">Duration</p>
-                  <p className="text-lg font-bold">{selectedTrial.duration_seconds ? formatDuration(selectedTrial.duration_seconds) : 'N/A'}</p>
+                  <p className="text-sm text-muted-foreground">Total Loss</p>
+                  <p className="text-lg font-bold">{selectedTrial.health_metrics?.test_loss ? selectedTrial.health_metrics.test_loss.toFixed(4) : 'N/A'}</p>
                 </div>
               </div>
 
               {/* 3D Visualization Area */}
               <div className="relative">
-                <div className="w-full h-96 bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg border flex items-center justify-center">
-                  <div className="text-center">
-                    <Layers className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
-                    <p className="text-xl font-medium text-muted-foreground">3D Architecture Visualization</p>
-                    <p className="text-sm text-muted-foreground mt-2">
-                      Interactive 3D model for Trial #{selectedTrial.trial_number}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Will be implemented with React Three Fiber in Phase 2
-                    </p>
-                  </div>
-                </div>
-                
-                {/* 3D Controls */}
-                <div className="absolute top-4 right-4 flex gap-2">
-                  <Button variant="outline" size="sm">
-                    <ZoomOut className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <ZoomIn className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <RotateCcw className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <Download className="h-4 w-4" />
-                  </Button>
-                </div>
+                <Model3DVisualizationContainer
+                  jobId={currentJobId}
+                  selectedTrial={selectedTrial}
+                />
               </div>
 
               {/* Architecture Details */}
@@ -536,26 +578,26 @@ export function TrialGallery() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   <div>
                     <p className="text-muted-foreground">Conv Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture.convLayers}</p>
+                    <p className="font-medium">{selectedTrial.architecture?.convLayers || 'N/A'}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Dense Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture.denseLayers}</p>
+                    <p className="font-medium">{selectedTrial.architecture?.denseLayers || 'N/A'}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Total Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture.totalLayers}</p>
+                    <p className="font-medium">{selectedTrial.architecture?.totalLayers || 'N/A'}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Parameters</p>
-                    <p className="font-medium">{selectedTrial.architecture.parameters.toLocaleString()}</p>
+                    <p className="font-medium">{selectedTrial.architecture?.parameters?.toLocaleString() || 'N/A'}</p>
                   </div>
                 </div>
                 
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Filter Sizes:</p>
                   <div className="flex gap-2">
-                    {selectedTrial.architecture.filterSizes.map((size: any, index: number) => (
+                    {(selectedTrial.architecture?.filterSizes || []).map((size: number, index: number) => (
                       <Badge key={index} variant="outline">{size}</Badge>
                     ))}
                   </div>
@@ -564,7 +606,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Activations:</p>
                   <div className="flex gap-2">
-                    {selectedTrial.architecture.activations.map((activation: any, index: number) => (
+                    {(selectedTrial.architecture?.activations || []).map((activation: string, index: number) => (
                       <Badge key={index} variant="outline">{activation}</Badge>
                     ))}
                   </div>
@@ -573,7 +615,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Key Features:</p>
                   <div className="flex flex-wrap gap-2">
-                    {selectedTrial.architecture.keyFeatures.map((feature: any, index: number) => (
+                    {(selectedTrial.architecture?.keyFeatures || []).map((feature: string, index: number) => (
                       <Badge key={index} variant="secondary">{feature}</Badge>
                     ))}
                   </div>

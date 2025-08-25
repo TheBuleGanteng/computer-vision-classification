@@ -96,7 +96,7 @@ class OptimizationRequest(BaseModel):
     optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
     
     # Optimization control
-    trials: int = Field(default=20, ge=1, le=500, description="Number of optimization trials")
+    trials: int = Field(default=2, ge=1, le=500, description="Number of optimization trials")
     max_epochs_per_trial: int = Field(default=6, ge=1, le=100, description="Maximum epochs per trial")
     min_epochs_per_trial: int = Field(default=5, ge=1, le=50, description="Minimum epochs per trial")
     health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
@@ -662,6 +662,8 @@ class OptimizationJob:
             
             # Execute optimization with cancellation handling
             # Use a dedicated executor so we can control cancellation better
+            result = None  # Initialize to avoid "possibly unbound" errors
+            
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 try:
                     future = executor.submit(self._execute_optimization)
@@ -696,6 +698,10 @@ class OptimizationJob:
                     self.completed_at = datetime.now().isoformat()
                     self.progress["status_message"] = "Optimization cancelled by user"
                     raise
+            
+            # Ensure we have a valid result before processing
+            if result is None:
+                raise RuntimeError("Optimization completed but no result was obtained")
             
             # Convert OptimizationResult to API format
             api_result = self._convert_optimization_result(result)

@@ -40,20 +40,7 @@ export function SummaryStats() {
           </div>
         </CardContent>
       </Card>
-
-      {/* Best Accuracy */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center space-x-2">
-            <Target className="h-5 w-5 text-green-500" />
-            <div>
-              <p className="text-sm font-medium text-muted-foreground">Best Accuracy</p>
-              <p className="text-2xl font-bold">{(bestAccuracy * 100).toFixed(2)}%</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
+      
       {/* Best Total Score */}
       <Card>
         <CardContent className="p-4">
@@ -67,6 +54,19 @@ export function SummaryStats() {
                 </Badge>
               </div>
               <p className="text-2xl font-bold">{(bestTotalScore * 100).toFixed(2)}%</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Best Accuracy */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center space-x-2">
+            <Target className="h-5 w-5 text-green-500" />
+            <div>
+              <p className="text-sm font-medium text-muted-foreground">Best Accuracy</p>
+              <p className="text-2xl font-bold">{(bestAccuracy * 100).toFixed(2)}%</p>
             </div>
           </div>
         </CardContent>
