@@ -3,6 +3,7 @@
 import React from 'react';
 import { Model3DViewer } from './model-3d-viewer';
 import { useModelVisualization } from '@/hooks/use-model-visualization';
+import { WithVisualizationErrorBoundary } from './visualization-error-boundary';
 
 interface BestModelVisualizationProps {
   jobId: string;
@@ -58,13 +59,15 @@ export const BestModelVisualization: React.FC<BestModelVisualizationProps> = ({
     );
   }
 
-  // Render the 3D visualization
+  // Render the 3D visualization with error boundary protection
   return (
-    <Model3DViewer
-      visualizationData={visualizationData}
-      isLoading={false}
-      error={undefined}
-      className="w-full h-full"
-    />
+    <WithVisualizationErrorBoundary>
+      <Model3DViewer
+        visualizationData={visualizationData}
+        isLoading={false}
+        error={undefined}
+        className="w-full h-full"
+      />
+    </WithVisualizationErrorBoundary>
   );
 };

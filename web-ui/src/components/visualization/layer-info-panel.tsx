@@ -92,7 +92,10 @@ export const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({
       case 'conv':
       case 'conv2d':
       case 'conv1d':
-        return 'Convolutional layer that applies filters to extract features from the input';
+        const filterInfo = displayLayer.filters && displayLayer.kernel_size 
+          ? ` Uses ${displayLayer.filters} filters of size ${displayLayer.kernel_size[0]}×${displayLayer.kernel_size[1]} to detect features.`
+          : '';
+        return `Convolutional layer that applies sliding window filters to extract spatial features.${filterInfo}`;
       case 'lstm':
         return 'Long Short-Term Memory layer for processing sequential data';
       case 'gru':
@@ -121,7 +124,7 @@ export const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({
 
   return (
     <div className={`
-      absolute top-4 left-4 
+      absolute top-4 left-4 z-20
       bg-gray-900/95 backdrop-blur-sm border border-gray-700 rounded-lg
       text-white text-sm max-w-80
       transition-all duration-200 ease-in-out

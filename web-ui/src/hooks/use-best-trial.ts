@@ -3,17 +3,17 @@
 import { useState, useEffect } from 'react';
 import { useDashboard } from '@/components/dashboard/dashboard-provider';
 import { apiClient } from '@/lib/api-client';
-import { TrialData } from '@/types/optimization';
+import { TrialProgress } from '@/types/optimization';
 
 export function useBestTrial() {
   const { currentJobId, isOptimizationRunning } = useDashboard();
-  const [bestTrial, setBestTrial] = useState<TrialData | null>(null);
+  const [bestTrial, setBestTrial] = useState<TrialProgress | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [trials, setTrials] = useState<TrialData[]>([]);
+  const [trials, setTrials] = useState<TrialProgress[]>([]);
 
   // Find the best trial based on highest total_score
-  const findBestTrial = (trialList: TrialData[]) => {
+  const findBestTrial = (trialList: TrialProgress[]) => {
     if (!trialList || trialList.length === 0) return null;
     
     // Only consider completed trials for best trial selection
@@ -53,9 +53,10 @@ export function useBestTrial() {
       
       // Find and set the best trial
       const currentBest = findBestTrial(uniqueTrials);
-      if (currentBest && (!bestTrial || currentBest.performance!.total_score > (bestTrial.performance?.total_score || 0))) {
+      if (currentBest && currentBest.performance?.total_score && 
+          (!bestTrial || currentBest.performance.total_score > (bestTrial.performance?.total_score || 0))) {
         setBestTrial(currentBest);
-        console.log(`🏆 NEW BEST TRIAL: Trial ${currentBest.trial_number} with score ${(currentBest.performance!.total_score * 100).toFixed(1)}%`);
+        console.log(`🏆 NEW BEST TRIAL: Trial ${currentBest.trial_number} with score ${(currentBest.performance.total_score * 100).toFixed(1)}%`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch trials');

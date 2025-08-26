@@ -2,7 +2,7 @@
 
 import React, { useState, Suspense } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Text, Html } from '@react-three/drei';
+import { OrbitControls, Html } from '@react-three/drei';
 import { Model3DViewerProps, LayerVisualization } from '@/types/visualization';
 import { Architecture3D } from './architecture-3d';
 import { LayerInfoPanel } from './layer-info-panel';
@@ -100,16 +100,6 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
         </Suspense>
 
 
-        {/* Parameter Count Display */}
-        <Text
-          position={[0, -2, 0]}
-          fontSize={0.4}
-          color="#9CA3AF"
-          anchorX="center"
-          anchorY="middle"
-        >
-          {visualizationData.total_parameters.toLocaleString()} parameters
-        </Text>
       </Canvas>
 
       {/* Layer Information Panel */}
@@ -120,7 +110,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
       />
 
       {/* Controls Help */}
-      <div className="absolute bottom-4 left-4 text-gray-400 text-sm space-y-1">
+      <div className="absolute bottom-4 left-4 text-gray-400 text-sm space-y-1 z-10">
         <div className="bg-black/50 rounded px-2 py-1">
           <p>🖱️ Click and drag to rotate</p>
           <p>⚙️ Scroll to zoom</p>
@@ -129,7 +119,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
       </div>
 
       {/* Architecture Info */}
-      <div className="absolute top-4 right-4 text-white text-sm">
+      <div className="absolute top-4 right-4 text-white text-sm z-10">
         <div className="bg-black/70 rounded-lg p-3 space-y-2">
           <div className="font-semibold text-blue-400">
             {visualizationData.type} Model
