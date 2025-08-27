@@ -276,8 +276,8 @@ class OptimizationRequest(BaseModel):
     optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
     
     # Optimization control
-    trials: int = Field(default=15, ge=1, le=500, description="Number of optimization trials")
-    max_epochs_per_trial: int = Field(default=20, ge=1, le=100, description="Maximum epochs per trial")
+    trials: int = Field(default=50, ge=1, le=500, description="Number of optimization trials")
+    max_epochs_per_trial: int = Field(default=30, ge=1, le=100, description="Maximum epochs per trial")
     min_epochs_per_trial: int = Field(default=5, ge=1, le=50, description="Minimum epochs per trial")
     health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
     

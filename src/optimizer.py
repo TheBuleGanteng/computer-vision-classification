@@ -1847,33 +1847,7 @@ class ModelOptimizer:
                 # Silent if TF not installed/needed in this run context
                 pass
 
-            # Create a unique directory for this trial's artifacts (thread-safe)
-            try:
-                current_file = Path(__file__).resolve()
-                project_root = current_file.parent.parent  # Go up 2 levels to project root
-                results_root = project_root / "optimization_results"
-
-                # Ensure a run-scoped directory already exists or create it
-                # (self.run_name should already be set when ModelOptimizer is constructed)
-                run_dir = results_root / (self.run_name or "default_run")
-                run_dir.mkdir(parents=True, exist_ok=True)
-
-                # Trial-specific subdirectory (e.g., trial_003)
-                trial_dir = run_dir / f"trial_{int(trial.number):03d}"
-                trial_dir.mkdir(parents=True, exist_ok=True)
-
-                # Save on the instance for downstream writers; also store on trial for clarity
-                self.current_trial_dir = trial_dir  # type: ignore[attr-defined]
-                trial.set_user_attr("output_dir", str(trial_dir))
-
-                logger.debug(
-                    "running _objective_function ... trial directory ready: %s",
-                    str(trial_dir)
-                )
-            except Exception as e:
-                logger.error("running _objective_function ... failed to prepare trial directory: %s", e)
-                raise
-                    
+                   
             # Use modular hyperparameter suggestion
             params = self._suggest_hyperparameters(trial)
             
