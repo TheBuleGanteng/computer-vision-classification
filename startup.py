@@ -95,7 +95,7 @@ class DevelopmentServerManager:
         processes = []
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
-                for conn in proc.connections():
+                for conn in proc.net_connections():
                     if conn.laddr.port == port:
                         processes.append(proc)
                         break
@@ -328,7 +328,7 @@ class DevelopmentServerManager:
     def _uses_development_ports(self, proc) -> bool:
         """Check if process uses development ports"""
         try:
-            for conn in proc.connections():
+            for conn in proc.net_connections():
                 if conn.status == psutil.CONN_LISTEN:
                     port = conn.laddr.port
                     
@@ -362,7 +362,7 @@ class DevelopmentServerManager:
         """Get formatted port information for a process"""
         try:
             listening_ports = []
-            for conn in proc.connections():
+            for conn in proc.net_connections():
                 if conn.status == psutil.CONN_LISTEN:
                     listening_ports.append(str(conn.laddr.port))
             

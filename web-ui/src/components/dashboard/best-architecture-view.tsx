@@ -12,13 +12,13 @@ import {
   Timer,
   Loader2
 } from "lucide-react"
-import { useBestTrial } from "@/hooks/use-best-trial"
+import { useTrials } from "@/hooks/use-trials"
 import { useDashboard } from "@/components/dashboard/dashboard-provider"
-import { BestModelVisualization } from "@/components/visualization/best-model-visualization"
+import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
 
-export function BestArchitectureView() {
+export const BestArchitectureView = React.memo(() => {
   const { currentJobId, isOptimizationRunning } = useDashboard()
-  const { bestTrial, isLoading, error } = useBestTrial()
+  const { bestTrial, isLoading, error } = useTrials()
   const [isNewBest, setIsNewBest] = useState(false)
 
   const handleDownloadVisualization = () => {
@@ -35,14 +35,14 @@ export function BestArchitectureView() {
     }
   }
 
-  // Trigger animation when new best trial is detected
+  // Trigger animation when new best trial is detected (only when trial ID changes)
   React.useEffect(() => {
-    if (bestTrial) {
+    if (bestTrial?.trial_id) {
       setIsNewBest(true)
       const timer = setTimeout(() => setIsNewBest(false), 3000) // Animation lasts 3 seconds
       return () => clearTimeout(timer)
     }
-  }, [bestTrial?.trial_id, bestTrial])
+  }, [bestTrial?.trial_id]) // Only depend on trial_id, not the entire object
 
   // Loading state
   if (isLoading) {
@@ -189,9 +189,13 @@ export function BestArchitectureView() {
       
       <CardContent>
         {/* Real-time 3D Visualization */}
-        <div className="relative h-96 bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg overflow-hidden">
+        <div className="relative min-h-[500px] bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg overflow-hidden">
           {currentJobId && bestTrial ? (
-            <BestModelVisualization jobId={currentJobId} />
+            <UnifiedEducationalInterface 
+              jobId={currentJobId} 
+              trialId={bestTrial.trial_number?.toString()}
+              className="w-full h-full"
+            />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
               <div className="text-center text-gray-400">
@@ -304,4 +308,4 @@ export function BestArchitectureView() {
       </CardContent>
     </Card>
   )
-}
+})

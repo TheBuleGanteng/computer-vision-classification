@@ -39,6 +39,7 @@ export function OptimizationControls() {
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
   const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
+  const [isModelAvailable, setIsModelAvailable] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
   const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
@@ -89,6 +90,7 @@ export function OptimizationControls() {
         
         setIsOptimizationRunning(false)
         setCurrentJobId(null)
+        setIsModelAvailable(false) // Reset model availability on cancellation
         setOptimizationStartTime(null) // Clear timer state
         setClientElapsedTime(0)
         console.log("Optimization cancelled successfully")
@@ -117,6 +119,7 @@ export function OptimizationControls() {
         
         setIsOptimizationRunning(true)
         setIsOptimizationCompleted(false)
+        setIsModelAvailable(false) // Reset model availability for new optimization
         setCurrentJobId(response.job_id)
         setOptimizationStartTime(Date.now()) // Record start time for real-time counter
         
@@ -131,6 +134,40 @@ export function OptimizationControls() {
           (typeof err === 'string' ? err : `Unknown error: ${JSON.stringify(err)}`)
         setError(errorMessage)
       }
+    }
+  }
+
+  const checkModelAvailability = async (jobId: string) => {
+    try {
+      const results = await apiClient.getJobResults(jobId)
+      // Check if the final model has been built and is available for download
+      const hasModelPath = results?.model_result?.model_path
+      setIsModelAvailable(!!hasModelPath)
+      console.log("Model availability check:", hasModelPath ? "Available" : "Not available")
+    } catch (err) {
+      console.error("Failed to check model availability:", err)
+      setIsModelAvailable(false)
+    }
+  }
+
+  const handleDownloadModel = async () => {
+    if (!currentJobId) return
+    
+    try {
+      const downloadUrl = apiClient.getModelDownloadUrl(currentJobId)
+      
+      // Create a temporary link to trigger download
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = `optimized_model_${currentJobId}.keras`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      
+      console.log("Model download initiated")
+    } catch (err) {
+      console.error("Failed to download model:", err)
+      setError(err instanceof Error ? err.message : "Failed to download model")
     }
   }
 
@@ -155,6 +192,10 @@ export function OptimizationControls() {
           setIsOptimizationCompleted(true)
           // Keep currentJobId for 3D visualization access - don't set to null
           setOptimizationStartTime(null) // Clear timer state
+          
+          // Check if final optimized model is available for download
+          checkModelAvailability(jobId)
+          
           if (pollingIntervalRef.current) {
             clearInterval(pollingIntervalRef.current)
             pollingIntervalRef.current = null
@@ -163,6 +204,7 @@ export function OptimizationControls() {
         } else if (status.status === 'failed' || status.status === 'cancelled') {
           setIsOptimizationRunning(false)
           setCurrentJobId(null)
+          setIsModelAvailable(false) // Reset model availability on failure/cancellation
           setProgress(null) // Reset progress data to clear UI statistics
           setOptimizationStartTime(null) // Clear timer state
           if (pollingIntervalRef.current) {
@@ -183,6 +225,7 @@ export function OptimizationControls() {
           setIsOptimizationRunning(false)
           setIsOptimizationCompleted(false)
           setCurrentJobId(null)
+          setIsModelAvailable(false) // Reset model availability on server restart
           setProgress(null)
           setOptimizationStartTime(null) // Clear timer state
           setError("Optimization was interrupted (server restarted). Please start a new optimization.")
@@ -314,6 +357,21 @@ export function OptimizationControls() {
                   Start optimization
                 </>
               )}
+            </Button>
+
+            {/* Download Optimized Model Button */}
+            <Button
+              onClick={handleDownloadModel}
+              disabled={!isModelAvailable || !currentJobId}
+              className="min-w-[160px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
+              title={
+                !isModelAvailable 
+                  ? "Model will be available after optimization completes and final model is built"
+                  : "Download the final model trained with optimized hyperparameters"
+              }
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Download Model
             </Button>
           </div>
         </div>

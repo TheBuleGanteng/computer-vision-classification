@@ -226,3 +226,6 @@ plots/*
 # datasets
 optimization_results/*
 !optimization_results/.gitkeep
+
+# Tensorboard logs
+tensorboard_logs/

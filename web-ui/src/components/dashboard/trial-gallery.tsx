@@ -18,11 +18,11 @@ import {
   Download,
   Loader2
 } from "lucide-react"
-import { Model3DViewer } from "@/components/visualization/model-3d-viewer"
+import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
 import { useModelVisualization, useVisualizationDownload } from "@/hooks/use-model-visualization"
 
-// 3D Visualization Container Component
-function Model3DVisualizationContainer({ 
+// Modern Educational Visualization Container Component
+function EducationalVisualizationContainer({ 
   jobId, 
   selectedTrial 
 }: { 
@@ -45,15 +45,14 @@ function Model3DVisualizationContainer({
   return (
     <>
       <div className="w-full h-96 bg-gradient-to-br from-gray-900 to-black rounded-lg border overflow-hidden">
-        <Model3DViewer
-          visualizationData={visualizationData?.visualization_data}
-          isLoading={isLoading}
-          error={error?.message}
+        <UnifiedEducationalInterface
+          jobId={jobId || ''}
+          trialId={selectedTrial?.trial_id}
           className="w-full h-full"
         />
       </div>
       
-      {/* 3D Controls */}
+      {/* Visualization Controls */}
       <div className="absolute top-4 right-4 flex gap-2">
         <Button 
           variant="outline" 
@@ -166,7 +165,7 @@ export function TrialGallery() {
     }
   }, [isOptimizationRunning, currentJobId])
 
-  const handleTrialClick = (trial: TrialData) => {
+  const handleTrialClick = (trial: TrialProgress) => {
     setSelectedTrial(trial)
   }
 
@@ -199,7 +198,7 @@ export function TrialGallery() {
   // Debug logging for best trial identification
   useEffect(() => {
     if (bestTrial) {
-      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${(bestTrial.performance?.total_score * 100).toFixed(1)}%`)
+      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${(bestTrial.performance?.total_score! * 100).toFixed(1)}%`)
     }
   }, [bestTrial?.trial_id, bestTrial?.trial_number])
 
@@ -266,7 +265,7 @@ export function TrialGallery() {
                 return (
                 <Card 
                   key={uniqueKey} 
-                  className={`cursor-pointer transition-all duration-300 min-h-[500px] ${
+                  className={`cursor-pointer transition-all duration-300 min-h-[200px] ${
                     isBestTrial 
                       ? "border-4 border-orange-500 shadow-lg shadow-orange-500/25 hover:shadow-xl hover:shadow-orange-500/30 ring-4 ring-orange-200 dark:ring-orange-500/20" 
                       : "border hover:shadow-md hover:border-primary/50"
@@ -566,7 +565,7 @@ export function TrialGallery() {
 
               {/* 3D Visualization Area */}
               <div className="relative">
-                <Model3DVisualizationContainer
+                <EducationalVisualizationContainer
                   jobId={currentJobId}
                   selectedTrial={selectedTrial}
                 />

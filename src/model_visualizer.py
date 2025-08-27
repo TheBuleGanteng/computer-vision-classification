@@ -449,6 +449,185 @@ class ModelVisualizer:
             health_score=health_score
         )
     
+    def export_cytoscape_architecture(self, architecture_viz: ArchitectureVisualization) -> Dict[str, Any]:
+        """
+        Convert ArchitectureVisualization to Cytoscape.js format
+        
+        Args:
+            architecture_viz: ArchitectureVisualization object from prepare_visualization_data()
+            
+        Returns:
+            Dictionary with nodes and edges for Cytoscape.js rendering
+        """
+        nodes = []
+        edges = []
+        
+        logger.debug(f"Converting {architecture_viz.architecture_type} architecture to Cytoscape format")
+        
+        # Process each layer into nodes and edges
+        prev_layer_id = None
+        
+        for i, layer in enumerate(architecture_viz.layers):
+            # Create node for current layer
+            node_data = {
+                "data": {
+                    "id": layer.layer_id,
+                    "type": layer.layer_type,
+                    "label": self._format_layer_label(layer),
+                    "parameters": layer.parameters,
+                    "color_intensity": layer.color_intensity,
+                    "opacity": layer.opacity
+                }
+            }
+            
+            # Add layer-specific data
+            if layer.filters:
+                node_data["data"]["filters"] = layer.filters
+            if layer.kernel_size:
+                node_data["data"]["kernel_size"] = layer.kernel_size
+            if layer.units:
+                node_data["data"]["units"] = layer.units
+            if layer.activation:
+                node_data["data"]["activation"] = layer.activation
+                
+            nodes.append(node_data)
+            
+            # Create edge from previous layer
+            if prev_layer_id is not None:
+                edge_data = {
+                    "data": {
+                        "source": prev_layer_id,
+                        "target": layer.layer_id,
+                        "tensor_transform": self._calculate_tensor_transform(
+                            architecture_viz.layers[i-1], layer, architecture_viz.architecture_type
+                        )
+                    }
+                }
+                edges.append(edge_data)
+            
+            prev_layer_id = layer.layer_id
+        
+        result = {
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": {
+                "architecture_type": architecture_viz.architecture_type,
+                "total_parameters": architecture_viz.total_parameters,
+                "model_depth": architecture_viz.model_depth,
+                "performance_score": architecture_viz.performance_score,
+                "health_score": architecture_viz.health_score
+            }
+        }
+        
+        logger.debug(f"Generated Cytoscape data: {len(nodes)} nodes, {len(edges)} edges")
+        return result
+
+    def _format_layer_label(self, layer: LayerVisualization) -> str:
+        """Format layer label for educational clarity in Cytoscape"""
+        if layer.layer_type == 'input':
+            return "Input Layer"
+        elif layer.layer_type.startswith('conv'):
+            if layer.filters and layer.kernel_size:
+                return f"Conv2D\n{layer.filters}@{layer.kernel_size[0]}×{layer.kernel_size[1]}"
+            return "Conv2D"
+        elif layer.layer_type == 'dense':
+            if layer.units:
+                return f"Dense\n{layer.units} units"
+            return "Dense"
+        elif 'pool' in layer.layer_type.lower():
+            return "Pooling"
+        elif layer.layer_type == 'lstm':
+            if layer.units:
+                return f"LSTM\n{layer.units} units"
+            return "LSTM"
+        elif layer.layer_type == 'dropout':
+            return "Dropout"
+        elif layer.layer_id == 'flatten':
+            return "Flatten"
+        else:
+            return layer.layer_type.title()
+
+    def _calculate_tensor_transform(self, prev_layer: LayerVisualization, 
+                                  current_layer: LayerVisualization, 
+                                  arch_type: str) -> str:
+        """Calculate tensor shape transformation between layers"""
+        if arch_type == 'CNN':
+            return self._calculate_cnn_tensor_transform(prev_layer, current_layer)
+        elif arch_type == 'LSTM':
+            return self._calculate_lstm_tensor_transform(prev_layer, current_layer)
+        else:
+            return f"{prev_layer.layer_type} → {current_layer.layer_type}"
+
+    def _calculate_cnn_tensor_transform(self, prev_layer: LayerVisualization, 
+                                      current_layer: LayerVisualization) -> str:
+        """Calculate tensor transformations for CNN layers"""
+        
+        # Input layer
+        if prev_layer.layer_type == 'input':
+            if current_layer.layer_type.startswith('conv'):
+                # Assume standard input sizes
+                return f"32×32×3 → 32×32×{current_layer.filters or 32}"
+            return "Input → First Layer"
+        
+        # Conv to Conv
+        elif prev_layer.layer_type.startswith('conv') and current_layer.layer_type.startswith('conv'):
+            prev_filters = prev_layer.filters or 32
+            curr_filters = current_layer.filters or 64
+            # Assume spatial reduction due to pooling/stride
+            return f"16×16×{prev_filters} → 16×16×{curr_filters}"
+        
+        # Conv to Pooling
+        elif prev_layer.layer_type.startswith('conv') and 'pool' in current_layer.layer_type:
+            filters = prev_layer.filters or 32
+            if 'global' in current_layer.layer_type:
+                return f"8×8×{filters} → 1×1×{filters}"
+            else:
+                return f"16×16×{filters} → 8×8×{filters}"
+        
+        # Conv/Pool to Dense
+        elif (prev_layer.layer_type.startswith('conv') or 'pool' in prev_layer.layer_type) and current_layer.layer_type == 'dense':
+            if prev_layer.layer_id == 'flatten':
+                flattened = int(prev_layer.width / self.scale_factor) if prev_layer.width > 1 else 512
+                return f"{flattened} → {current_layer.units or 128}"
+            elif 'global' in prev_layer.layer_type:
+                filters = getattr(prev_layer, 'filters', None) or 64
+                return f"{filters} → {current_layer.units or 128}"
+            else:
+                return f"Flattened → {current_layer.units or 128}"
+        
+        # Dense to Dense
+        elif prev_layer.layer_type == 'dense' and current_layer.layer_type == 'dense':
+            prev_units = prev_layer.units or 128
+            curr_units = current_layer.units or 64
+            return f"{prev_units} → {curr_units}"
+        
+        # Default fallback
+        return f"{prev_layer.layer_type} → {current_layer.layer_type}"
+
+    def _calculate_lstm_tensor_transform(self, prev_layer: LayerVisualization, 
+                                       current_layer: LayerVisualization) -> str:
+        """Calculate tensor transformations for LSTM layers"""
+        
+        # Input to LSTM
+        if prev_layer.layer_type == 'input' and current_layer.layer_type == 'lstm':
+            lstm_units = current_layer.units or 128
+            return f"sequence → {lstm_units} hidden"
+        
+        # LSTM to Dense
+        elif prev_layer.layer_type == 'lstm' and current_layer.layer_type == 'dense':
+            lstm_units = prev_layer.units or 128
+            dense_units = current_layer.units or 64
+            return f"{lstm_units} → {dense_units}"
+        
+        # Dense to Dense
+        elif prev_layer.layer_type == 'dense' and current_layer.layer_type == 'dense':
+            prev_units = prev_layer.units or 64
+            curr_units = current_layer.units or 10
+            return f"{prev_units} → {curr_units}"
+        
+        # Default
+        return f"{prev_layer.layer_type} → {current_layer.layer_type}"
+
     def get_performance_color_scheme(self, performance_score: float, health_score: Optional[float] = None) -> Dict[str, str]:
         """
         Get color scheme based on performance and health scores
@@ -530,6 +709,19 @@ if __name__ == "__main__":
     print(f"  Layers: {len(lstm_viz.layers)}")
     print(f"  Total parameters: {lstm_viz.total_parameters:,}")
     print(f"  Max width: {lstm_viz.max_layer_width:.2f}")
+    
+    print("\nTesting Cytoscape.js export for CNN:")
+    cnn_cytoscape = visualizer.export_cytoscape_architecture(cnn_viz)
+    print(f"  Nodes: {len(cnn_cytoscape['nodes'])}")
+    print(f"  Edges: {len(cnn_cytoscape['edges'])}")
+    print(f"  First node: {cnn_cytoscape['nodes'][0]['data']['label']}")
+    print(f"  First edge: {cnn_cytoscape['edges'][0]['data']['tensor_transform']}")
+    
+    print("\nTesting Cytoscape.js export for LSTM:")
+    lstm_cytoscape = visualizer.export_cytoscape_architecture(lstm_viz)
+    print(f"  Nodes: {len(lstm_cytoscape['nodes'])}")
+    print(f"  Edges: {len(lstm_cytoscape['edges'])}")
+    print(f"  LSTM node: {[n['data']['label'] for n in lstm_cytoscape['nodes'] if 'LSTM' in n['data']['label']][0]}")
     
     print("\nColor scheme example:")
     colors = visualizer.get_performance_color_scheme(0.85, 0.75)

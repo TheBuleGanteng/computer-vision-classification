@@ -260,6 +260,12 @@ class OptimizationConfig:
     # Plot generation configuration
     plot_generation: PlotGenerationMode = PlotGenerationMode.ALL
     
+    # Individual plot type controls
+    show_activation_maps: bool = True      # Whether to generate activation map visualizations
+    show_training_history: bool = True     # Whether to generate training history plots  
+    show_confusion_matrix: bool = True     # Whether to generate confusion matrix plots
+    show_training_animation: bool = False   # Whether to generate training animation (gif/mp4)
+    
     # Concurrency (only applies when using RunPod service)
     concurrent: bool = True
     concurrent_workers: int = 2
@@ -683,6 +689,10 @@ class ModelOptimizer:
         self.config = optimization_config or OptimizationConfig()
         self.run_name = run_name
         self.activation_override = activation_override
+        
+        # Generate single timestamp for this entire optimization run
+        from datetime import datetime
+        self.run_timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         if self.activation_override:
             logger.debug(f"running ModelOptimizer.__init__ ... Activation override: {self.activation_override} (will force this activation for all trials)")
         
@@ -736,7 +746,8 @@ class ModelOptimizer:
         default_model_config = ModelConfig()
         self.plot_generator = PlotGenerator(
             dataset_config=self.dataset_config,
-            model_config=default_model_config
+            model_config=default_model_config,
+            optimization_config=optimization_config
         )
         logger.debug(f"running ModelOptimizer.__init__ ... PlotGenerator initialized for data type: {self.plot_generator.data_type}")
         
@@ -1576,8 +1587,8 @@ class ModelOptimizer:
             logger.debug(f"running _train_locally_for_trial ... - ModelConfig.validation_split: {model_config.validation_split}")
             logger.debug(f"running _train_locally_for_trial ... - Creating ModelBuilder with verified config...")
             
-            # Create ModelBuilder (now without GPU proxy since we're doing pure local)
-            model_builder = ModelBuilder(self.dataset_config, model_config)
+            # Create ModelBuilder with trial number, shared timestamp, results directory, and optimization config
+            model_builder = ModelBuilder(self.dataset_config, model_config, trial.number, self.run_timestamp, self.results_dir, self.config)
             
             # Build model
             model_builder.build_model()
@@ -1762,6 +1773,11 @@ class ModelOptimizer:
         
         # Save optimization results
         self._save_results(results)
+        
+        # Build final model with best hyperparameters
+        final_model_path = self._build_final_model(results)
+        if final_model_path:
+            results.best_model_path = final_model_path
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
@@ -2063,6 +2079,110 @@ class ModelOptimizer:
             
         except Exception as e:
             logger.error(f"running ModelOptimizer._save_results ... Failed to save optimization results: {e}")
+
+    def _build_final_model(self, results: OptimizationResult) -> Optional[str]:
+        """
+        Build and train the final model using the best hyperparameters from optimization.
+        Uses the existing ModelBuilder functionality and saves to the correct optimization results directory.
+        
+        Args:
+            results: Optimization results containing best hyperparameters
+            
+        Returns:
+            Path to the saved final model, or None if building failed
+        """
+        try:
+            logger.debug("running _build_final_model ... Building final model with best hyperparameters")
+            
+            # Import here to avoid circular imports
+            from model_builder import ModelBuilder
+            
+            # Create optimized run name
+            optimized_run_name = f"optimized_{self.run_name or self.dataset_name}"
+            logger.debug(f"running _build_final_model ... Using optimized run name: {optimized_run_name}")
+            
+            logger.debug(f"running _build_final_model ... Training with best params: {results.best_params}")
+            
+            # Create ModelConfig from best hyperparameters
+            model_config = ModelConfig()
+            for param_name, param_value in results.best_params.items():
+                if hasattr(model_config, param_name):
+                    setattr(model_config, param_name, param_value)
+                    logger.debug(f"running _build_final_model ... Set {param_name} = {param_value}")
+            
+            # Create ModelBuilder instance with dataset config and model config
+            model_builder = ModelBuilder(
+                self.dataset_config, 
+                model_config, 
+                None,  # trial_number
+                None,  # run_timestamp  
+                self.results_dir,
+                self.config
+            )
+            
+            # Build, train, and evaluate the model
+            model_builder.build_model()
+            
+            # Load data using dataset manager
+            from dataset_manager import DatasetManager
+            dataset_manager = DatasetManager()
+            data = dataset_manager.load_dataset(self.dataset_name)
+            
+            model_builder.train(data=data)
+            test_loss, test_accuracy = model_builder.evaluate(data=data)
+            
+            # Save the model
+            model_path = model_builder.save_model(
+                test_accuracy=test_accuracy,
+                run_name=optimized_run_name
+            )
+            
+            training_result = {
+                'model_builder': model_builder,
+                'model_path': model_path
+            }
+            
+            # Get the model path from the training result
+            if training_result and 'model_builder' in training_result:
+                model_builder = training_result['model_builder']
+                
+                # The model should be saved in the trained_models directory
+                # We need to move it to our optimization results directory
+                saved_model_path = training_result.get('model_path')
+                
+                if saved_model_path and Path(saved_model_path).exists():
+                    # Copy the model to the optimization results optimized_model directory
+                    if not self.results_dir:
+                        logger.error(f"running _build_final_model ... Results directory not set")
+                        return None
+                        
+                    optimized_model_dir = self.results_dir / "optimized_model"
+                    optimized_model_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    final_model_path = optimized_model_dir / Path(saved_model_path).name
+                    
+                    # Copy the model file
+                    import shutil
+                    shutil.copy2(saved_model_path, final_model_path)
+                    
+                    # Copy the metadata file too if it exists
+                    metadata_src = Path(saved_model_path).parent / f"{Path(saved_model_path).stem}_metadata.json"
+                    if metadata_src.exists():
+                        metadata_dst = optimized_model_dir / metadata_src.name
+                        shutil.copy2(metadata_src, metadata_dst)
+                    
+                    logger.debug(f"running _build_final_model ... Final model saved to: {final_model_path}")
+                    return str(final_model_path)
+                else:
+                    logger.error(f"running _build_final_model ... Model training completed but no valid model path found")
+                    return None
+            else:
+                logger.error(f"running _build_final_model ... Model training failed or returned invalid result")
+                return None
+                
+        except Exception as e:
+            logger.error(f"running _build_final_model ... Failed to build final model: {e}")
+            return None
 
 
 # Convenience function for command-line usage with RunPod service support

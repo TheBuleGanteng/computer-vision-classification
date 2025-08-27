@@ -2,7 +2,7 @@ import { Suspense } from "react"
 import { OptimizationControls } from "@/components/dashboard/optimization-controls"
 import { SummaryStats } from "@/components/dashboard/summary-stats"
 import { BestArchitectureView } from "@/components/dashboard/best-architecture-view"
-import { TrialGallery } from "@/components/dashboard/trial-gallery"
+import { TrialGallery } from "@/components/dashboard/trial-gallery-optimized"
 import { DashboardProvider } from "@/components/dashboard/dashboard-provider"
 
 export default function Home() {

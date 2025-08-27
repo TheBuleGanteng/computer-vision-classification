@@ -8,23 +8,35 @@ import {
   Clock,
   Hash
 } from "lucide-react"
+import React, { useMemo } from "react"
 import { useDashboard } from "./dashboard-provider"
+import { useTrials } from "@/hooks/use-trials"
 
-export function SummaryStats() {
-  const { progress, optimizationMode } = useDashboard()
+export const SummaryStats = React.memo(() => {
+  const { optimizationMode } = useDashboard()
+  const { stats, bestTrial } = useTrials()
   
-  // Use real data if available, fallback to default values
-  const trialsPerformed = progress?.trials_performed ?? 0
-  const bestAccuracy = progress?.best_accuracy ?? 0
-  const bestTotalScore = progress?.best_total_score ?? 0
-  const avgDurationPerTrial = progress?.average_duration_per_trial ?? 0
+  // Memoized calculations to prevent unnecessary re-renders
+  const formattedStats = useMemo(() => {
+    const bestAccuracy = bestTrial?.performance?.accuracy ?? 0
+    const bestTotalScore = bestTrial?.performance?.total_score ?? 0
+    
+    const formatDuration = (seconds: number | undefined) => {
+      if (!seconds) return "N/A"
+      const mins = Math.floor(seconds / 60)
+      const secs = Math.floor(seconds % 60)
+      return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
+    }
 
-  // Format duration to readable format
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
-  }
+    const formatScore = (score: number) => `${(score * 100).toFixed(1)}%`
+    
+    return {
+      trialsCompleted: stats.completed,
+      bestAccuracy: formatScore(bestAccuracy),
+      bestTotalScore: formatScore(bestTotalScore),
+      avgScore: formatScore(stats.averageScore)
+    }
+  }, [stats, bestTrial])
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -35,7 +47,7 @@ export function SummaryStats() {
             <Hash className="h-5 w-5 text-blue-500" />
             <div>
               <p className="text-sm font-medium text-muted-foreground">Trials Completed</p>
-              <p className="text-2xl font-bold">{trialsPerformed}</p>
+              <p className="text-2xl font-bold">{formattedStats.trialsCompleted}</p>
             </div>
           </div>
         </CardContent>
@@ -53,7 +65,7 @@ export function SummaryStats() {
                   {optimizationMode}
                 </Badge>
               </div>
-              <p className="text-2xl font-bold">{(bestTotalScore * 100).toFixed(2)}%</p>
+              <p className="text-2xl font-bold">{formattedStats.bestTotalScore}</p>
             </div>
           </div>
         </CardContent>
@@ -66,7 +78,7 @@ export function SummaryStats() {
             <Target className="h-5 w-5 text-green-500" />
             <div>
               <p className="text-sm font-medium text-muted-foreground">Best Accuracy</p>
-              <p className="text-2xl font-bold">{(bestAccuracy * 100).toFixed(2)}%</p>
+              <p className="text-2xl font-bold">{formattedStats.bestAccuracy}</p>
             </div>
           </div>
         </CardContent>
@@ -78,15 +90,15 @@ export function SummaryStats() {
           <div className="flex items-center space-x-2">
             <Clock className="h-5 w-5 text-orange-500" />
             <div>
-              <p className="text-sm font-medium text-muted-foreground">Avg. Duration Per Trial</p>
-              <p className="text-2xl font-bold">{formatDuration(avgDurationPerTrial)}</p>
+              <p className="text-sm font-medium text-muted-foreground">Average Score</p>
+              <p className="text-2xl font-bold">{formattedStats.avgScore}</p>
             </div>
           </div>
         </CardContent>
       </Card>
     </div>
   )
-}
+})
 
 /* 
 IMPLEMENTATION NOTES:
