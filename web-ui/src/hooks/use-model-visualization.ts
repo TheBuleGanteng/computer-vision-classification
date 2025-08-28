@@ -69,7 +69,7 @@ export function useVisualizationDownload() {
 
       const filename = customFilename || generateVisualizationFilename(
         jobId,
-        cachedData?.visualization_data.architecture_type,
+        cachedData?.visualization_data.type,
         cachedData?.performance_score
       );
 

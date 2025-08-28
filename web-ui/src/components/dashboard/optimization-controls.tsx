@@ -155,19 +155,58 @@ export function OptimizationControls() {
     
     try {
       const downloadUrl = apiClient.getModelDownloadUrl(currentJobId)
+      const defaultFilename = `optimized_model_${currentJobId}.zip`
       
-      // Create a temporary link to trigger download
+      // Try modern File System Access API first (Chrome/Edge)
+      if ('showSaveFilePicker' in window) {
+        try {
+          const fileHandle = await (window as unknown as {showSaveFilePicker: (options: unknown) => Promise<FileSystemFileHandle>}).showSaveFilePicker({
+            suggestedName: defaultFilename,
+            types: [{
+              description: 'ZIP Archive',
+              accept: { 'application/zip': ['.zip'] }
+            }]
+          })
+          
+          // Fetch the file data
+          const response = await fetch(downloadUrl)
+          if (!response.ok) throw new Error(`Download failed: ${response.statusText}`)
+          
+          const blob = await response.blob()
+          const writable = await fileHandle.createWritable()
+          await writable.write(blob)
+          await writable.close()
+          
+          console.log("Model package saved to user-selected location")
+          return
+        } catch (err: unknown) {
+          // User cancelled the save dialog or API not supported
+          if ((err as Error).name === 'AbortError') {
+            console.log("User cancelled save dialog")
+            return
+          }
+          console.log("File System Access API failed, falling back to traditional method")
+        }
+      }
+      
+      // Fallback: Traditional download with "Save As" dialog
       const link = document.createElement('a')
       link.href = downloadUrl
-      link.download = `optimized_model_${currentJobId}.keras`
+      link.download = defaultFilename
+      // Force download dialog by setting these attributes
+      link.style.display = 'none'
       document.body.appendChild(link)
       link.click()
-      document.body.removeChild(link)
       
-      console.log("Model download initiated")
+      // Clean up immediately 
+      setTimeout(() => {
+        document.body.removeChild(link)
+      }, 100)
+      
+      console.log("Model package download initiated - save dialog should appear")
     } catch (err) {
-      console.error("Failed to download model:", err)
-      setError(err instanceof Error ? err.message : "Failed to download model")
+      console.error("Failed to download model package:", err)
+      setError(err instanceof Error ? err.message : "Failed to download model package")
     }
   }
 
@@ -363,11 +402,11 @@ export function OptimizationControls() {
             <Button
               onClick={handleDownloadModel}
               disabled={!isModelAvailable || !currentJobId}
-              className="min-w-[160px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
+              className="min-w-[180px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
               title={
                 !isModelAvailable 
-                  ? "Model will be available after optimization completes and final model is built"
-                  : "Download the final model trained with optimized hyperparameters"
+                  ? "Model package will be available after optimization completes and final model is built"
+                  : "Download ZIP archive containing .keras model file, hyperparameters metadata, and usage guide"
               }
             >
               <Download className="h-4 w-4 mr-2" />

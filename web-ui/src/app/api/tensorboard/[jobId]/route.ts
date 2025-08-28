@@ -117,7 +117,7 @@ export async function GET(
     
     return nextResponse;
     
-  } catch {
+  } catch (error: unknown) {
     console.error('[TensorBoard Proxy Root] Fetch error:', error);
     
     return NextResponse.json(

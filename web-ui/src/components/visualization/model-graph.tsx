@@ -200,7 +200,7 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         'line-color': '#64748B',
         'width': 2,
         
-        // Enhanced label positioning to avoid overlapping nodes
+        // Show tensor transform labels by default
         'label': 'data(tensor_transform)',
         'font-size': '8px',
         'text-rotation': 'autorotate',
@@ -208,7 +208,7 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         'text-margin-y': -15,            // Position above the edge (increased)
         'color': '#9CA3AF',
         
-        // Improved label background for better visibility
+        // Improved label background for better visibility (when shown)
         'text-background-color': '#1F2937',
         'text-background-opacity': 0.9,  // Increased opacity
         'text-background-padding': '3px', // Increased padding
@@ -229,22 +229,47 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         'overlay-padding': 4
       }
     },
-    // Animation classes for forward propagation
+    // Animation classes for simultaneous forward/backward flow
     {
-      selector: '.flowing',
+      selector: '.flowing-data',
       style: {
-        'line-color': '#EF4444',
-        'target-arrow-color': '#EF4444',
+        'line-color': '#10B981',  // Green for data flow
+        'target-arrow-color': '#10B981',
+        'target-arrow-shape': 'triangle',
         'width': 4,
         'opacity': 1
       }
     },
     {
-      selector: 'node.active',
+      selector: '.flowing-errors',
       style: {
-        'background-color': '#F59E0B',
-        'border-color': '#F59E0B',
-        'border-width': 3
+        'line-color': '#EF4444',  // Red for error/gradient flow
+        'source-arrow-color': '#EF4444',
+        'source-arrow-shape': 'triangle',
+        'width': 4,
+        'opacity': 1
+      }
+    },
+    {
+      selector: 'node.processing',
+      style: {
+        // Keep original colors, just add heavier border
+        'border-color': '#FBBF24',  // Golden border for active state
+        'border-width': 4,
+        'border-opacity': 1
+      }
+    },
+    // Enhanced tensor shape display
+    {
+      selector: '.tensor-info',
+      style: {
+        'font-size': '9px',
+        'color': '#D1D5DB',
+        'text-background-color': '#1F2937',
+        'text-background-opacity': 0.95,
+        'text-background-padding': '4px',
+        'text-border-width': 1,
+        'text-border-color': '#374151'
       }
     }
   ];
@@ -446,34 +471,186 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
     }
   }, [architectureData]);
 
-  // Animation helper functions
-  const animateForwardPass = () => {
+  // Toggle-based looping animation system
+  const [isAnimating, setIsAnimating] = React.useState(false);
+  const animationIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const isAnimatingRef = useRef(false);
+  
+  const resetAnimations = () => {
     if (!cyRef.current) return;
     
     const nodes = cyRef.current.nodes();
     const edges = cyRef.current.edges();
     
-    // Reset any previous animations
-    nodes.removeClass('active');
-    edges.removeClass('flowing');
+    // Reset all animation classes
+    nodes.removeClass(['processing']);
+    edges.removeClass(['flowing-data', 'flowing-errors']);
     
-    // Animate nodes in sequence
+    // Restore original tensor_transform labels and default styling
+    edges.each((edge) => {
+      const transform = edge.data('tensor_transform');
+      if (transform) {
+        edge.style('label', transform);
+        // Restore default label styling
+        edge.style('color', '#9CA3AF');
+        edge.style('text-background-color', '#1F2937');
+        edge.style('font-weight', 'normal');
+      }
+    });
+    
+    console.log('Reset animations and restored tensor transform labels'); // Debug log
+  };
+
+  const runSingleAnimationCycle = () => {
+    if (!cyRef.current) return;
+    
+    console.log('Running animation cycle, isAnimatingRef:', isAnimatingRef.current); // Debug log
+    
+    const nodes = cyRef.current.nodes();
+    
+    // Get all trainable nodes (excluding input)
+    const trainableNodes = nodes.toArray().filter(node => {
+      const nodeType = node.data('type');
+      return nodeType !== 'input';
+    });
+    
+    console.log('Found nodes:', nodes.length, 'trainable nodes:', trainableNodes.length); // Debug log
+    
+    // PHASE 1: Forward pass - data flows through all layers
     nodes.forEach((node, index) => {
-      setTimeout(() => {
-        node.addClass('active');
+      const timeoutId = setTimeout(() => {
+        if (!isAnimatingRef.current) {
+          console.log('Animation stopped during forward pass'); // Debug log
+          return;
+        }
         
-        // Animate connected edges
+        console.log('Animating forward node', index); // Debug log
+        node.addClass('processing');
+        
+        // Show data flow on outgoing edges
         const outgoingEdges = node.outgoers().edges();
-        outgoingEdges.addClass('flowing');
+        outgoingEdges.addClass('flowing-data');
         
-        // Remove animation after delay
+        // Replace labels with "DATA" during forward pass
+        outgoingEdges.style('label', 'DATA');
+        outgoingEdges.style('color', '#10B981');
+        outgoingEdges.style('text-background-color', '#064E3B');
+        outgoingEdges.style('font-weight', 'bold');
+        
+        // Remove forward animation but keep node processing  
         setTimeout(() => {
-          node.removeClass('active');
-          outgoingEdges.removeClass('flowing');
+          if (outgoingEdges && outgoingEdges.length > 0) {
+            outgoingEdges.removeClass('flowing-data');
+          }
         }, 800);
       }, index * 600);
+      
+      // Store timeout for cleanup
+      if (animationIntervalRef.current === null) {
+        animationIntervalRef.current = timeoutId;
+      }
     });
+    
+    // PHASE 2: Backward pass - errors flow backward through trainable layers only
+    const forwardDuration = nodes.length * 600 + 800;
+    
+    setTimeout(() => {
+      if (!isAnimatingRef.current) {
+        console.log('Animation stopped before backward pass'); // Debug log
+        return;
+      }
+      
+      console.log('Starting backward pass'); // Debug log
+      trainableNodes.reverse().forEach((node, index) => {
+        setTimeout(() => {
+          if (!isAnimatingRef.current) return;
+          
+          console.log('Animating backward node', index); // Debug log
+          
+          // Show error flow on incoming edges (for trainable layers only)
+          const incomingEdges = node.incomers().edges();
+          incomingEdges.addClass('flowing-errors');
+          
+          // Replace labels with "ERRORS" during backward pass
+          incomingEdges.style('label', 'ERRORS');
+          incomingEdges.style('color', '#EF4444');
+          incomingEdges.style('text-background-color', '#7F1D1D');
+          incomingEdges.style('font-weight', 'bold');
+          
+          // Remove error animation and node processing
+          setTimeout(() => {
+            if (node) {
+              node.removeClass('processing');
+            }
+            if (incomingEdges && incomingEdges.length > 0) {
+              incomingEdges.removeClass('flowing-errors');
+            }
+          }, 800);
+        }, index * 400); // Faster backward pass
+      });
+    }, forwardDuration);
+    
+    // PHASE 3: Clean up and schedule next cycle
+    const backwardDuration = trainableNodes.length * 400 + 800;
+    const totalCycleDuration = forwardDuration + backwardDuration;
+    
+    setTimeout(() => {
+      if (!isAnimatingRef.current) {
+        console.log('Animation stopped during cleanup'); // Debug log
+        return;
+      }
+      
+      // Remove processing class from input node
+      const inputNodes = nodes.filter(node => node.data('type') === 'input');
+      inputNodes.removeClass('processing');
+      
+      console.log('Cycle complete, scheduling next cycle'); // Debug log
+      
+      // Schedule next cycle if still animating
+      setTimeout(() => {
+        if (isAnimatingRef.current) {
+          runSingleAnimationCycle(); // Loop!
+        }
+      }, 500); // Small pause between cycles
+    }, totalCycleDuration);
   };
+
+  const toggleAnimation = () => {
+    console.log('Toggle animation clicked, current state:', isAnimating); // Debug log
+    
+    if (isAnimating) {
+      // Stop animation
+      console.log('Stopping animation'); // Debug log
+      setIsAnimating(false);
+      isAnimatingRef.current = false;
+      if (animationIntervalRef.current) {
+        clearTimeout(animationIntervalRef.current);
+        animationIntervalRef.current = null;
+      }
+      // Clean up any active animations
+      resetAnimations();
+    } else {
+      // Start animation loop
+      console.log('Starting animation'); // Debug log
+      setIsAnimating(true);
+      isAnimatingRef.current = true;
+      resetAnimations();
+      
+      // Start immediately since we're using ref
+      console.log('Starting animation cycle immediately'); // Debug log
+      runSingleAnimationCycle();
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (animationIntervalRef.current) {
+        clearTimeout(animationIntervalRef.current);
+      }
+    };
+  }, []);
+
 
   if (!architectureData?.nodes || architectureData.nodes.length === 0) {
     return (
@@ -491,13 +668,20 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
   return (
     <div className={`relative ${className}`}>    
 
-      {/* Animation Controls */}
+      {/* Toggle Animation Controls */}
       <div className="absolute top-2 left-2 z-10">
         <button
-          onClick={animateForwardPass}
-          className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1.5 rounded-md transition-colors"
+          onClick={toggleAnimation}
+          className={`text-white text-sm px-2 py-1 rounded-md transition-colors flex items-center gap-2 ${
+            isAnimating 
+              ? 'bg-red-600 hover:bg-red-700' 
+              : 'bg-green-600 hover:bg-green-700'
+          }`}
         >
-          ▶ Animate Forward Pass
+          <span className="text-xs">
+            {isAnimating ? '⏸' : '▶'}
+          </span>
+          {isAnimating ? 'Pause' : 'Animate'}
         </button>
       </div>
 

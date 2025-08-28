@@ -2066,7 +2066,7 @@ class ModelOptimizer:
                 logger.debug(f"running _save_results ... Applied activation override to best_params: '{self.activation_override}'")
             
             # Save best hyperparameters as YAML
-            yaml_file = self.results_dir / "best_hyperparameters.yaml"
+            yaml_file = self.results_dir / "optimized_model" / "best_hyperparameters.yaml"
             yaml_data = {
                 "dataset": results.dataset_name,
                 "optimization_mode": results.optimization_mode,

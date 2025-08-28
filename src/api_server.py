@@ -1739,15 +1739,17 @@ class OptimizationAPI:
     
     async def _download_model(self, job_id: str) -> FileResponse:
         """
-        Download the trained model from completed optimization job
+        Download the trained model and metadata from completed optimization job
         
-        UPDATED: Uses new result format
+        ENHANCED: Creates ZIP archive containing:
+        - .keras model file
+        - best_hyperparameters.yaml metadata file
         
         Args:
             job_id: Unique job identifier
             
         Returns:
-            FileResponse with model file
+            FileResponse with ZIP archive containing model and metadata
             
         Raises:
             HTTPException: If job not found, not completed, or model not available
@@ -1784,13 +1786,137 @@ class OptimizationAPI:
                 detail=f"Model file not found for job {job_id}"
             )
         
-        logger.debug(f"running OptimizationAPI._download_model ... Serving model file for job {job_id}: {model_path}")
+        try:
+            # Create ZIP archive with model and metadata
+            return await self._create_model_download_archive(job_id, model_path)
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._download_model ... Failed to create download archive: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare model download: {str(e)}"
+            )
+    
+    async def _create_model_download_archive(self, job_id: str, model_path: str) -> FileResponse:
+        """
+        Create ZIP archive containing model file and metadata
         
-        return FileResponse(
-            path=model_path,
-            media_type="application/octet-stream",
-            filename=Path(model_path).name
-        )
+        Args:
+            job_id: Job identifier for naming and metadata lookup
+            model_path: Path to the .keras model file
+            
+        Returns:
+            FileResponse with ZIP archive
+        """
+        import zipfile
+        import tempfile
+        from datetime import datetime
+        
+        model_path_obj = Path(model_path)
+        
+        # Determine the hyperparameters YAML file path
+        # The YAML file is in the same directory as the model
+        yaml_path = model_path_obj.parent / "best_hyperparameters.yaml"
+        
+        logger.debug(f"running _create_model_download_archive ... Model path: {model_path}")
+        logger.debug(f"running _create_model_download_archive ... YAML path: {yaml_path}")
+        
+        # Create temporary ZIP file
+        temp_dir = Path(tempfile.gettempdir())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"optimized_model_{job_id}_{timestamp}.zip"
+        temp_zip_path = temp_dir / zip_filename
+        
+        try:
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # Add the .keras model file
+                if model_path_obj.exists():
+                    zip_file.write(model_path_obj, model_path_obj.name)
+                    logger.debug(f"running _create_model_download_archive ... Added model file: {model_path_obj.name}")
+                else:
+                    logger.warning(f"running _create_model_download_archive ... Model file not found: {model_path}")
+                
+                # Add the hyperparameters YAML file
+                if yaml_path.exists():
+                    zip_file.write(yaml_path, yaml_path.name)
+                    logger.debug(f"running _create_model_download_archive ... Added YAML file: {yaml_path.name}")
+                else:
+                    logger.warning(f"running _create_model_download_archive ... YAML file not found: {yaml_path}")
+                    # Create a minimal YAML file if it doesn't exist
+                    minimal_yaml_content = f"""# Optimization Metadata
+dataset: "unknown"
+optimization_mode: "unknown"
+job_id: "{job_id}"
+note: "Original hyperparameters file not found"
+generated_at: "{datetime.now().isoformat()}"
+"""
+                    yaml_in_zip = "best_hyperparameters.yaml"
+                    zip_file.writestr(yaml_in_zip, minimal_yaml_content)
+                    logger.debug(f"running _create_model_download_archive ... Created minimal YAML file in archive")
+                
+                # Add a README file for user guidance
+                readme_content = f"""# Optimized Model Package
+
+This archive contains your optimized neural network model and configuration.
+
+## Contents
+
+1. **{model_path_obj.name}** - Your trained TensorFlow/Keras model
+   - Load with: `tensorflow.keras.models.load_model('{model_path_obj.name}')`
+   - Ready for inference and deployment
+
+2. **best_hyperparameters.yaml** - Optimization metadata
+   - Contains the hyperparameters that achieved the best performance
+   - Includes dataset info, optimization settings, and performance scores
+   - Use these settings to reproduce or fine-tune your model
+
+## Usage Example
+
+```python
+import tensorflow as tf
+import yaml
+
+# Load the trained model
+model = tf.keras.models.load_model('{model_path_obj.name}')
+
+# Load the hyperparameters
+with open('best_hyperparameters.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+print("Model loaded successfully!")
+print(f"Dataset: {{config['dataset']}}")
+print(f"Best score: {{config['best_total_score']:.4f}}")
+
+# Use model for predictions
+# predictions = model.predict(your_data)
+```
+
+Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Job ID: {job_id}
+"""
+                zip_file.writestr("README.md", readme_content)
+                logger.debug(f"running _create_model_download_archive ... Added README.md")
+            
+            logger.info(f"running _create_model_download_archive ... Created download archive: {temp_zip_path}")
+            
+            return FileResponse(
+                path=str(temp_zip_path),
+                media_type="application/zip",
+                filename=zip_filename,
+                headers={
+                    "Content-Disposition": f"attachment; filename=\"{zip_filename}\"",
+                    "Content-Type": "application/zip",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0"
+                }
+            )
+            
+        except Exception as e:
+            # Clean up temp file if creation failed
+            if temp_zip_path.exists():
+                temp_zip_path.unlink()
+            raise e
     
     async def _get_trial_history(self, job_id: str) -> Dict[str, Any]:
         """
