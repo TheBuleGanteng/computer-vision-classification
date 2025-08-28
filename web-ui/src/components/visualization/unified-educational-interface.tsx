@@ -240,17 +240,18 @@ export const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfacePr
                               <span className="text-gray-300">Conv2D</span>
                             </div>
                             <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-amber-500 rounded"></div>
-                              <span className="text-gray-300">Dense</span>
+                              <div className="w-3 h-3 bg-emerald-500 rounded-full"></div>
+                              <span className="text-gray-300">Pooling</span>
                             </div>
                             <div className="flex items-center gap-1">
                               <div className="w-3 h-3 bg-purple-500 rounded"></div>
                               <span className="text-gray-300">LSTM</span>
                             </div>
                             <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-emerald-500 rounded-full"></div>
-                              <span className="text-gray-300">Pooling</span>
+                              <div className="w-3 h-3 bg-amber-500 rounded"></div>
+                              <span className="text-gray-300">Dense</span>
                             </div>
+                            
                             <div className="flex items-center gap-1">
                               <div className="w-3 h-3 bg-red-600 rounded-full"></div>
                               <span className="text-gray-300">Output</span>

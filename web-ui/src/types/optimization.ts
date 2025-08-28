@@ -114,7 +114,7 @@ export interface HealthMonitoring {
 export interface OptimizationConfiguration {
   mode: 'simple' | 'health'
   health_weight?: number
-  n_trials: number
+  trials: number
   max_epochs_per_trial: number
   max_training_time_minutes: number
   optimization_objective: string

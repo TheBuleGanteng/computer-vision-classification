@@ -241,87 +241,51 @@ class JobStatus(str, Enum):
 
 class OptimizationRequest(BaseModel):
     """
-    Comprehensive request model for hyperparameter optimization with full configuration control
+    API request model for commonly modified user configs.
     
-    ENHANCED: Now supports all optimization and training parameters for complete frontend control
-    
-    Core Parameters:
-        dataset_name: Dataset to optimize (e.g., 'cifar10', 'mnist', 'imdb')
-        mode: Optimization mode ('simple' or 'health')
-        optimize_for: Optimization objective ('val_accuracy', 'accuracy', etc.)
-        
-    Optimization Control:
-        trials: Number of optimization trials
-        max_epochs_per_trial: Maximum epochs per trial
-        min_epochs_per_trial: Minimum epochs per trial
-        health_weight: Health weighting for health mode
-        
-    Training Parameters:
-        validation_split: Train/validation split ratio
-        test_size: Test set size ratio
-        batch_size: Training batch size
-        learning_rate: Initial learning rate
-        optimizer_name: Optimizer type ('adam', 'sgd', etc.)
-        
-    Advanced Settings:
-        activation_functions: List of activation functions to try
-        n_startup_trials: Number of startup trials for optimization
-        early_stopping_patience: Early stopping patience
-        random_seed: Random seed for reproducibility
+    Contains only the 8 most commonly modified variables with their defaults.
+    All other variables are system variables handled by OptimizationConfig.
     """
     
-    # Core parameters
+    # Required field - no default anywhere
     dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'mnist', 'imdb')")
-    mode: str = Field(default="simple", description="Optimization mode ('simple' or 'health')")
-    optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
     
-    # Optimization control
-    trials: int = Field(default=50, ge=1, le=500, description="Number of optimization trials")
-    max_epochs_per_trial: int = Field(default=30, ge=1, le=100, description="Maximum epochs per trial")
-    min_epochs_per_trial: int = Field(default=5, ge=1, le=50, description="Minimum epochs per trial")
-    health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
-    
-    # Training parameters
-    validation_split: float = Field(default=0.2, ge=0.1, le=0.5, description="Validation split ratio")
-    test_size: float = Field(default=0.2, ge=0.1, le=0.5, description="Test set size ratio")
-    batch_size: int = Field(default=32, ge=8, le=512, description="Training batch size")
-    learning_rate: float = Field(default=0.001, ge=0.0001, le=0.1, description="Initial learning rate")
-    optimizer_name: str = Field(default="adam", description="Optimizer type ('adam', 'sgd', 'rmsprop')")
-    
-    # Architecture constraints
-    max_parameters: int = Field(default=10_000_000, ge=1000, le=100_000_000, description="Maximum model parameters")
-    min_accuracy_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Minimum accuracy threshold")
-    
-    # Advanced optimization settings
-    activation_functions: List[str] = Field(
-        default=["relu", "tanh", "sigmoid"], 
-        description="List of activation functions to explore"
-    )
-    n_startup_trials: int = Field(default=10, ge=5, le=50, description="Number of startup trials")
-    n_warmup_steps: int = Field(default=5, ge=1, le=20, description="Number of warmup steps")
-    early_stopping_patience: int = Field(default=5, ge=2, le=20, description="Early stopping patience")
-    enable_early_stopping: bool = Field(default=True, description="Enable early stopping")
-    
-    # Resource and timing constraints
-    max_training_time_minutes: float = Field(default=60.0, ge=5.0, le=300.0, description="Max training time per trial")
-    gpu_proxy_sample_percentage: float = Field(default=0.5, ge=0.1, le=1.0, description="GPU sample percentage")
-    
-    # Reproducibility
-    random_seed: int = Field(default=42, ge=1, le=999999, description="Random seed for reproducibility")
-    
-    # Validation and health analysis
-    health_analysis_sample_size: int = Field(default=50, ge=10, le=200, description="Health analysis sample size")
-    enable_stability_checks: bool = Field(default=True, description="Enable training stability checks")
-    stability_window: int = Field(default=3, ge=2, le=10, description="Stability detection window")
-    
-    # RunPod service settings
-    use_runpod_service: bool = Field(default=False, description="Use RunPod cloud service")
-    concurrent_workers: int = Field(default=1, ge=1, le=6, description="Number of concurrent workers")
-    use_multi_gpu: bool = Field(default=False, description="Enable multi-GPU per worker")
-    target_gpus_per_worker: int = Field(default=1, ge=1, le=4, description="GPUs per worker")
+    # Commonly modified user-controlled variables with defaults HERE
+    mode: str = Field("simple", pattern="^(simple|health)$", description="Optimization mode")
+    optimize_for: str = Field("val_accuracy", description="Optimization objective")
+    trials: int = Field(2, ge=1, le=500, description="Number of optimization trials")
+    max_epochs_per_trial: int = Field(6, ge=1, le=100, description="Maximum epochs per trial")
+    min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
+    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
+    use_runpod_service: bool = Field(False, description="Use RunPod cloud service")
     
     # Legacy compatibility
     config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration overrides")
+
+
+def create_optimization_config(request: OptimizationRequest) -> OptimizationConfig:
+    """
+    Convert API request to business configuration.
+    
+    Passes all user-controlled variables directly (simple pass-through).
+    OptimizationConfig will fail fast if any required values are missing/invalid.
+    """
+    
+    return OptimizationConfig(
+        # Pass all 8 user-controlled variables directly from OptimizationRequest
+        dataset_name=request.dataset_name,
+        mode=OptimizationMode(request.mode),
+        optimize_for=request.optimize_for,
+        trials=request.trials,
+        max_epochs_per_trial=request.max_epochs_per_trial,
+        min_epochs_per_trial=request.min_epochs_per_trial,
+        health_weight=request.health_weight,
+        use_runpod_service=request.use_runpod_service,
+        
+        # Apply any config overrides
+        **request.config_overrides
+        # System variables will use OptimizationConfig defaults (not passed from request)
+    )
 
 
 class JobResponse(BaseModel):
@@ -1002,80 +966,12 @@ class OptimizationJob:
         # FIXED: Use enhanced optimize_model function to avoid duplicating run_name generation logic
         # This ensures consistency and eliminates code duplication
         
-        # Build comprehensive config from request parameters
-        config_overrides = self.request.config_overrides.copy()
+        # Use clean conversion function - gets all user values + system defaults
+        opt_config = create_optimization_config(self.request)
         
-        # Map all request parameters to config overrides
-        config_overrides.update({
-            # Core optimization parameters
-            'health_weight': self.request.health_weight,
-            'n_trials': self.request.trials,
-            'max_epochs_per_trial': self.request.max_epochs_per_trial,
-            'min_epochs_per_trial': self.request.min_epochs_per_trial,
-            
-            # Training parameters
-            'validation_split': self.request.validation_split,
-            'test_size': self.request.test_size,
-            'max_training_time_minutes': self.request.max_training_time_minutes,
-            'gpu_proxy_sample_percentage': self.request.gpu_proxy_sample_percentage,
-            
-            # Architecture constraints
-            'max_parameters': self.request.max_parameters,
-            'min_accuracy_threshold': self.request.min_accuracy_threshold,
-            
-            # Advanced optimization settings
-            'n_startup_trials': self.request.n_startup_trials,
-            'n_warmup_steps': self.request.n_warmup_steps,
-            'early_stopping_patience': self.request.early_stopping_patience,
-            'enable_early_stopping': self.request.enable_early_stopping,
-            
-            # Reproducibility
-            'random_seed': self.request.random_seed,
-            
-            # Health analysis settings
-            'health_analysis_sample_size': self.request.health_analysis_sample_size,
-            'enable_stability_checks': self.request.enable_stability_checks,
-            'stability_window': self.request.stability_window,
-            
-            # RunPod service settings
-            'use_runpod_service': self.request.use_runpod_service,
-            'concurrent_workers': self.request.concurrent_workers,
-            'use_multi_gpu': self.request.use_multi_gpu,
-            'target_gpus_per_worker': self.request.target_gpus_per_worker,
-        })
-        
-        # Handle activation functions list - convert to format expected by optimizer
-        # Note: For now we just take the first activation function as the override
-        # TODO: Enhance optimizer to support multiple activation functions
-        if self.request.activation_functions and len(self.request.activation_functions) > 0:
-            config_overrides['activation'] = self.request.activation_functions[0]
-        
-        # FIXED: Remove parameters that are passed directly to avoid "multiple values" error
-        # These parameters are passed as direct arguments, not in config_overrides
-        direct_params = [
-            'use_runpod_service', 'concurrent_workers', 'use_multi_gpu', 
-            'target_gpus_per_worker', 'n_trials', 'trials'
-        ]
-        for param in direct_params:
-            config_overrides.pop(param, None)
-        
-        logger.debug(f"running OptimizationJob._execute_optimization ... Using optimize_model function")
-        logger.debug(f"running OptimizationJob._execute_optimization ... Direct params: use_runpod_service={self.request.use_runpod_service}, concurrent_workers={self.request.concurrent_workers}")
-        logger.debug(f"running OptimizationJob._execute_optimization ... Config overrides: {config_overrides}")
-        
-        # Create optimizer directly so we can store reference for cancellation
-        opt_config = OptimizationConfig(
-            mode=OptimizationMode(self.request.mode),
-            objective=OptimizationObjective(self.request.optimize_for or "val_accuracy"),
-            n_trials=self.request.trials or 50,
-            use_runpod_service=self.request.use_runpod_service,
-            concurrent_workers=self.request.concurrent_workers
-        )
-        
-        # Apply config overrides
-        for key, value in config_overrides.items():
-            if hasattr(opt_config, key):
-                setattr(opt_config, key, value)
+        logger.debug(f"running OptimizationJob._execute_optimization ... Using clean OptimizationConfig conversion")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Config created with user values: dataset_name={opt_config.dataset_name}, mode={opt_config.mode}, trials={opt_config.trials}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... System defaults: batch_size={opt_config.batch_size}, learning_rate={opt_config.learning_rate}")
         
         # Create optimizer instance and store reference for cancellation
         self.optimizer = ModelOptimizer(
@@ -1083,7 +979,7 @@ class OptimizationJob:
             optimization_config=opt_config,
             run_name=None,
             progress_callback=self._progress_callback,
-            activation_override=self.request.activation_functions[0] if self.request.activation_functions else None
+            activation_override=opt_config.activation_functions[0] if opt_config.activation_functions else None
         )
         
         # Store TensorBoard logs directory for auto-start
@@ -1678,7 +1574,7 @@ class OptimizationAPI:
             request.max_epochs_per_trial = min_epochs
         
         logger.debug(f"running _start_optimization ... Using epoch configuration: min={request.min_epochs_per_trial}, max={request.max_epochs_per_trial}")
-        logger.debug(f"running _start_optimization ... Full request parameters: trials={request.trials}, batch_size={request.batch_size}, learning_rate={request.learning_rate}")
+        logger.debug(f"running _start_optimization ... User parameters: trials={request.trials}, mode={request.mode}, health_weight={request.health_weight}, use_runpod_service={request.use_runpod_service}")
         
         # Create new job with the comprehensive request (no need to recreate)
         job = OptimizationJob(request, self.tensorboard_manager)

@@ -205,83 +205,110 @@ class PlotGenerationMode(Enum):
 
 @dataclass
 class OptimizationConfig:
-    """Configuration for optimization process"""
+    """Business logic configuration with system defaults only"""
     
-    # Optimization mode and strategy
-    mode: OptimizationMode = OptimizationMode.SIMPLE
-    objective: OptimizationObjective = OptimizationObjective.VAL_ACCURACY
-    n_trials: int = 50
-    timeout_hours: Optional[float] = None
-    gpu_proxy_sample_percentage: float = 0.5
+    # User-controlled variables - NO DEFAULTS (fail fast if not provided)
+    dataset_name: str = field(default="")  # Will trigger validation error if empty
+    mode: OptimizationMode = field(default=OptimizationMode.SIMPLE)  # Will use provided value
+    optimize_for: str = field(default="")  # Will trigger validation error if empty
+    trials: int = field(default=0)  # Will trigger validation error if 0
+    max_epochs_per_trial: int = field(default=0)  # Will trigger validation error if 0  
+    min_epochs_per_trial: int = field(default=0)  # Will trigger validation error if 0
+    health_weight: float = field(default=-1.0)  # Will trigger validation error if negative
+    use_runpod_service: bool = field(default=False)  # Will use provided value
     
-    # Health weighting (only used in HEALTH mode with universal objectives)
-    health_weight: float = 0.3
+    # System variables - ONLY here with their defaults
+    objective: OptimizationObjective = field(default=OptimizationObjective.VAL_ACCURACY)
+    timeout_hours: Optional[float] = field(default=None)
+    health_monitoring_frequency: int = field(default=1)
+    max_bias_change_per_epoch: float = field(default=10.0)
+    runpod_service_endpoint: Optional[str] = field(default=None)
+    runpod_service_timeout: int = field(default=600)
+    runpod_service_fallback_local: bool = field(default=True)
+    concurrent: bool = field(default=True)
+    config_overrides: Dict[str, Any] = field(default_factory=dict)
     
-    # Pruning and sampling
-    n_startup_trials: int = 10
-    n_warmup_steps: int = 5
-    random_seed: int = 42
+    # System training parameters - ONLY here with their defaults
+    batch_size: int = field(default=32)
+    learning_rate: float = field(default=0.001)
+    optimizer_name: str = field(default="adam")
+    validation_split: float = field(default=0.2)
+    test_size: float = field(default=0.2)
     
-    # Resource constraints
-    max_epochs_per_trial: int = 20
-    max_training_time_minutes: float = 60.0
-    max_parameters: int = 10_000_000
-    min_accuracy_threshold: float = 0.5
+    # System optimization parameters - ONLY here with their defaults
+    activation_functions: List[str] = field(default_factory=lambda: ["relu", "tanh", "sigmoid"])
+    startup_trials: int = field(default=10)
+    warmup_steps: int = field(default=5)
+    random_seed: int = field(default=42)
+    gpu_proxy_sample_percentage: float = field(default=0.5)
     
-    # Stability detection parameters
-    min_epochs_per_trial: int = 5
-    enable_stability_checks: bool = True
-    stability_window: int = 3
-    max_bias_change_per_epoch: float = 10.0
+    # System resource constraints - ONLY here with their defaults
+    max_training_time_minutes: float = field(default=60.0)
+    max_parameters: int = field(default=10_000_000)
+    min_accuracy_threshold: float = field(default=0.5)
     
-    # Health analysis settings
-    health_analysis_sample_size: int = 50
-    health_monitoring_frequency: int = 1
+    # System stability parameters - ONLY here with their defaults
+    enable_stability_checks: bool = field(default=True)
+    stability_window: int = field(default=3)
+    health_analysis_sample_size: int = field(default=50)
     
-    # Validation settings
-    validation_split: float = 0.2
-    test_size: float = 0.2
+    # System advanced options - ONLY here with their defaults
+    enable_early_stopping: bool = field(default=True)
+    early_stopping_patience: int = field(default=5)
     
-    # Output settings
-    save_best_model: bool = True
-    save_optimization_history: bool = True
-    create_comparison_plots: bool = True
+    # System output settings - ONLY here with their defaults
+    save_best_model: bool = field(default=True)
+    save_optimization_history: bool = field(default=True)
+    create_comparison_plots: bool = field(default=True)
+    plot_generation: PlotGenerationMode = field(default=PlotGenerationMode.ALL)
+    show_activation_maps: bool = field(default=True)
+    show_training_history: bool = field(default=True)
+    show_confusion_matrix: bool = field(default=True)
+    show_training_animation: bool = field(default=False)
     
-    # Advanced options
-    enable_early_stopping: bool = True
-    early_stopping_patience: int = 5
-    
-    # RunPod Service Integration (replaces GPU proxy)
-    use_runpod_service: bool = False               # Enable/disable RunPod service usage
-    runpod_service_endpoint: Optional[str] = None  # RunPod service endpoint URL
-    runpod_service_timeout: int = 600              # Request timeout in seconds (10 minutes)
-    runpod_service_fallback_local: bool = True     # Fall back to local execution if service fails
-    
-    # Plot generation configuration
-    plot_generation: PlotGenerationMode = PlotGenerationMode.ALL
-    
-    # Individual plot type controls
-    show_activation_maps: bool = True      # Whether to generate activation map visualizations
-    show_training_history: bool = True     # Whether to generate training history plots  
-    show_confusion_matrix: bool = True     # Whether to generate confusion matrix plots
-    show_training_animation: bool = False   # Whether to generate training animation (gif/mp4)
-    
-    # Concurrency (only applies when using RunPod service)
-    concurrent: bool = True
-    concurrent_workers: int = 2
-    
-    # Multi-GPU Configuration (for RunPod workers)
-    use_multi_gpu: bool = False                    # Enable multi-GPU per worker
-    target_gpus_per_worker: int = 2               # Desired GPUs per worker
-    auto_detect_gpus: bool = True                 # Auto-detect available GPUs
-    multi_gpu_batch_size_scaling: bool = True     # Scale batch size for multi-GPU
-    max_gpus_per_worker: int = 4                  # Maximum GPUs to use per worker
+    # System concurrency settings - ONLY here with their defaults
+    concurrent_workers: int = field(default=2)
+    use_multi_gpu: bool = field(default=False)
+    target_gpus_per_worker: int = field(default=2)
+    auto_detect_gpus: bool = field(default=True)
+    multi_gpu_batch_size_scaling: bool = field(default=True)
+    max_gpus_per_worker: int = field(default=4)
     
     
     def __post_init__(self) -> None:
-        """Validate configuration after initialization"""
-        if self.n_trials <= 0:
-            raise ValueError("n_trials must be positive")
+        """Fail-fast validation and system setup"""
+        
+        # Validate all required user-controlled variables are provided
+        if not self.dataset_name:
+            raise ValueError("dataset_name is required")
+        if not self.optimize_for:
+            raise ValueError("optimize_for is required")
+        if self.trials <= 0:
+            raise ValueError("trials must be > 0")
+        if self.max_epochs_per_trial <= 0:
+            raise ValueError("max_epochs_per_trial must be > 0")
+        if self.min_epochs_per_trial <= 0:
+            raise ValueError("min_epochs_per_trial must be > 0")
+        if self.health_weight < 0:
+            raise ValueError("health_weight must be >= 0")
+        
+        # Convert optimize_for string to objective enum (system conversion)
+        if isinstance(self.optimize_for, str):
+            objective_mapping = {
+                "val_accuracy": OptimizationObjective.VAL_ACCURACY,
+                "accuracy": OptimizationObjective.ACCURACY,
+                "training_time": OptimizationObjective.TRAINING_TIME,
+                "parameter_efficiency": OptimizationObjective.PARAMETER_EFFICIENCY,
+                "memory_efficiency": OptimizationObjective.MEMORY_EFFICIENCY,
+                "inference_speed": OptimizationObjective.INFERENCE_SPEED,
+                "overall_health": OptimizationObjective.OVERALL_HEALTH,
+                "neuron_utilization": OptimizationObjective.NEURON_UTILIZATION,
+                "training_stability": OptimizationObjective.TRAINING_STABILITY,
+                "gradient_health": OptimizationObjective.GRADIENT_HEALTH
+            }
+            self.objective = objective_mapping.get(self.optimize_for, OptimizationObjective.VAL_ACCURACY)
+        
+        # System validations and adjustments
         if not 0 < self.validation_split < 1:
             raise ValueError("validation_split must be between 0 and 1")
         if not 0 < self.test_size < 1:
@@ -291,6 +318,11 @@ class OptimizationConfig:
         if self.concurrent_workers < 1:
             self.concurrent_workers = 1
             logger.debug("running OptimizationConfig.__post_init__ ... concurrent_workers < 1; coerced to 1")
+        
+        # System configuration and backward compatibility
+        self.n_trials = self.trials  # Backward compatibility
+        self.n_startup_trials = self.startup_trials
+        self.n_warmup_steps = self.warmup_steps
         
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
@@ -780,7 +812,7 @@ class ModelOptimizer:
         self._best_trial_progress: Optional[TrialProgress] = None
         
         # Progress aggregation infrastructure
-        self._progress_aggregator = ConcurrentProgressAggregator(self.config.n_trials)
+        self._progress_aggregator = ConcurrentProgressAggregator(self.config.trials)
         
         # Cancellation flag for graceful shutdown
         self._cancelled = threading.Event()
@@ -808,7 +840,7 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.__init__ ... Objective: {self.config.objective.value}")
         if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
             logger.debug(f"running ModelOptimizer.__init__ ... Health weight: {self.config.health_weight} ({(1-self.config.health_weight)*100:.0f}% objective, {self.config.health_weight*100:.0f}% health)")
-        logger.debug(f"running ModelOptimizer.__init__ ... Max trials: {self.config.n_trials}")
+        logger.debug(f"running ModelOptimizer.__init__ ... Max trials: {self.config.trials}")
         if self.run_name:
             logger.debug(f"running ModelOptimizer.__init__ ... Run name: {self.run_name}")
         
@@ -1173,7 +1205,7 @@ class ModelOptimizer:
         plots_dir.mkdir(exist_ok=True)
         
         # Create trial directories
-        for trial_num in range(self.config.n_trials):
+        for trial_num in range(self.config.trials):
             trial_dir = plots_dir / f"trial_{trial_num + 1}"
             trial_dir.mkdir(exist_ok=True)
         
@@ -1705,7 +1737,7 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.optimize ... Starting optimization for {self.dataset_name}")
         logger.debug(f"running ModelOptimizer.optimize ... Mode: {self.config.mode.value}")
         logger.debug(f"running ModelOptimizer.optimize ... Objective: {self.config.objective.value}")
-        logger.debug(f"running ModelOptimizer.optimize ... Trials: {self.config.n_trials}")
+        logger.debug(f"running ModelOptimizer.optimize ... Trials: {self.config.trials}")
         
         # Log execution approach
         if self.config.use_runpod_service:
@@ -1717,10 +1749,10 @@ class ModelOptimizer:
         # Create Optuna study
         self.study = optuna.create_study(
             direction='maximize',
-            sampler=TPESampler(n_startup_trials=self.config.n_startup_trials, seed=self.config.random_seed),
+            sampler=TPESampler(n_startup_trials=self.config.startup_trials, seed=self.config.random_seed),
             pruner=MedianPruner(
-                n_startup_trials=self.config.n_startup_trials,
-                n_warmup_steps=self.config.n_warmup_steps
+                n_startup_trials=self.config.startup_trials,
+                n_warmup_steps=self.config.warmup_steps
             )
         )
         
@@ -1734,11 +1766,11 @@ class ModelOptimizer:
             else 1
         )
         # Cap by number of trials to avoid oversubscribing the executor
-        n_jobs: int = min(proposed_jobs, self.config.n_trials)
+        n_jobs: int = min(proposed_jobs, self.config.trials)
 
         logger.debug(
             "running ModelOptimizer.optimize ... Optuna n_jobs=%s (concurrent=%s, workers=%s, runpod=%s, trials=%s)",
-            n_jobs, self.config.concurrent, self.config.concurrent_workers, self.config.use_runpod_service, self.config.n_trials
+            n_jobs, self.config.concurrent, self.config.concurrent_workers, self.config.use_runpod_service, self.config.trials
         )
 
         if not self.config.use_runpod_service and (
@@ -1755,9 +1787,9 @@ class ModelOptimizer:
         try:
             self.study.optimize(
                 self._objective_function,
-                n_trials=self.config.n_trials,
+                n_trials=self.config.trials,
                 n_jobs=n_jobs,
-                catch=(Exception,),          # ← don’t let a single trial kill the study
+                catch=(Exception,),          # ← don't let a single trial kill the study
                 gc_after_trial=True          # ← reclaim memory between concurrent trials
             )
             logger.debug(f"running ModelOptimizer.optimize ... Completed {len(self.study.trials)} trials")
@@ -2249,7 +2281,7 @@ def optimize_model(
     opt_config = OptimizationConfig(
         mode=opt_mode,
         objective=objective,
-        n_trials=trials,
+        trials=trials,
         use_runpod_service=use_runpod_service,
         runpod_service_endpoint=runpod_service_endpoint,
         runpod_service_timeout=runpod_service_timeout,
@@ -2337,7 +2369,7 @@ if __name__ == "__main__":
     
     # Convert parameters
     int_params = [
-        'n_trials', 'n_startup_trials', 'n_warmup_steps', 'random_seed',
+        'trials', 'startup_trials', 'warmup_steps', 'random_seed',
         'max_epochs_per_trial', 'early_stopping_patience', 'min_epochs_per_trial',
         'stability_window', 'health_analysis_sample_size', 'health_monitoring_frequency',
         'runpod_service_timeout', 'concurrent_workers'

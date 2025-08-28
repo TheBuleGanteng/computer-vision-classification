@@ -55,7 +55,71 @@ computer-vision-classification/
 
 ---
 
-## II. Key Functionality and Features
+## II. Configuration Flow Architecture 🏗️
+
+### **Understanding Configuration Data Flow**
+
+This project uses a dual-path configuration architecture to support both API-driven (UI) and programmatic usage patterns:
+
+#### **Path 1: API-Driven Flow (Web UI)**
+```
+User Input (Web UI)
+       ↓
+OptimizationRequest (api_server.py)
+  • API validation layer
+  • User-friendly field names
+  • HTTP request parsing
+  • User-controlled defaults
+       ↓
+create_optimization_config()
+  • Conversion function
+  • Type transformations (string → enum)
+  • Pass-through all user values
+       ↓
+OptimizationConfig (optimizer.py)
+  • Business logic configuration
+  • Fail-fast validation
+  • System-controlled defaults
+  • Enum types for internal use
+       ↓
+ModelOptimizer → ModelBuilder → Training Pipeline
+```
+
+#### **Path 2: Programmatic Flow (Direct Usage)**
+```
+Python Code
+       ↓
+OptimizationConfig (optimizer.py)
+  • Direct instantiation
+  • Business logic configuration
+  • Fail-fast validation
+  • System-controlled defaults
+       ↓
+ModelOptimizer → ModelBuilder → Training Pipeline
+```
+
+### **Key Architecture Principles**
+
+**Variable Ownership:**
+- **OptimizationRequest**: Owns user-controlled defaults (trials=50, batch_size=32, etc.)
+- **OptimizationConfig**: Owns system-controlled defaults (timeout_hours=None, health_monitoring_frequency=1, etc.)
+
+**Data Flow Rules:**
+1. **API Path**: User → OptimizationRequest → create_optimization_config() → OptimizationConfig
+2. **Programmatic Path**: Developer → OptimizationConfig directly
+3. **No Conflicting Defaults**: Each variable has defaults in only ONE class
+4. **Fail-Fast**: OptimizationConfig validates all required values immediately
+
+**Benefits:**
+- ✅ **Clear Separation**: API concerns vs business logic
+- ✅ **No Duplication**: Single source of truth for each variable type  
+- ✅ **Type Safety**: String validation in API, enum validation in business logic
+- ✅ **Flexibility**: Supports both UI and programmatic usage patterns
+- ✅ **Maintainability**: Easy to understand which class controls which variables
+
+---
+
+## III. Key Functionality and Features
 
 ### Core Optimization Features
 - ✅ **Multi-modal Dataset Support**: MNIST, CIFAR-10/100, Fashion-MNIST, GTSRB, IMDB, Reuters
@@ -107,7 +171,7 @@ computer-vision-classification/
 
 ---
 
-## III. Completed Implementation
+## IV. Completed Implementation
 
 ### Data Structures and Core Systems
 
@@ -263,7 +327,387 @@ class ModelOptimizer:
 
 ---
 
-## IV. Detailed Implementation Roadmap
+## V. Configuration Consolidation Implementation Plan 🔧
+
+### **Phase 1: OptimizationConfig and OptimizationRequest Consolidation**
+**Status**: ✅ **COMPLETED**
+
+**Problem Statement:**
+The current system has significant duplication between `OptimizationRequest` (API layer) and `OptimizationConfig` (business logic layer), with approximately 70% field overlap. This creates maintenance overhead, potential inconsistencies, and confusion about which class to modify when adding new parameters.
+
+**Solution Overview:**
+After gaining clarity on the data flow (User→OptimizationRequest→OptimizationConfig), implement a cleaner architecture that eliminates conflicting defaults and makes the system more maintainable.
+
+**Key Principles:**
+- **Variable Names**: Use plain-language names from `OptimizationRequest` (e.g., "trials" not "n_trials")  
+- **Default Strategy**: User-controlled variables have defaults ONLY in OptimizationRequest; system variables have defaults ONLY in OptimizationConfig
+- **Architecture**: Maintain clean separation between API concerns and business logic
+- **Fail-Fast**: OptimizationConfig fails fast if required user variables aren't provided
+
+---
+
+### **Revised Implementation Plan** ✅ READY FOR IMPLEMENTATION
+
+**Core Architecture Insight:**
+- **User-controlled variables**: Exist in BOTH classes, defaults ONLY in OptimizationRequest
+- **System variables**: Exist ONLY in OptimizationConfig with their defaults
+- **Data Flow**: User→OptimizationRequest→create_optimization_config()→OptimizationConfig
+- **Benefits**: No conflicting defaults, clear ownership, fail-fast behavior
+
+**Variable Classification:**
+
+**User-controlled variables (exist in BOTH classes):**
+- `dataset_name` (required, no default)
+- `mode`, `optimize_for`, `trials`
+- `max_epochs_per_trial`, `min_epochs_per_trial`, `health_weight`
+- `validation_split`, `test_size`, `batch_size`, `learning_rate`, `optimizer_name`
+- `max_parameters`, `min_accuracy_threshold`, `max_training_time_minutes`
+- `activation_functions`, `startup_trials`, `warmup_steps`, `early_stopping_patience`, `enable_early_stopping`
+- `gpu_proxy_sample_percentage`, `random_seed`, `health_analysis_sample_size`
+- `enable_stability_checks`, `stability_window`
+- `use_runpod_service`, `concurrent_workers`, `use_multi_gpu`, `target_gpus_per_worker`
+
+**System variables (ONLY in OptimizationConfig):**
+- `objective` (enum conversion of `optimize_for`)
+- `timeout_hours`, `health_monitoring_frequency`, `max_bias_change_per_epoch`
+- `runpod_service_endpoint`, `runpod_service_timeout`, `runpod_service_fallback_local`
+- `concurrent`, `config_overrides`
+
+**✅ COMPLETED ACHIEVEMENTS (Step 1):**
+- **Field Name Consolidation**: Updated `n_trials` → `trials`, `n_startup_trials` → `startup_trials`, `n_warmup_steps` → `warmup_steps` across entire codebase
+- **New Consolidated Fields**: Added `dataset_name`, `optimize_for`, `batch_size`, `learning_rate`, `optimizer_name`, `activation_functions`, `config_overrides` 
+- **Enhanced Validation**: Implemented string-to-enum conversion for `optimize_for` → `OptimizationObjective`
+- **Codebase Updates**: Updated all internal references while preserving external API parameter names (Optuna)
+- **Tested Successfully**: OptimizationConfig creation, field access, and validation all working correctly
+
+---
+
+### **Step 1: Update OptimizationRequest** ✅ PENDING
+
+**Objective**: Make OptimizationRequest the single source of defaults for user-controlled variables.
+
+**Implementation Details:**
+```python
+# api_server.py - OptimizationRequest with user defaults only
+class OptimizationRequest(BaseModel):
+    """API request model with user-controlled defaults"""
+    
+    # Required field - no default anywhere
+    dataset_name: str = Field(..., description="Dataset name")
+    
+    # User-controlled variables with defaults HERE (not in OptimizationConfig)
+    mode: str = Field("simple", pattern="^(simple|health)$", description="Optimization mode")
+    optimize_for: str = Field("val_accuracy", description="Optimization objective")
+    trials: int = Field(50, ge=1, le=500, description="Number of optimization trials")
+    
+    # Training control parameters
+    max_epochs_per_trial: int = Field(20, ge=1, le=100, description="Maximum epochs per trial")
+    min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
+    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
+    
+    # Training parameters  
+    validation_split: float = Field(0.2, ge=0.1, le=0.5, description="Validation split ratio")
+    test_size: float = Field(0.2, ge=0.1, le=0.5, description="Test set size ratio")
+    batch_size: int = Field(32, ge=8, le=512, description="Training batch size")
+    learning_rate: float = Field(0.001, ge=0.0001, le=0.1, description="Learning rate")
+    optimizer_name: str = Field("adam", description="Optimizer type")
+    
+    # Resource constraints
+    max_parameters: int = Field(10_000_000, ge=1000, le=100_000_000, description="Max model parameters")
+    min_accuracy_threshold: float = Field(0.5, ge=0.0, le=1.0, description="Min accuracy threshold")
+    max_training_time_minutes: float = Field(60.0, ge=5.0, le=300.0, description="Max training time")
+    
+    # Advanced optimization with defaults
+    activation_functions: List[str] = Field(["relu", "tanh", "sigmoid"], description="Activation functions")
+    startup_trials: int = Field(10, ge=5, le=50, description="Startup trials")
+    warmup_steps: int = Field(5, ge=1, le=20, description="Warmup steps") 
+    early_stopping_patience: int = Field(5, ge=2, le=20, description="Early stopping patience")
+    enable_early_stopping: bool = Field(True, description="Enable early stopping")
+    
+    # Sampling and analysis
+    gpu_proxy_sample_percentage: float = Field(0.5, ge=0.1, le=1.0, description="GPU sample percentage")
+    random_seed: int = Field(42, ge=1, le=999999, description="Random seed")
+    health_analysis_sample_size: int = Field(50, ge=10, le=200, description="Health analysis sample size")
+    
+    # Stability detection
+    enable_stability_checks: bool = Field(True, description="Enable stability checks")
+    stability_window: int = Field(3, ge=2, le=10, description="Stability window")
+    
+    # RunPod settings with defaults
+    use_runpod_service: bool = Field(False, description="Use RunPod service")
+    concurrent_workers: int = Field(2, ge=1, le=6, description="Concurrent workers")
+    use_multi_gpu: bool = Field(False, description="Enable multi-GPU per worker")
+    target_gpus_per_worker: int = Field(2, ge=1, le=4, description="GPUs per worker")
+```
+
+---
+
+### **Step 2: Update OptimizationConfig** ✅ PENDING
+
+**Objective**: Remove user-controlled defaults from OptimizationConfig, keep system variables.
+
+**Implementation Details:**
+```python
+# optimizer.py - OptimizationConfig with system defaults only
+@dataclass
+class OptimizationConfig:
+    """Business logic configuration with system defaults only"""
+    
+    # User-controlled variables - NO DEFAULTS (fail fast if not provided)
+    dataset_name: str = field(default="")  # Will be set to "" to trigger validation error
+    mode: OptimizationMode = field(default=OptimizationMode.SIMPLE)
+    trials: int = field(default=0)  # Will trigger validation error if 0
+    max_epochs_per_trial: int = field(default=0)  # Will trigger validation error
+    min_epochs_per_trial: int = field(default=0)  # Will trigger validation error
+    health_weight: float = field(default=0.0)
+    validation_split: float = field(default=0.0)  # Will trigger validation error
+    test_size: float = field(default=0.0)  # Will trigger validation error
+    batch_size: int = field(default=0)  # Will trigger validation error
+    learning_rate: float = field(default=0.0)  # Will trigger validation error
+    optimizer_name: str = field(default="")  # Will trigger validation error
+    max_parameters: int = field(default=0)  # Will trigger validation error
+    min_accuracy_threshold: float = field(default=0.0)
+    max_training_time_minutes: float = field(default=0.0)  # Will trigger validation error
+    activation_functions: List[str] = field(default_factory=list)  # Empty = error
+    startup_trials: int = field(default=0)  # Will trigger validation error
+    warmup_steps: int = field(default=0)  # Will trigger validation error
+    early_stopping_patience: int = field(default=0)  # Will trigger validation error
+    enable_early_stopping: bool = field(default=False)
+    gpu_proxy_sample_percentage: float = field(default=0.0)  # Will trigger validation error
+    random_seed: int = field(default=0)  # Will trigger validation error
+    health_analysis_sample_size: int = field(default=0)  # Will trigger validation error
+    enable_stability_checks: bool = field(default=False)
+    stability_window: int = field(default=0)  # Will trigger validation error
+    use_runpod_service: bool = field(default=False)
+    concurrent_workers: int = field(default=0)  # Will trigger validation error
+    use_multi_gpu: bool = field(default=False) 
+    target_gpus_per_worker: int = field(default=0)  # Will trigger validation error
+    
+    # System variables - ONLY here with their defaults
+    optimize_for: str = field(default="")  # Temporary, converts to objective
+    objective: OptimizationObjective = field(default=OptimizationObjective.VAL_ACCURACY)
+    timeout_hours: Optional[float] = field(default=None)
+    health_monitoring_frequency: int = field(default=1)
+    max_bias_change_per_epoch: float = field(default=10.0)
+    runpod_service_endpoint: str = field(default="")
+    runpod_service_timeout: float = field(default=300.0)
+    runpod_service_fallback_local: bool = field(default=True)
+    concurrent: bool = field(default=False)
+    config_overrides: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Fail-fast validation and system setup"""
+        
+        # Validate all required user-controlled variables are provided
+        if not self.dataset_name:
+            raise ValueError("dataset_name is required")
+        if self.trials <= 0:
+            raise ValueError("trials must be > 0")
+        if self.max_epochs_per_trial <= 0:
+            raise ValueError("max_epochs_per_trial must be > 0")
+        if not (0 < self.validation_split < 1):
+            raise ValueError("validation_split must be between 0 and 1")
+        if not (0 < self.test_size < 1):
+            raise ValueError("test_size must be between 0 and 1")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        if self.learning_rate <= 0:
+            raise ValueError("learning_rate must be > 0")
+        if not self.optimizer_name:
+            raise ValueError("optimizer_name is required")
+        if not self.activation_functions:
+            raise ValueError("activation_functions cannot be empty")
+        
+        # Convert optimize_for string to objective enum (system conversion)
+        if self.optimize_for:
+            objective_map = {
+                "val_accuracy": OptimizationObjective.VAL_ACCURACY,
+                "training_time": OptimizationObjective.TRAINING_TIME,
+                "model_size": OptimizationObjective.MODEL_SIZE,
+                "combined": OptimizationObjective.COMBINED
+            }
+            self.objective = objective_map.get(self.optimize_for.lower(), OptimizationObjective.VAL_ACCURACY)
+        
+        # System configuration and backward compatibility
+        self.n_trials = self.trials  # Backward compatibility
+        self.n_startup_trials = self.startup_trials
+        self.n_warmup_steps = self.warmup_steps
+        
+        # System validations and adjustments
+        if self.concurrent_workers < 1:
+            self.concurrent_workers = 1
+        if self.use_runpod_service and not self.runpod_service_endpoint:
+            logger.warning("RunPod service enabled but no endpoint configured")
+```
+
+---
+
+### **Step 3: Update Conversion Function** ✅ PENDING
+
+**Objective**: Clean conversion that passes all user values from OptimizationRequest to OptimizationConfig.
+
+**Implementation Details:**
+```python
+# api_server.py - Simple pass-through conversion
+def create_optimization_config(request: OptimizationRequest) -> OptimizationConfig:
+    """
+    Convert API request to business configuration.
+    
+    Passes all user-controlled variables directly (no selective logic needed).
+    OptimizationConfig will fail fast if any required values are missing/invalid.
+    """
+    
+    return OptimizationConfig(
+        # Pass all user-controlled variables directly
+        dataset_name=request.dataset_name,
+        mode=OptimizationMode(request.mode),
+        optimize_for=request.optimize_for,
+        trials=request.trials,
+        max_epochs_per_trial=request.max_epochs_per_trial,
+        min_epochs_per_trial=request.min_epochs_per_trial,
+        health_weight=request.health_weight,
+        validation_split=request.validation_split,
+        test_size=request.test_size,
+        batch_size=request.batch_size,
+        learning_rate=request.learning_rate,
+        optimizer_name=request.optimizer_name,
+        max_parameters=request.max_parameters,
+        min_accuracy_threshold=request.min_accuracy_threshold,
+        max_training_time_minutes=request.max_training_time_minutes,
+        activation_functions=request.activation_functions,
+        startup_trials=request.startup_trials,
+        warmup_steps=request.warmup_steps,
+        early_stopping_patience=request.early_stopping_patience,
+        enable_early_stopping=request.enable_early_stopping,
+        gpu_proxy_sample_percentage=request.gpu_proxy_sample_percentage,
+        random_seed=request.random_seed,
+        health_analysis_sample_size=request.health_analysis_sample_size,
+        enable_stability_checks=request.enable_stability_checks,
+        stability_window=request.stability_window,
+        use_runpod_service=request.use_runpod_service,
+        concurrent_workers=request.concurrent_workers,
+        use_multi_gpu=request.use_multi_gpu,
+        target_gpus_per_worker=request.target_gpus_per_worker,
+        # System variables use OptimizationConfig defaults (not passed from request)
+    )
+```
+
+---
+
+### **Step 4: Comprehensive Testing Strategy** ✅ PENDING
+
+**Test Architecture Changes:**
+```python
+# tests/test_revised_consolidation.py
+class TestRevisedConsolidation:
+    
+    def test_optimization_request_has_user_defaults(self):
+        """Test OptimizationRequest provides all user defaults"""
+        request = OptimizationRequest(dataset_name="mnist")
+        
+        # All user-controlled variables should have defaults
+        assert request.mode == "simple"
+        assert request.optimize_for == "val_accuracy"
+        assert request.trials == 50
+        assert request.max_epochs_per_trial == 20
+        assert request.batch_size == 32
+        assert request.learning_rate == 0.001
+    
+    def test_optimization_config_fails_without_user_values(self):
+        """Test OptimizationConfig fails fast when user values not provided"""
+        
+        # Should raise validation errors
+        with pytest.raises(ValueError, match="dataset_name is required"):
+            OptimizationConfig()
+        
+        with pytest.raises(ValueError, match="trials must be > 0"):
+            OptimizationConfig(dataset_name="mnist", trials=0)
+    
+    def test_conversion_function_clean(self):
+        """Test conversion function is simple pass-through"""
+        request = OptimizationRequest(
+            dataset_name="cifar10",
+            trials=25,
+            batch_size=64
+        )
+        
+        config = create_optimization_config(request)
+        
+        # All values should pass through exactly
+        assert config.dataset_name == "cifar10"
+        assert config.trials == 25
+        assert config.batch_size == 64
+        
+        # System variables should use their defaults
+        assert config.health_monitoring_frequency == 1  # System default
+        assert config.max_bias_change_per_epoch == 10.0  # System default
+    
+    def test_no_conflicting_defaults(self):
+        """Test there are no conflicting defaults between classes"""
+        request = OptimizationRequest(dataset_name="mnist")
+        config = create_optimization_config(request)
+        
+        # Verify user defaults flow from request → config
+        assert config.trials == request.trials == 50
+        assert config.batch_size == request.batch_size == 32
+        assert config.health_weight == request.health_weight == 0.3
+        
+        # System variables only exist in config
+        assert hasattr(config, 'health_monitoring_frequency')
+        assert not hasattr(request, 'health_monitoring_frequency')
+```
+
+---
+
+### **Step 5: Migration Implementation Strategy** ✅ PENDING
+
+**Phase 1: Update OptimizationRequest (User Defaults)**
+```bash
+# Status: ✅ PENDING
+# Tasks:
+# 1. Move all user-controlled defaults from OptimizationConfig to OptimizationRequest
+# 2. Update validation ranges in OptimizationRequest
+# 3. Test API validation works with new defaults
+```
+
+**Phase 2: Update OptimizationConfig (System Defaults Only)**  
+```bash
+# Status: ✅ PENDING
+# Tasks:
+# 1. Remove user-controlled defaults from OptimizationConfig
+# 2. Add fail-fast validation in __post_init__
+# 3. Keep system variables with their defaults
+# 4. Test fail-fast behavior works correctly
+```
+
+**Phase 3: Update Conversion Function**
+```bash
+# Status: ✅ PENDING
+# Tasks: 
+# 1. Simplify conversion function to pass-through all user values
+# 2. Remove complex optional field logic
+# 3. Test conversion produces valid OptimizationConfig instances
+```
+
+**Phase 4: End-to-End Testing**
+```bash
+# Status: ✅ PENDING
+# Tasks:
+# 1. Test complete API → Config → Optimization flow
+# 2. Verify no behavioral regressions
+# 3. Confirm improved error messages and fail-fast behavior
+```
+
+**Benefits of Revised Architecture:**
+- ✅ **No Conflicting Defaults**: Single source of truth for each variable type
+- ✅ **Fail-Fast**: OptimizationConfig validates all required user values immediately  
+- ✅ **Clear Ownership**: User variables controlled by API, system variables by business logic
+- ✅ **Simple Conversion**: No complex optional field mapping needed
+- ✅ **Maintainable**: Easy to understand which class controls which variables
+
+---
+
+## VI. Detailed Implementation Roadmap
 
 ### **Phase 1: Cytoscape.js + TensorBoard Educational Visualization Implementation** 🎮
 **Status**: **BACKEND COMPLETE ✅ | FRONTEND MIGRATION TO CYTOSCAPE.JS + TENSORBOARD NEEDED**
@@ -2134,8 +2578,56 @@ This comprehensive plan addresses both the technical debt (dual code paths) and 
 
 ---
 
-### **Phase 8: WebSocket Migration** ⚡
-**Status**: Performance enhancement (after Phase 7 complete)
+### **Phase 8: Dynamic Model Architecture Legend** 🏷️
+**Status**: **READY FOR IMPLEMENTATION**
+
+**Objectives:**
+- Replace static hardcoded legend with dynamic legend based on actual model layers
+- Show only layer types present in the current model architecture 
+- Maintain visual consistency between legend and model diagram
+- Support unknown layer types with default styling
+
+**Key Deliverables:**
+- Dynamic legend component that reads from `architectureData.nodes`
+- Layer type mapping with colors, shapes, and labels
+- Flow-order sorting (Input → Conv → Pool → LSTM → Dense → Dropout → Output)
+- Default styling for unknown layer types
+- Future accessibility support via hover tooltips (planned)
+
+**Implementation Details:**
+- Extract unique layer types from model architecture data
+- Map layer types to visual representations (color, shape, label)
+- Replace hardcoded legend in all layout views (split, architecture-focus, metrics-focus)
+- Handle edge cases: loading states, empty data, unknown types
+
+---
+
+### **Phase 9: Enhanced Layer Visualization** 🎯
+**Status**: **PLANNED** (Future enhancement after Phase 8)
+
+**Objectives:**
+- Add flattening layer visualization as distinct stage in model flow
+- Implement filter and node count visualization within layers
+- Enhanced educational value through detailed layer information
+- Improved model architecture understanding
+
+**Key Deliverables:**
+- Flattening layer type with appropriate visual styling
+- Filter count visualization for convolutional layers
+- Node count visualization for dense layers
+- Enhanced layer information display
+- Hover tooltips for detailed layer descriptions
+
+**Future Roadmap Items:**
+- Interactive layer filtering and highlighting
+- Animation improvements for data flow visualization
+- Performance metrics integration with layer visualization
+- Export functionality for model architecture diagrams
+
+---
+
+### **Phase 10: WebSocket Migration** ⚡
+**Status**: Performance enhancement (after Phase 9 complete)
 
 **Objectives:**
 - Replace HTTP polling with WebSocket real-time updates for sub-second latency
