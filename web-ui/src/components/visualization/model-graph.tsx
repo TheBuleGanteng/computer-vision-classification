@@ -130,7 +130,7 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
     {
       selector: 'node[type*="pool"]',
       style: {
-        'background-color': '#10B981',
+        'background-color': '#06B6D4', // Changed from #10B981 (emerald) to #06B6D4 (cyan) for better distinction from input
         'shape': 'ellipse',
         'width': 60,
         'height': 40,

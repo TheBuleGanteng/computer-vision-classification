@@ -60,6 +60,151 @@ interface UnifiedEducationalInterfaceProps {
 
 type LayoutMode = 'split' | 'architecture-focus' | 'metrics-focus';
 
+// Layer type definitions for dynamic legend - matches model-graph.tsx styling
+interface LayerTypeDefinition {
+  color: string;
+  shape: 'rounded-full' | 'rounded' | 'rounded-lg';
+  label: string;
+  order: number;
+}
+
+const LAYER_TYPE_DEFINITIONS: Record<string, LayerTypeDefinition> = {
+  'input': {
+    color: 'bg-green-600', // Matches #059669 from model-graph.tsx
+    shape: 'rounded-full',
+    label: 'Input',
+    order: 1
+  },
+  'conv2d': {
+    color: 'bg-blue-500', // Matches #3B82F6 from model-graph.tsx
+    shape: 'rounded',
+    label: 'Conv2D',
+    order: 2
+  },
+  'conv': {
+    color: 'bg-blue-500', // Matches #3B82F6 from model-graph.tsx
+    shape: 'rounded',
+    label: 'Conv2D',
+    order: 2
+  },
+  'pooling': {
+    color: 'bg-cyan-500', // Changed from emerald to cyan for better distinction from input
+    shape: 'rounded-full',
+    label: 'Pooling',
+    order: 3
+  },
+  'pool': {
+    color: 'bg-cyan-500', // Changed from emerald to cyan for better distinction from input
+    shape: 'rounded-full',
+    label: 'Pooling',
+    order: 3
+  },
+  'flatten': {
+    color: 'bg-gray-500', // Default for flatten - future enhancement
+    shape: 'rounded',
+    label: 'Flatten',
+    order: 3.5
+  },
+  'lstm': {
+    color: 'bg-purple-500', // Matches #8B5CF6 from model-graph.tsx
+    shape: 'rounded',
+    label: 'LSTM',
+    order: 4
+  },
+  'dense': {
+    color: 'bg-amber-500', // Matches #F59E0B from model-graph.tsx
+    shape: 'rounded',
+    label: 'Dense',
+    order: 5
+  },
+  'dropout': {
+    color: 'bg-red-500', // Matches #EF4444 from model-graph.tsx
+    shape: 'rounded-lg',
+    label: 'Dropout',
+    order: 6
+  },
+  'activation': {
+    color: 'bg-lime-500', // Matches #84CC16 from model-graph.tsx
+    shape: 'rounded-lg',
+    label: 'Activation',
+    order: 7
+  },
+  'output': {
+    color: 'bg-red-600', // Matches #DC2626 from model-graph.tsx
+    shape: 'rounded-full',
+    label: 'Output',
+    order: 10
+  }
+};
+
+// Default style for unknown layer types
+const DEFAULT_LAYER_TYPE: LayerTypeDefinition = {
+  color: 'bg-gray-400',
+  shape: 'rounded',
+  label: 'Unknown',
+  order: 99
+};
+
+// Function to generate dynamic legend based on actual layers present
+const generateDynamicLegend = (architectureData: CytoscapeData | null): LayerTypeDefinition[] => {
+  if (!architectureData?.nodes || architectureData.nodes.length === 0) {
+    return [];
+  }
+  
+  // Extract unique layer types from the architecture data
+  const presentTypes = new Set<string>();
+  architectureData.nodes.forEach(node => {
+    const layerType = node.data.type?.toLowerCase() || 'unknown';
+    presentTypes.add(layerType);
+  });
+  
+  // Map to legend definitions
+  const legendItems: LayerTypeDefinition[] = [];
+  presentTypes.forEach(type => {
+    const definition = LAYER_TYPE_DEFINITIONS[type] || {
+      ...DEFAULT_LAYER_TYPE,
+      label: type.charAt(0).toUpperCase() + type.slice(1)
+    };
+    legendItems.push(definition);
+  });
+  
+  // Sort by flow order (input → conv → pool → lstm → dense → dropout → output)
+  // then alphabetically by label for consistency
+  return legendItems.sort((a, b) => {
+    if (a.order !== b.order) return a.order - b.order;
+    return a.label.localeCompare(b.label);
+  });
+};
+
+// Dynamic Legend Component
+const DynamicLegend: React.FC<{ architectureData: CytoscapeData | null }> = React.memo(({ architectureData }) => {
+  const legendItems = generateDynamicLegend(architectureData);
+  
+  if (legendItems.length === 0) {
+    return (
+      <div className="text-xs text-gray-400">
+        No layers to display
+      </div>
+    );
+  }
+  
+  return (
+    <div className="z-10 bg-gray-800 bg-opacity-90 rounded-lg p-0 pt-1">
+      <div className="text-xs text-gray-300 mb-2 font-semibold">Layer Types</div>
+      <div className="flex flex-wrap gap-2 text-xs">
+        {legendItems.map((item) => (
+          <div key={item.label} className="flex items-center gap-1">
+            <div className={`w-3 h-3 ${item.color} ${item.shape}`}></div>
+            <span className="text-gray-300">{item.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
+DynamicLegend.displayName = 'DynamicLegend';
+
 export const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfaceProps> = React.memo(({
   jobId,
   trialId,
@@ -227,39 +372,9 @@ export const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfacePr
                 <h3 className="font-semibold text-white">Model Architecture</h3>
                 {architectureData?.metadata ? (
                   <div className="text-gray-400 text-xs">
-                      {architectureData.metadata.architecture_type} Architecture - {architectureData.metadata.total_parameters.toLocaleString()} parameters
-                        <div className="z-10 bg-gray-800 bg-opacity-90 rounded-lg p-0 pt-1">
-                          <div className="text-xs text-gray-300 mb-2 font-semibold">Layer Types</div>
-                          <div className="flex flex-wrap gap-2 text-xs">
-                            <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-green-600 rounded-full"></div>
-                              <span className="text-gray-300">Input</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-blue-500 rounded"></div>
-                              <span className="text-gray-300">Conv2D</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-emerald-500 rounded-full"></div>
-                              <span className="text-gray-300">Pooling</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-purple-500 rounded"></div>
-                              <span className="text-gray-300">LSTM</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-amber-500 rounded"></div>
-                              <span className="text-gray-300">Dense</span>
-                            </div>
-                            
-                            <div className="flex items-center gap-1">
-                              <div className="w-3 h-3 bg-red-600 rounded-full"></div>
-                              <span className="text-gray-300">Output</span>
-                            </div>
-                          </div>
-                        </div>
+                    {architectureData.metadata.architecture_type} Architecture - {architectureData.metadata.total_parameters.toLocaleString()} parameters
+                    <DynamicLegend architectureData={architectureData} />
                   </div>
-                  
                 ) : (
                   <p className="text-gray-400 text-sm">
                     Interactive neural network structure

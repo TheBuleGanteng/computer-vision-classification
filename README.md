@@ -140,6 +140,7 @@ ModelOptimizer → ModelBuilder → Training Pipeline
 - ✅ **FastAPI REST API**: Comprehensive endpoints for job management and data retrieval
 - ✅ **Real-time WebSocket Support**: Live optimization progress streaming
 - ✅ **3D Visualization Data Pipeline**: Model architecture to 3D coordinates transformation
+- ✅ **Configuration Architecture Consolidation**: Eliminated ~70% field overlap between OptimizationRequest and OptimizationConfig with clean separation of user vs system variables
 - ✅ **JSON Serialization**: Complete export functionality for visualization data
 - ✅ **Health Metrics Integration**: Performance-based color coding and visual indicators
 
@@ -157,6 +158,7 @@ ModelOptimizer → ModelBuilder → Training Pipeline
 - ✅ **Best Model Tracking**: Automatic identification and highlighting of optimal architectures  
 - ✅ **Performance Color Coding**: Visual indicators based on accuracy and health metrics
 - ✅ **Architecture Data Export**: JSON download with complete model structure and metadata
+- ✅ **Dynamic Model Architecture Legend**: Model-specific legends showing only layer types present in current architecture with visual consistency
 - ✅ **Optimized Model Download**: Automatic final model building with best hyperparameters and .keras format download for deployment
 - 🔄 **Interactive Cytoscape.js Architecture Diagrams**: Layer-by-layer DAG exploration with forward propagation animations and TensorBoard metrics integration
 - 🔄 **Educational Export Options**: Vector architecture diagrams (SVG/PDF), training metric charts, animated data flow sequences
@@ -325,1143 +327,23 @@ class ModelOptimizer:
 - ✅ **API Type Safety**: Fixed type checking errors for optimizer methods with proper null checks following established patterns
 - ✅ **Configuration Flow Integrity**: Resolved missing optimization_config parameter in ModelBuilder constructor, ensuring plot generation flags flow correctly from optimizer to visualization system
 
----
+### Cytoscape.js + TensorBoard Educational Visualization System
 
-## V. Configuration Consolidation Implementation Plan 🔧
-
-### **Phase 1: OptimizationConfig and OptimizationRequest Consolidation**
-**Status**: ✅ **COMPLETED**
-
-**Problem Statement:**
-The current system has significant duplication between `OptimizationRequest` (API layer) and `OptimizationConfig` (business logic layer), with approximately 70% field overlap. This creates maintenance overhead, potential inconsistencies, and confusion about which class to modify when adding new parameters.
-
-**Solution Overview:**
-After gaining clarity on the data flow (User→OptimizationRequest→OptimizationConfig), implement a cleaner architecture that eliminates conflicting defaults and makes the system more maintainable.
-
-**Key Principles:**
-- **Variable Names**: Use plain-language names from `OptimizationRequest` (e.g., "trials" not "n_trials")  
-- **Default Strategy**: User-controlled variables have defaults ONLY in OptimizationRequest; system variables have defaults ONLY in OptimizationConfig
-- **Architecture**: Maintain clean separation between API concerns and business logic
-- **Fail-Fast**: OptimizationConfig fails fast if required user variables aren't provided
-
----
-
-### **Revised Implementation Plan** ✅ READY FOR IMPLEMENTATION
-
-**Core Architecture Insight:**
-- **User-controlled variables**: Exist in BOTH classes, defaults ONLY in OptimizationRequest
-- **System variables**: Exist ONLY in OptimizationConfig with their defaults
-- **Data Flow**: User→OptimizationRequest→create_optimization_config()→OptimizationConfig
-- **Benefits**: No conflicting defaults, clear ownership, fail-fast behavior
-
-**Variable Classification:**
-
-**User-controlled variables (exist in BOTH classes):**
-- `dataset_name` (required, no default)
-- `mode`, `optimize_for`, `trials`
-- `max_epochs_per_trial`, `min_epochs_per_trial`, `health_weight`
-- `validation_split`, `test_size`, `batch_size`, `learning_rate`, `optimizer_name`
-- `max_parameters`, `min_accuracy_threshold`, `max_training_time_minutes`
-- `activation_functions`, `startup_trials`, `warmup_steps`, `early_stopping_patience`, `enable_early_stopping`
-- `gpu_proxy_sample_percentage`, `random_seed`, `health_analysis_sample_size`
-- `enable_stability_checks`, `stability_window`
-- `use_runpod_service`, `concurrent_workers`, `use_multi_gpu`, `target_gpus_per_worker`
-
-**System variables (ONLY in OptimizationConfig):**
-- `objective` (enum conversion of `optimize_for`)
-- `timeout_hours`, `health_monitoring_frequency`, `max_bias_change_per_epoch`
-- `runpod_service_endpoint`, `runpod_service_timeout`, `runpod_service_fallback_local`
-- `concurrent`, `config_overrides`
-
-**✅ COMPLETED ACHIEVEMENTS (Step 1):**
-- **Field Name Consolidation**: Updated `n_trials` → `trials`, `n_startup_trials` → `startup_trials`, `n_warmup_steps` → `warmup_steps` across entire codebase
-- **New Consolidated Fields**: Added `dataset_name`, `optimize_for`, `batch_size`, `learning_rate`, `optimizer_name`, `activation_functions`, `config_overrides` 
-- **Enhanced Validation**: Implemented string-to-enum conversion for `optimize_for` → `OptimizationObjective`
-- **Codebase Updates**: Updated all internal references while preserving external API parameter names (Optuna)
-- **Tested Successfully**: OptimizationConfig creation, field access, and validation all working correctly
-
----
-
-### **Step 1: Update OptimizationRequest** ✅ PENDING
-
-**Objective**: Make OptimizationRequest the single source of defaults for user-controlled variables.
-
-**Implementation Details:**
-```python
-# api_server.py - OptimizationRequest with user defaults only
-class OptimizationRequest(BaseModel):
-    """API request model with user-controlled defaults"""
-    
-    # Required field - no default anywhere
-    dataset_name: str = Field(..., description="Dataset name")
-    
-    # User-controlled variables with defaults HERE (not in OptimizationConfig)
-    mode: str = Field("simple", pattern="^(simple|health)$", description="Optimization mode")
-    optimize_for: str = Field("val_accuracy", description="Optimization objective")
-    trials: int = Field(50, ge=1, le=500, description="Number of optimization trials")
-    
-    # Training control parameters
-    max_epochs_per_trial: int = Field(20, ge=1, le=100, description="Maximum epochs per trial")
-    min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
-    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
-    
-    # Training parameters  
-    validation_split: float = Field(0.2, ge=0.1, le=0.5, description="Validation split ratio")
-    test_size: float = Field(0.2, ge=0.1, le=0.5, description="Test set size ratio")
-    batch_size: int = Field(32, ge=8, le=512, description="Training batch size")
-    learning_rate: float = Field(0.001, ge=0.0001, le=0.1, description="Learning rate")
-    optimizer_name: str = Field("adam", description="Optimizer type")
-    
-    # Resource constraints
-    max_parameters: int = Field(10_000_000, ge=1000, le=100_000_000, description="Max model parameters")
-    min_accuracy_threshold: float = Field(0.5, ge=0.0, le=1.0, description="Min accuracy threshold")
-    max_training_time_minutes: float = Field(60.0, ge=5.0, le=300.0, description="Max training time")
-    
-    # Advanced optimization with defaults
-    activation_functions: List[str] = Field(["relu", "tanh", "sigmoid"], description="Activation functions")
-    startup_trials: int = Field(10, ge=5, le=50, description="Startup trials")
-    warmup_steps: int = Field(5, ge=1, le=20, description="Warmup steps") 
-    early_stopping_patience: int = Field(5, ge=2, le=20, description="Early stopping patience")
-    enable_early_stopping: bool = Field(True, description="Enable early stopping")
-    
-    # Sampling and analysis
-    gpu_proxy_sample_percentage: float = Field(0.5, ge=0.1, le=1.0, description="GPU sample percentage")
-    random_seed: int = Field(42, ge=1, le=999999, description="Random seed")
-    health_analysis_sample_size: int = Field(50, ge=10, le=200, description="Health analysis sample size")
-    
-    # Stability detection
-    enable_stability_checks: bool = Field(True, description="Enable stability checks")
-    stability_window: int = Field(3, ge=2, le=10, description="Stability window")
-    
-    # RunPod settings with defaults
-    use_runpod_service: bool = Field(False, description="Use RunPod service")
-    concurrent_workers: int = Field(2, ge=1, le=6, description="Concurrent workers")
-    use_multi_gpu: bool = Field(False, description="Enable multi-GPU per worker")
-    target_gpus_per_worker: int = Field(2, ge=1, le=4, description="GPUs per worker")
-```
-
----
-
-### **Step 2: Update OptimizationConfig** ✅ PENDING
-
-**Objective**: Remove user-controlled defaults from OptimizationConfig, keep system variables.
-
-**Implementation Details:**
-```python
-# optimizer.py - OptimizationConfig with system defaults only
-@dataclass
-class OptimizationConfig:
-    """Business logic configuration with system defaults only"""
-    
-    # User-controlled variables - NO DEFAULTS (fail fast if not provided)
-    dataset_name: str = field(default="")  # Will be set to "" to trigger validation error
-    mode: OptimizationMode = field(default=OptimizationMode.SIMPLE)
-    trials: int = field(default=0)  # Will trigger validation error if 0
-    max_epochs_per_trial: int = field(default=0)  # Will trigger validation error
-    min_epochs_per_trial: int = field(default=0)  # Will trigger validation error
-    health_weight: float = field(default=0.0)
-    validation_split: float = field(default=0.0)  # Will trigger validation error
-    test_size: float = field(default=0.0)  # Will trigger validation error
-    batch_size: int = field(default=0)  # Will trigger validation error
-    learning_rate: float = field(default=0.0)  # Will trigger validation error
-    optimizer_name: str = field(default="")  # Will trigger validation error
-    max_parameters: int = field(default=0)  # Will trigger validation error
-    min_accuracy_threshold: float = field(default=0.0)
-    max_training_time_minutes: float = field(default=0.0)  # Will trigger validation error
-    activation_functions: List[str] = field(default_factory=list)  # Empty = error
-    startup_trials: int = field(default=0)  # Will trigger validation error
-    warmup_steps: int = field(default=0)  # Will trigger validation error
-    early_stopping_patience: int = field(default=0)  # Will trigger validation error
-    enable_early_stopping: bool = field(default=False)
-    gpu_proxy_sample_percentage: float = field(default=0.0)  # Will trigger validation error
-    random_seed: int = field(default=0)  # Will trigger validation error
-    health_analysis_sample_size: int = field(default=0)  # Will trigger validation error
-    enable_stability_checks: bool = field(default=False)
-    stability_window: int = field(default=0)  # Will trigger validation error
-    use_runpod_service: bool = field(default=False)
-    concurrent_workers: int = field(default=0)  # Will trigger validation error
-    use_multi_gpu: bool = field(default=False) 
-    target_gpus_per_worker: int = field(default=0)  # Will trigger validation error
-    
-    # System variables - ONLY here with their defaults
-    optimize_for: str = field(default="")  # Temporary, converts to objective
-    objective: OptimizationObjective = field(default=OptimizationObjective.VAL_ACCURACY)
-    timeout_hours: Optional[float] = field(default=None)
-    health_monitoring_frequency: int = field(default=1)
-    max_bias_change_per_epoch: float = field(default=10.0)
-    runpod_service_endpoint: str = field(default="")
-    runpod_service_timeout: float = field(default=300.0)
-    runpod_service_fallback_local: bool = field(default=True)
-    concurrent: bool = field(default=False)
-    config_overrides: Dict[str, Any] = field(default_factory=dict)
-    
-    def __post_init__(self):
-        """Fail-fast validation and system setup"""
-        
-        # Validate all required user-controlled variables are provided
-        if not self.dataset_name:
-            raise ValueError("dataset_name is required")
-        if self.trials <= 0:
-            raise ValueError("trials must be > 0")
-        if self.max_epochs_per_trial <= 0:
-            raise ValueError("max_epochs_per_trial must be > 0")
-        if not (0 < self.validation_split < 1):
-            raise ValueError("validation_split must be between 0 and 1")
-        if not (0 < self.test_size < 1):
-            raise ValueError("test_size must be between 0 and 1")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be > 0")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be > 0")
-        if not self.optimizer_name:
-            raise ValueError("optimizer_name is required")
-        if not self.activation_functions:
-            raise ValueError("activation_functions cannot be empty")
-        
-        # Convert optimize_for string to objective enum (system conversion)
-        if self.optimize_for:
-            objective_map = {
-                "val_accuracy": OptimizationObjective.VAL_ACCURACY,
-                "training_time": OptimizationObjective.TRAINING_TIME,
-                "model_size": OptimizationObjective.MODEL_SIZE,
-                "combined": OptimizationObjective.COMBINED
-            }
-            self.objective = objective_map.get(self.optimize_for.lower(), OptimizationObjective.VAL_ACCURACY)
-        
-        # System configuration and backward compatibility
-        self.n_trials = self.trials  # Backward compatibility
-        self.n_startup_trials = self.startup_trials
-        self.n_warmup_steps = self.warmup_steps
-        
-        # System validations and adjustments
-        if self.concurrent_workers < 1:
-            self.concurrent_workers = 1
-        if self.use_runpod_service and not self.runpod_service_endpoint:
-            logger.warning("RunPod service enabled but no endpoint configured")
-```
-
----
-
-### **Step 3: Update Conversion Function** ✅ PENDING
-
-**Objective**: Clean conversion that passes all user values from OptimizationRequest to OptimizationConfig.
-
-**Implementation Details:**
-```python
-# api_server.py - Simple pass-through conversion
-def create_optimization_config(request: OptimizationRequest) -> OptimizationConfig:
-    """
-    Convert API request to business configuration.
-    
-    Passes all user-controlled variables directly (no selective logic needed).
-    OptimizationConfig will fail fast if any required values are missing/invalid.
-    """
-    
-    return OptimizationConfig(
-        # Pass all user-controlled variables directly
-        dataset_name=request.dataset_name,
-        mode=OptimizationMode(request.mode),
-        optimize_for=request.optimize_for,
-        trials=request.trials,
-        max_epochs_per_trial=request.max_epochs_per_trial,
-        min_epochs_per_trial=request.min_epochs_per_trial,
-        health_weight=request.health_weight,
-        validation_split=request.validation_split,
-        test_size=request.test_size,
-        batch_size=request.batch_size,
-        learning_rate=request.learning_rate,
-        optimizer_name=request.optimizer_name,
-        max_parameters=request.max_parameters,
-        min_accuracy_threshold=request.min_accuracy_threshold,
-        max_training_time_minutes=request.max_training_time_minutes,
-        activation_functions=request.activation_functions,
-        startup_trials=request.startup_trials,
-        warmup_steps=request.warmup_steps,
-        early_stopping_patience=request.early_stopping_patience,
-        enable_early_stopping=request.enable_early_stopping,
-        gpu_proxy_sample_percentage=request.gpu_proxy_sample_percentage,
-        random_seed=request.random_seed,
-        health_analysis_sample_size=request.health_analysis_sample_size,
-        enable_stability_checks=request.enable_stability_checks,
-        stability_window=request.stability_window,
-        use_runpod_service=request.use_runpod_service,
-        concurrent_workers=request.concurrent_workers,
-        use_multi_gpu=request.use_multi_gpu,
-        target_gpus_per_worker=request.target_gpus_per_worker,
-        # System variables use OptimizationConfig defaults (not passed from request)
-    )
-```
-
----
-
-### **Step 4: Comprehensive Testing Strategy** ✅ PENDING
-
-**Test Architecture Changes:**
-```python
-# tests/test_revised_consolidation.py
-class TestRevisedConsolidation:
-    
-    def test_optimization_request_has_user_defaults(self):
-        """Test OptimizationRequest provides all user defaults"""
-        request = OptimizationRequest(dataset_name="mnist")
-        
-        # All user-controlled variables should have defaults
-        assert request.mode == "simple"
-        assert request.optimize_for == "val_accuracy"
-        assert request.trials == 50
-        assert request.max_epochs_per_trial == 20
-        assert request.batch_size == 32
-        assert request.learning_rate == 0.001
-    
-    def test_optimization_config_fails_without_user_values(self):
-        """Test OptimizationConfig fails fast when user values not provided"""
-        
-        # Should raise validation errors
-        with pytest.raises(ValueError, match="dataset_name is required"):
-            OptimizationConfig()
-        
-        with pytest.raises(ValueError, match="trials must be > 0"):
-            OptimizationConfig(dataset_name="mnist", trials=0)
-    
-    def test_conversion_function_clean(self):
-        """Test conversion function is simple pass-through"""
-        request = OptimizationRequest(
-            dataset_name="cifar10",
-            trials=25,
-            batch_size=64
-        )
-        
-        config = create_optimization_config(request)
-        
-        # All values should pass through exactly
-        assert config.dataset_name == "cifar10"
-        assert config.trials == 25
-        assert config.batch_size == 64
-        
-        # System variables should use their defaults
-        assert config.health_monitoring_frequency == 1  # System default
-        assert config.max_bias_change_per_epoch == 10.0  # System default
-    
-    def test_no_conflicting_defaults(self):
-        """Test there are no conflicting defaults between classes"""
-        request = OptimizationRequest(dataset_name="mnist")
-        config = create_optimization_config(request)
-        
-        # Verify user defaults flow from request → config
-        assert config.trials == request.trials == 50
-        assert config.batch_size == request.batch_size == 32
-        assert config.health_weight == request.health_weight == 0.3
-        
-        # System variables only exist in config
-        assert hasattr(config, 'health_monitoring_frequency')
-        assert not hasattr(request, 'health_monitoring_frequency')
-```
-
----
-
-### **Step 5: Migration Implementation Strategy** ✅ PENDING
-
-**Phase 1: Update OptimizationRequest (User Defaults)**
-```bash
-# Status: ✅ PENDING
-# Tasks:
-# 1. Move all user-controlled defaults from OptimizationConfig to OptimizationRequest
-# 2. Update validation ranges in OptimizationRequest
-# 3. Test API validation works with new defaults
-```
-
-**Phase 2: Update OptimizationConfig (System Defaults Only)**  
-```bash
-# Status: ✅ PENDING
-# Tasks:
-# 1. Remove user-controlled defaults from OptimizationConfig
-# 2. Add fail-fast validation in __post_init__
-# 3. Keep system variables with their defaults
-# 4. Test fail-fast behavior works correctly
-```
-
-**Phase 3: Update Conversion Function**
-```bash
-# Status: ✅ PENDING
-# Tasks: 
-# 1. Simplify conversion function to pass-through all user values
-# 2. Remove complex optional field logic
-# 3. Test conversion produces valid OptimizationConfig instances
-```
-
-**Phase 4: End-to-End Testing**
-```bash
-# Status: ✅ PENDING
-# Tasks:
-# 1. Test complete API → Config → Optimization flow
-# 2. Verify no behavioral regressions
-# 3. Confirm improved error messages and fail-fast behavior
-```
-
-**Benefits of Revised Architecture:**
-- ✅ **No Conflicting Defaults**: Single source of truth for each variable type
-- ✅ **Fail-Fast**: OptimizationConfig validates all required user values immediately  
-- ✅ **Clear Ownership**: User variables controlled by API, system variables by business logic
-- ✅ **Simple Conversion**: No complex optional field mapping needed
-- ✅ **Maintainable**: Easy to understand which class controls which variables
-
----
-
-## VI. Detailed Implementation Roadmap
-
-### **Phase 1: Cytoscape.js + TensorBoard Educational Visualization Implementation** 🎮
-**Status**: **BACKEND COMPLETE ✅ | FRONTEND MIGRATION TO CYTOSCAPE.JS + TENSORBOARD NEEDED**
-
-**Backend Progress (COMPLETED):**
-- ✅ **ModelVisualizer Module**: Complete architecture data preparation for CNN/LSTM architectures (ready for Cytoscape.js conversion)
+#### **Phase 2A: Educational Visualization Implementation** ✅ **COMPLETED**
+**Backend Progress:**
+- ✅ **ModelVisualizer Module**: Complete architecture data preparation for CNN/LSTM architectures with Cytoscape.js conversion
 - ✅ **Optimizer Integration**: `get_best_model_visualization_data()` method implemented
 - ✅ **API Endpoints**: `/jobs/{job_id}/best-model` and `/jobs/{job_id}/best-model/download` endpoints
 - ✅ **JSON Serialization**: Full pipeline for frontend consumption tested and working
 - ✅ **Performance Integration**: Color coding based on health metrics and performance scores
 - ✅ **Architecture Support**: CNN, LSTM, and mixed architectures with layer positioning
-
-**Backend Extensions Status:**
 - ✅ **Cytoscape.js Data Format**: Convert existing layer data to Cytoscape nodes/edges format
-- 🔄 **TensorBoard Integration**: Add `tf.keras.callbacks.TensorBoard` to training pipeline
+- ✅ **TensorBoard Integration**: Add `tf.keras.callbacks.TensorBoard` to training pipeline  
 - ✅ **Architecture JSON Export**: Generate Cytoscape-compatible architecture JSON per trial
-- 🔄 **TensorBoard Server Setup**: Integrate TensorBoard server with FastAPI backend
+- ✅ **TensorBoard Server Setup**: Integrate TensorBoard server with FastAPI backend
 
-## **Detailed Implementation Plan**
-
-### **Step 1: Backend Architecture Data Conversion** ✅ COMPLETED
-
-**Objective**: Convert existing `LayerVisualization` data to Cytoscape.js-compatible format
-
-**Status**: ✅ **COMPLETED** - Cytoscape.js export functionality fully implemented and tested
-
-**Completed Implementation**:
-```python
-# Add to ModelVisualizer class
-def export_cytoscape_architecture(self, trial_data: TrialProgress) -> Dict[str, Any]:
-    """Convert model architecture to Cytoscape.js format"""
-    nodes = []
-    edges = []
-    
-    # Create input node
-    nodes.append({
-        "data": {
-            "id": "input",
-            "type": "input", 
-            "label": f"Input {trial_data.input_shape}",
-            "shape": trial_data.input_shape,
-            "color_intensity": 1.0
-        }
-    })
-    
-    prev_id = "input"
-    for i, layer in enumerate(trial_data.layers):
-        layer_id = f"layer_{i}_{layer.layer_type}"
-        
-        # Create layer node
-        nodes.append({
-            "data": {
-                "id": layer_id,
-                "type": layer.layer_type.lower(),
-                "label": self._format_layer_label(layer),
-                "parameters": layer.parameters,
-                "color_intensity": layer.color_intensity,
-                "filters": layer.filters,
-                "units": layer.units
-            }
-        })
-        
-        # Create edge with tensor shape transformation
-        edges.append({
-            "data": {
-                "source": prev_id,
-                "target": layer_id,
-                "tensor_transform": self._calculate_tensor_transform(prev_layer, layer)
-            }
-        })
-        
-        prev_id = layer_id
-    
-    return {"nodes": nodes, "edges": edges}
-
-def _format_layer_label(self, layer: LayerVisualization) -> str:
-    """Format layer label for educational clarity"""
-    if layer.layer_type.startswith('Conv'):
-        return f"Conv2D {layer.filters}@{layer.kernel_size[0]}×{layer.kernel_size[1]}"
-    elif layer.layer_type == 'Dense':
-        return f"Dense {layer.units}"
-    elif 'Pool' in layer.layer_type:
-        return f"MaxPool {layer.pool_size[0]}×{layer.pool_size[1]}"
-    return layer.layer_type
-```
-
-**Completed Features**:
-- ✅ `ModelVisualizer.export_cytoscape_architecture()` method implemented
-- ✅ Educational layer labels with technical specifications (e.g., "Conv2D\n64@3×3")
-- ✅ Tensor shape transformation calculations between layers
-- ✅ API endpoint `/jobs/{job_id}/cytoscape/architecture` added to FastAPI server
-- ✅ Support for both best trial and specific trial selection
-- ✅ Comprehensive test suite with CNN and LSTM validation
-- ✅ JSON serialization compatibility confirmed
-
-**Test Results**: ✅ 7 nodes/6 edges (CNN), ✅ 4 nodes/3 edges (LSTM), ✅ 2170 char JSON export
-
----
-
-### **Step 2: TensorBoard Backend Integration** ✅ COMPLETED
-
-**Objective**: Add comprehensive TensorBoard logging to training pipeline
-
-**Implementation Completed**:
-
-**1. ModelBuilder TensorBoard Integration** (`src/model_builder.py`):
-```python
-def __init__(self, dataset_config, model_config=None, trial_number=None):
-    # Added trial_number parameter for unique TensorBoard logging
-    self.trial_number = trial_number
-
-def _setup_training_callbacks_optimized(self):
-    """Setup optimized training callbacks including TensorBoard"""
-    callbacks_list = []
-    
-    if self.trial_number is not None:
-        # Create unique log directory for this trial
-        log_dir = Path(f"tensorboard_logs/trial_{self.trial_number}")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Comprehensive TensorBoard callback
-        tensorboard_callback = keras.callbacks.TensorBoard(
-            log_dir=str(log_dir),
-            histogram_freq=1,      # Log weight histograms every epoch
-            write_graph=True,      # Log model architecture
-            write_images=True,     # Log model weights as images
-            update_freq='epoch',   # Update logs every epoch
-            profile_batch=0,       # Disable profiling for performance
-            embeddings_freq=0      # Disable embeddings logging
-        )
-        callbacks_list.append(tensorboard_callback)
-        
-        # Custom health metrics callback
-        health_callback = self._create_health_metrics_callback(log_dir)
-        callbacks_list.append(health_callback)
-    
-    return callbacks_list
-```
-
-**2. Custom Health Metrics Callback**:
-```python
-def _create_health_metrics_callback(self, log_dir):
-    class HealthMetricsCallback(keras.callbacks.Callback):
-        def on_epoch_end(self, epoch, logs=None):
-            with self.writer.as_default():
-                # Training stability metrics
-                tf.summary.scalar('health/training_stability', 
-                    1.0 - min(abs(train_loss - val_loss), 1.0), step=epoch)
-                tf.summary.scalar('health/accuracy_consistency', 
-                    1.0 - min(abs(train_acc - val_acc), 1.0), step=epoch)
-                tf.summary.scalar('health/overfitting_risk', overfitting_score, step=epoch)
-                tf.summary.scalar('health/learning_progress', improvement, step=epoch)
-    return HealthMetricsCallback(log_dir, self.health_analyzer)
-```
-
-**3. Optimizer Integration** (`src/optimizer.py`):
-```python
-# Updated ModelBuilder instantiation to pass trial number
-model_builder = ModelBuilder(self.dataset_config, model_config, trial.number)
-```
-
-**4. FastAPI TensorBoard Endpoints** (`src/api_server.py`):
-```python
-@app.get("/jobs/{job_id}/tensorboard/logs")
-async def get_tensorboard_logs(job_id: str):
-    """Get available TensorBoard log directories for a job"""
-
-@app.get("/jobs/{job_id}/tensorboard/url") 
-async def get_tensorboard_url(job_id: str):
-    """Get TensorBoard server URL for a job"""
-
-@app.post("/jobs/{job_id}/tensorboard/start")
-async def start_tensorboard_server(job_id: str):
-    """Start TensorBoard server for a job"""
-
-@app.post("/jobs/{job_id}/tensorboard/stop")
-async def stop_tensorboard_server(job_id: str):
-    """Stop TensorBoard server for a job"""
-```
-
-**Completed Features**:
-- ✅ Trial-specific TensorBoard logging with unique directories (`tensorboard_logs/trial_{N}/`)
-- ✅ Comprehensive training metrics: loss, accuracy, weight histograms, model graph
-- ✅ Custom health metrics tracking: stability, consistency, overfitting risk, learning progress
-- ✅ FastAPI TensorBoard server integration with 4 RESTful endpoints
-- ✅ Consistent port allocation using hash-based job assignment (6006 + hash % 1000)
-- ✅ Automatic log directory creation and management
-- ✅ Integration with existing ModelBuilder and Optimizer systems
-- ✅ Educational focus: Health metrics provide insights into model training quality
-
-**Key Benefits Achieved**:
-- 🎓 **Educational**: Custom health metrics help users understand training dynamics
-- 📊 **Comprehensive**: Standard TensorFlow metrics + custom health indicators
-- 🔧 **Production Ready**: Proper error handling, logging, and API integration
-- 🚀 **Performance**: Optimized callbacks with minimal training overhead
-
-### **Step 3: FastAPI TensorBoard Server Integration** ✅ COMPLETED *(Integrated with Step 2)*
-
-**Objective**: Serve TensorBoard within the application ecosystem
-
-**Implementation**:
-```python
-# Add to api_server.py
-from tensorboard import program
-import threading
-
-class TensorBoardServer:
-    def __init__(self, logdir: str, port: int = 6006):
-        self.logdir = logdir
-        self.port = port
-        self.tb_server = None
-    
-    def start(self):
-        """Start TensorBoard server in background thread"""
-        tb = program.TensorBoard()
-        tb.configure(argv=[None, '--logdir', self.logdir, '--port', str(self.port)])
-        url = tb.launch()
-        self.tb_server = tb
-        return url
-
-# Add endpoints
-@app.get("/tensorboard/{job_id}")
-async def get_tensorboard_url(job_id: str):
-    """Get TensorBoard URL for specific job"""
-    logdir = f"./results/{job_id}/tensorboard_logs"
-    if os.path.exists(logdir):
-        # Start or get existing TensorBoard server
-        tb_url = tensorboard_manager.get_or_create_server(job_id, logdir)
-        return {"tensorboard_url": tb_url}
-    raise HTTPException(404, "TensorBoard logs not found")
-
-@app.get("/cytoscape/{job_id}/architecture")
-async def get_cytoscape_architecture(job_id: str, trial_id: Optional[str] = None):
-    """Get Cytoscape.js architecture data for visualization"""
-    trial_data = get_trial_data(job_id, trial_id)
-    cytoscape_data = model_visualizer.export_cytoscape_architecture(trial_data)
-    return cytoscape_data
-```
-
-**Frontend Migration Plan (Modern Educational Visualization Stack):**
-
-**Critical Update**: Migrating from React Three Fiber to **Cytoscape.js + TensorBoard** for superior educational model visualization that combines architecture clarity with comprehensive training metrics.
-
-## **Tool Selection Rationale**
-
-| Tool | Primary Use Case | Strengths | Our Application |
-|------|-----------------|-----------|-----------------|
-| **React Three Fiber** | General 3D rendering | 3D-native, flexible | **Replaced** - Overkill for educational DAG visualization |
-| **Cytoscape.js** | Graph/network visualization | Mature, performant, rich layouts, animation support | **Architecture Visualization** - Perfect for CNN DAG representation |
-| **TensorBoard** | ML experiment dashboard | Official TensorFlow tool, rich metrics, standardized | **Performance Visualization** - Training curves, weight histograms, embeddings |
-
-**Combined Educational Value:**
-- **Cytoscape.js** → Clean, interactive depiction of model architecture with forward propagation animations
-- **TensorBoard** → Detailed training diagnostics and performance monitoring  
-- **Together** → Complete understanding of *what the model looks like* and *how it performs*
-
-### **Step 4: Frontend Cytoscape.js Implementation** ✅ COMPLETED
-
-**Phase 1A: Cytoscape.js Architecture Visualization (PRIORITY 1)**
-
-**Dependencies Installation**:
-```bash
-npm install cytoscape cytoscape-dagre cytoscape-elk react-cytoscapejs
-npm install cytoscape-node-html-label  # For rich HTML labels
-```
-
-**Core ModelGraph Component**:
-```jsx
-// src/components/visualization/model-graph.tsx
-import CytoscapeComponent from 'react-cytoscapejs';
-import cytoscape from 'cytoscape';
-import dagre from 'cytoscape-dagre';
-import elk from 'cytoscape-elk';
-
-cytoscape.use(dagre);
-cytoscape.use(elk);
-
-const ModelGraph: React.FC<{architectureData: any, onNodeClick?: (node: any) => void}> = ({ 
-  architectureData, onNodeClick 
-}) => {
-  const cytoscapeStylesheet = [
-    // Input nodes
-    {
-      selector: 'node[type="input"]',
-      style: {
-        'background-color': '#10B981',
-        'shape': 'round-rectangle',
-        'width': 80,
-        'height': 40,
-        'label': 'data(label)',
-        'text-valign': 'center',
-        'color': 'white',
-        'font-weight': 'bold'
-      }
-    },
-    // Convolutional layers
-    {
-      selector: 'node[type*="conv"]',
-      style: {
-        'background-color': '#3B82F6',
-        'shape': 'rectangle',
-        'width': 'mapData(filters, 8, 512, 60, 120)',
-        'height': 50,
-        'label': 'data(label)',
-        'text-valign': 'center',
-        'color': 'white',
-        'font-weight': 'bold',
-        'background-opacity': 'mapData(color_intensity, 0, 1, 0.3, 1.0)'
-      }
-    },
-    // Dense layers
-    {
-      selector: 'node[type="dense"]',
-      style: {
-        'background-color': '#F59E0B',
-        'shape': 'round-rectangle',
-        'width': 'mapData(units, 10, 2048, 50, 100)',
-        'height': 50,
-        'label': 'data(label)',
-        'text-valign': 'center',
-        'color': 'white',
-        'font-weight': 'bold'
-      }
-    },
-    // Pooling layers
-    {
-      selector: 'node[type*="pool"]',
-      style: {
-        'background-color': '#10B981',
-        'shape': 'ellipse',
-        'width': 60,
-        'height': 40,
-        'label': 'data(label)',
-        'text-valign': 'center',
-        'color': 'white',
-        'font-size': '10px'
-      }
-    },
-    // Edges with tensor information
-    {
-      selector: 'edge',
-      style: {
-        'curve-style': 'bezier',
-        'target-arrow-shape': 'triangle',
-        'arrow-color': '#64748B',
-        'line-color': '#64748B',
-        'width': 2,
-        'label': 'data(tensor_transform)',
-        'font-size': '8px',
-        'text-rotation': 'autorotate',
-        'text-margin-y': -10
-      }
-    },
-    // Animation classes
-    {
-      selector: '.flowing',
-      style: {
-        'line-color': '#EF4444',
-        'target-arrow-color': '#EF4444',
-        'width': 4
-      }
-    }
-  ];
-
-  const layout = {
-    name: 'dagre',
-    rankDir: 'LR',  // Left to right
-    spacingFactor: 1.5,
-    nodeDimensionsIncludeLabels: true
-  };
-
-  const handleNodeClick = (event: any) => {
-    const node = event.target;
-    onNodeClick?.(node.data());
-  };
-
-  return (
-    <CytoscapeComponent
-      elements={architectureData}
-      style={{ width: '100%', height: '600px' }}
-      stylesheet={cytoscapeStylesheet}
-      layout={layout}
-      cy={(cy) => {
-        cy.on('tap', 'node', handleNodeClick);
-      }}
-    />
-  );
-};
-```
-
-**Forward Propagation Animation**:
-```jsx
-// Add to ModelGraph component
-const animateForwardPass = (cy: cytoscape.Core) => {
-  const edges = cy.edges();
-  
-  edges.forEach((edge, index) => {
-    setTimeout(() => {
-      edge.addClass('flowing');
-      setTimeout(() => edge.removeClass('flowing'), 1000);
-    }, index * 300);
-  });
-};
-
-// Usage in component
-<button onClick={() => animateForwardPass(cyRef.current)}>
-  ▶️ Show Forward Pass
-</button>
-```
-
-### **Step 5: Frontend TensorBoard Integration**
-
-**Phase 1B: TensorBoard Integration (PRIORITY 2)**
-
-**TensorBoard Iframe Component**:
-```jsx
-// src/components/visualization/tensorboard-panel.tsx
-import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
-
-interface TensorBoardPanelProps {
-  jobId: string;
-  trialId?: string;
-  height?: number;
-}
-
-const TensorBoardPanel: React.FC<TensorBoardPanelProps> = ({ 
-  jobId, trialId, height = 600 
-}) => {
-  const [tensorboardUrl, setTensorboardUrl] = useState<string>('');
-
-  const { data: tbConfig, isLoading } = useQuery({
-    queryKey: ['tensorboard-config', jobId, trialId],
-    queryFn: async () => {
-      const response = await apiClient.get(`/tensorboard/${jobId}`, {
-        params: { trial_id: trialId }
-      });
-      return response.data;
-    }
-  });
-
-  useEffect(() => {
-    if (tbConfig?.tensorboard_url) {
-      // Construct URL with trial-specific filtering
-      const baseUrl = tbConfig.tensorboard_url;
-      const trialFilter = trialId ? `#runs=${trialId}` : '';
-      setTensorboardUrl(`${baseUrl}${trialFilter}`);
-    }
-  }, [tbConfig, trialId]);
-
-  if (isLoading) {
-    return (
-      <div className="w-full h-full flex items-center justify-center bg-gray-900">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-500 mx-auto mb-4"></div>
-          <p className="text-gray-300">Loading TensorBoard...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="w-full h-full border border-gray-700 rounded-lg overflow-hidden">
-      <div className="bg-gray-800 px-4 py-2 border-b border-gray-700">
-        <h3 className="text-white font-semibold">Training Metrics & Diagnostics</h3>
-        <p className="text-gray-400 text-sm">
-          Job: {jobId} {trialId && `• Trial: ${trialId}`}
-        </p>
-      </div>
-      <iframe
-        src={tensorboardUrl}
-        width="100%"
-        height={height - 60} // Account for header
-        style={{ border: 'none' }}
-        title={`TensorBoard - ${jobId}`}
-      />
-    </div>
-  );
-};
-```
-
-**Tabbed Metrics Interface**:
-```jsx
-// src/components/visualization/metrics-tabs.tsx
-const MetricsTabs: React.FC<{jobId: string, trialId: string}> = ({ jobId, trialId }) => {
-  const [activeTab, setActiveTab] = useState('scalars');
-
-  const tabs = [
-    { id: 'scalars', label: 'Training Curves', path: '#scalars' },
-    { id: 'histograms', label: 'Weight Distributions', path: '#histograms' },
-    { id: 'graphs', label: 'Model Graph', path: '#graphs' },
-    { id: 'projector', label: 'Embeddings', path: '#projector' },
-    { id: 'profile', label: 'Performance', path: '#profile' }
-  ];
-
-  return (
-    <div className="w-full h-full">
-      <div className="flex border-b border-gray-700">
-        {tabs.map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`px-4 py-2 font-medium transition-colors ${
-              activeTab === tab.id
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-      
-      <div className="h-full">
-        <TensorBoardPanel 
-          jobId={jobId} 
-          trialId={trialId}
-          hash={tabs.find(t => t.id === activeTab)?.path}
-        />
-      </div>
-    </div>
-  );
-};
-```
-
-### **Step 6: Unified Educational Interface**
-
-**Phase 1C: Unified Educational Interface (PRIORITY 3)**
-
-**Main Educational Dashboard**:
-```jsx
-// src/components/visualization/educational-dashboard.tsx
-import { useState } from 'react';
-import { ModelGraph } from './model-graph';
-import { MetricsTabs } from './metrics-tabs';
-import { LayerInfoPanel } from './layer-info-panel';
-
-interface EducationalDashboardProps {
-  jobId: string;
-  trialId: string;
-}
-
-const EducationalDashboard: React.FC<EducationalDashboardProps> = ({ 
-  jobId, trialId 
-}) => {
-  const [selectedLayer, setSelectedLayer] = useState<any>(null);
-  const [layout, setLayout] = useState<'split' | 'tabs'>('split');
-
-  const { data: architectureData } = useQuery({
-    queryKey: ['cytoscape-architecture', jobId, trialId],
-    queryFn: async () => {
-      const response = await apiClient.get(`/cytoscape/${jobId}/architecture`, {
-        params: { trial_id: trialId }
-      });
-      return response.data;
-    }
-  });
-
-  return (
-    <div className="w-full h-screen bg-gray-900 text-white">
-      {/* Header Controls */}
-      <div className="border-b border-gray-700 p-4">
-        <div className="flex justify-between items-center">
-          <h1 className="text-xl font-bold">
-            Neural Network Educational Visualization
-          </h1>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setLayout('split')}
-              className={`px-3 py-1 rounded text-sm ${
-                layout === 'split' 
-                  ? 'bg-blue-600 text-white' 
-                  : 'bg-gray-700 text-gray-300'
-              }`}
-            >
-              Split View
-            </button>
-            <button
-              onClick={() => setLayout('tabs')}
-              className={`px-3 py-1 rounded text-sm ${
-                layout === 'tabs' 
-                  ? 'bg-blue-600 text-white' 
-                  : 'bg-gray-700 text-gray-300'
-              }`}
-            >
-              Tabbed View
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Content */}
-      {layout === 'split' ? (
-        <div className="flex h-full">
-          {/* Left Panel - Architecture */}
-          <div className="w-1/2 border-r border-gray-700 relative">
-            <div className="bg-gray-800 px-4 py-2 border-b border-gray-700">
-              <h2 className="font-semibold">Model Architecture</h2>
-              <p className="text-gray-400 text-sm">
-                Interactive neural network structure
-              </p>
-            </div>
-            <div className="h-full">
-              <ModelGraph 
-                architectureData={architectureData}
-                onNodeClick={setSelectedLayer}
-              />
-            </div>
-            
-            {/* Layer Info Overlay */}
-            {selectedLayer && (
-              <LayerInfoPanel 
-                layer={selectedLayer}
-                onClose={() => setSelectedLayer(null)}
-              />
-            )}
-          </div>
-
-          {/* Right Panel - TensorBoard */}
-          <div className="w-1/2">
-            <MetricsTabs jobId={jobId} trialId={trialId} />
-          </div>
-        </div>
-      ) : (
-        <div className="h-full">
-          <div className="flex border-b border-gray-700">
-            <button className="px-4 py-2 font-medium text-blue-400 border-b-2 border-blue-400">
-              Architecture
-            </button>
-            <button className="px-4 py-2 font-medium text-gray-400 hover:text-white">
-              Metrics
-            </button>
-          </div>
-          {/* Tab content implementation */}
-        </div>
-      )}
-    </div>
-  );
-};
-```
-
-**Layer Information Panel**:
-```jsx
-// src/components/visualization/layer-info-panel.tsx
-interface LayerInfoPanelProps {
-  layer: any;
-  onClose: () => void;
-}
-
-const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
-  return (
-    <div className="absolute top-4 right-4 w-80 bg-gray-800 rounded-lg border border-gray-600 p-4 shadow-lg z-10">
-      <div className="flex justify-between items-start mb-3">
-        <h3 className="font-semibold text-lg">{layer.label}</h3>
-        <button 
-          onClick={onClose}
-          className="text-gray-400 hover:text-white"
-        >
-          ✕
-        </button>
-      </div>
-      
-      <div className="space-y-2 text-sm">
-        <div className="grid grid-cols-2 gap-2">
-          <span className="text-gray-400">Type:</span>
-          <span className="text-white">{layer.type}</span>
-          
-          {layer.parameters && (
-            <>
-              <span className="text-gray-400">Parameters:</span>
-              <span className="text-white">{layer.parameters.toLocaleString()}</span>
-            </>
-          )}
-          
-          {layer.filters && (
-            <>
-              <span className="text-gray-400">Filters:</span>
-              <span className="text-white">{layer.filters}</span>
-            </>
-          )}
-          
-          {layer.units && (
-            <>
-              <span className="text-gray-400">Units:</span>
-              <span className="text-white">{layer.units}</span>
-            </>
-          )}
-        </div>
-        
-        {/* Performance indicator */}
-        <div className="mt-4 pt-3 border-t border-gray-700">
-          <div className="flex justify-between text-xs">
-            <span className="text-gray-400">Performance Impact</span>
-            <span className="text-blue-400">
-              {(layer.color_intensity * 100).toFixed(1)}%
-            </span>
-          </div>
-          <div className="w-full bg-gray-700 rounded-full h-2 mt-1">
-            <div 
-              className="bg-blue-400 h-2 rounded-full transition-all"
-              style={{ width: `${layer.color_intensity * 100}%` }}
-            />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-```
-
-**Completed Features**:
-- ✅ **ModelGraph Component**: Interactive Cytoscape.js architecture visualization with 8 layer types
-- ✅ **Educational Styling**: Color-coded layers (Input=Green, Conv=Blue, Dense=Amber, LSTM=Purple, etc.)
-- ✅ **Dynamic Node Sizing**: Filters/units determine visual size for intuitive parameter understanding
-- ✅ **LayerInfoPanel**: Rich modal with layer descriptions, parameter details, and educational tips
-- ✅ **MetricsTabs Component**: 4-tab interface for Training, Health, Weight, and Architecture metrics
-- ✅ **TensorBoard Integration**: Server start/stop controls with embedded dashboard iframe
-- ✅ **UnifiedEducationalInterface**: 4 layout modes (Split, Tabs, Architecture-Focus, Metrics-Focus)
-- ✅ **Forward Pass Animation**: "▶ Forward Pass" button triggers sequential layer activation
-- ✅ **Tensor Shape Visualization**: Edge labels show data transformations (e.g., "32×32×3 → 32×32×64")
-- ✅ **Legend & Controls**: Visual guide to layer types and animation controls
-- ✅ **Performance Indicators**: Color intensity maps to layer performance impact
-- ✅ **Responsive Design**: Adaptive layouts with collapsible panels and mobile-friendly controls
-
-**Test Results**: ✅ CNN: 6 nodes/5 edges, ✅ LSTM: 4 nodes/3 edges, ✅ JSON compatibility verified
-
-**Phase 1D: Advanced Educational Features**
-- Forward/backward pass animations in Cytoscape showing data flow
-- Filter/feature map previews overlaid on Cytoscape nodes (from training callbacks)
-- Custom TensorBoard plugins for health metrics integration
-- Interactive preprocessing pipeline visualization
-- Real-time model comparison across multiple trials
-
-**Key Benefits of Modern Stack Migration:**
-- 🎓 **Educational**: Purpose-built for understanding model architecture and training behavior
-- 🚀 **Performance**: Lightweight, efficient rendering optimized for 2D graphs and metrics
-- 🔧 **Stability**: Mature, actively maintained libraries with proven track records  
-- 📊 **Comprehensive**: Architecture + training metrics provide complete model understanding
-- 🧠 **Industry Standard**: TensorBoard is the de facto standard for ML experiment tracking
-- 🎨 **Professional**: Clean, publication-ready visualizations suitable for educational content
-
-**Key Deliverables:**
-- ✅ Backend visualization data preparation system
-- ✅ **PRIORITY 1**: Cytoscape.js interactive architecture DAG visualization (replaces React Three Fiber)
-- ✅ **PRIORITY 2**: TensorBoard embedded training metrics dashboard  
-- ✅ **PRIORITY 3**: Unified educational interface with synchronized trial exploration
-- 🔄 Advanced animations, preprocessing visualization, and export capabilities
-
----
-
-### **Phase 2: Enable Download of Model Visualization & Optimized Models** 📊
-**Status**: **COMPLETED ✅** 
-
-**Backend Implementation (COMPLETED):**
+#### **Phase 2B: Model & Visualization Download System** ✅ **COMPLETED**
+**Backend Implementation:**
 - ✅ **JSON Download API**: `/jobs/{job_id}/best-model/download` endpoint implemented
 - ✅ **Data Serialization**: Complete visualization data with metadata in downloadable JSON format
 - ✅ **File Generation**: Proper content-type and attachment headers for browser downloads
@@ -1470,7 +352,7 @@ const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
 - ✅ **Plot Generation & Serving**: Comprehensive training plots automatically generated and served via API endpoints
 - ✅ **Testing**: Comprehensive testing of download functionality and file integrity
 
-**Frontend Implementation (COMPLETED):**
+**Frontend Implementation:**
 - ✅ **Smart Download Button**: Integrated next to optimization controls, activates when final model is available
 - ✅ **Model Availability Detection**: Automatic checking via API for when optimized model is ready for download
 - ✅ **Training Plot Visualization**: Embedded plot system showing training progress, gradient flow, and model health metrics
@@ -1478,17 +360,119 @@ const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
 - ✅ **Plot Download Capability**: Individual plot downloads via API endpoints for training history, gradient analysis, and weight distributions
 - ✅ **User Experience**: Seamless workflow from optimization completion to model download with clear availability indicators
 
+---
+
+## VI. Detailed Implementation Roadmap
+
+### **Phase 1: Model Architecture Node Overlap Resolution** 🔧
+**Status**: **READY FOR IMPLEMENTATION** (Next Priority)
+
+**Problem Statement:**
+Current CNN model diagrams have overlapping nodes where Dense layers overlap with Input layers and each other, making architecture diagrams difficult to read. Edge labels also intersect node shapes, reducing educational clarity.
+
+**Root Cause:**
+Insufficient spacing parameters in current Dagre layout configuration and missing collision avoidance features.
+
+**Objectives:**
+- Eliminate all node overlaps at viewport sizes ≥1024px width
+- Ensure edges and labels don't overlap node shapes  
+- Maintain logical left→right flow (Input → Conv → Pooling → Dense → Output)
+- Provide consistent spacing that works for both small (2-5 nodes) and complex (15+ nodes) models
+- Responsive layout behavior across different screen sizes
+
+**Implementation Plan:**
+
+#### **Phase 1.1: Enhanced Dagre Layout Configuration** (Primary Solution - 2-3 hours)
+```javascript
+// Enhanced spacing with collision avoidance
+const layout = {
+  name: 'dagre',
+  rankDir: 'LR',
+  rankSep: 120,        // Increased horizontal spacing between stages
+  nodeSep: 60,         // Increased vertical spacing between nodes
+  edgeSep: 20,         // Space between parallel edges
+  avoidOverlap: true,  // Prevent node overlap
+  nodeDimensionsIncludeLabels: true,
+  spacingFactor: 1.2,  // Overall spacing multiplier
+  fit: true,
+  padding: 30
+};
+
+// Dynamic spacing based on model complexity
+const calculateLayoutSpacing = (nodeCount, hasMultipleDense) => {
+  const complexityFactor = nodeCount > 8 ? 1.4 : 1.0;
+  const denseFactor = hasMultipleDense ? 1.3 : 1.0;
+  return {
+    rankSep: Math.round(100 * complexityFactor),
+    nodeSep: Math.round(50 * denseFactor)
+  };
+};
+```
+
+#### **Phase 1.2: Improved Edge Routing** (30 minutes)
+```javascript
+// Enhanced edge styling for better collision avoidance
+{
+  selector: 'edge',
+  style: {
+    'curve-style': 'bezier',
+    'control-point-step-size': 40,
+    'edge-distance': 'intersection',  // Route to node edges
+    'text-margin-x': 10,             // Offset labels from edges
+    'text-margin-y': -15,            // Position above edges
+    'text-background-opacity': 0.9,   // Better label visibility
+    'text-border-width': 1
+  }
+}
+```
+
+#### **Phase 1.3: Responsive Layout System** (1-2 hours)
+- Container-aware spacing that adapts to screen size
+- Layout re-computation on viewport changes
+- Configuration constants for maintainable spacing parameters
+
+#### **Phase 1.4: ELK Layout Alternative** (Backup Solution - 2 hours)
+For complex models requiring sophisticated edge routing:
+```javascript
+const elkLayout = {
+  name: 'elk',
+  elk: {
+    'algorithm': 'layered',
+    'direction': 'RIGHT',
+    'spacing.nodeNodeBetweenLayers': 120,
+    'spacing.nodeNode': 60,
+    'layered.edgeRouting.strategy': 'ORTHOGONAL'
+  }
+};
+```
+
+**Testing Plan:**
+- **Test 1**: Simple CNN (Input→Conv→Pool→Dense→Output) - verify no overlaps
+- **Test 2**: Complex CNN with multiple Dense layers - focus on Dense separation  
+- **Test 3**: Responsive behavior at 1024px, 1440px, 1920px viewports
+- **Test 4**: Single node and linear chain edge cases
+- **Test 5**: Performance testing for layout computation time
+
+**Acceptance Criteria:**
+- ✅ No node overlaps at any viewport ≥1024px width
+- ✅ Edge labels don't overlap node shapes
+- ✅ Topologically correct left→right flow maintained
+- ✅ Consistent spacing for models of 2-20+ nodes
+- ✅ Layout completes within 500ms for up to 20 nodes
+
 **Key Deliverables:**
-- ✅ **Backend JSON visualization data download**
-- ✅ **Optimized .keras model download** with best hyperparameters automatically applied
-- ✅ **Training plot generation and serving** via API endpoints (`/jobs/{job_id}/plots/{trial_id}/{plot_type}`)
-- ✅ **Smart frontend download integration** with automatic model availability detection
-- ✅ **Comprehensive plot visualization** including training history, gradient analysis, and weight distributions
-- ✅ **TensorBoard deep dive option** for advanced analysis while maintaining embedded plot accessibility
+- Enhanced Dagre configuration with adaptive spacing
+- Responsive layout system with viewport awareness
+- Configurable spacing constants for maintainability
+- Comprehensive test suite covering all model types
+- Optional ELK implementation for advanced edge routing
+
+**Timeline:** 4-5 hours total implementation + testing
 
 ---
 
-### **Phase 3: Advanced Model Export & Educational Features** 💾
+
+### **Phase 2: Advanced Model Export & Educational Features** 💾
 **Status**: After Cytoscape.js + TensorBoard visualization completion
 
 **Enhanced Objectives with Modern Educational Stack:**
@@ -1511,7 +495,7 @@ const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
 
 ---
 
-### **Phase 4: Logging Consolidation & System Polish** 🔧
+### **Phase 3: Logging Consolidation & System Polish** 🔧
 **Status**: Critical system improvement
 
 **Objectives:**
@@ -1528,7 +512,7 @@ const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
 
 ---
 
-### **Phase 5: Deployment & Container Integration** 🚀
+### **Phase 4: Deployment & Container Integration** 🚀
 **Status**: Production readiness
 
 **Objectives:**
@@ -1545,7 +529,7 @@ const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
 
 ---
 
-### **Phase 6: Website Integration** 🌐
+### **Phase 5: Website Integration** 🌐
 **Status**: Business integration
 
 **Objectives:**
@@ -1562,7 +546,7 @@ const LayerInfoPanel: React.FC<LayerInfoPanelProps> = ({ layer, onClose }) => {
 
 ---
 
-### **Phase 7: Code Path Consolidation & Embedded Training Visualizations** 🔧📊
+### **Phase 6: Code Path Consolidation & Embedded Training Visualizations** 🔧📊
 **Status**: **NEXT PRIORITY - CRITICAL SYSTEM IMPROVEMENT**
 
 **Problem Statement:**
@@ -1582,10 +566,10 @@ Additionally, TensorBoard embedding encountered significant technical hurdles (i
 
 ## **Implementation Plan**
 
-### **Phase 7A: Code Path Consolidation** 🔧
+### **Phase 6A: Code Path Consolidation** 🔧
 **Status**: Foundation cleanup for reliable system behavior
 
-#### **Step 7A.1: Eliminate Dual Code Paths**
+#### **Step 6A.1: Eliminate Dual Code Paths**
 **Objective**: Ensure ALL UI optimizations use ModelOptimizer (Optuna-based) path
 
 **Implementation Details:**
@@ -1613,7 +597,7 @@ class OptimizationConfig:
 - `src/optimizer.py` - Ensure single-trial mode works properly
 - `src/model_builder.py` - Verify consistent timestamp usage
 
-#### **Step 7A.2: Fix TensorBoard Log Directory Path**
+#### **Step 6A.2: Fix TensorBoard Log Directory Path**
 **Objective**: Resolve logs being created in `src/tensorboard_logs/` instead of project root
 
 **Implementation Details:**
@@ -1632,7 +616,7 @@ def _setup_training_callbacks_optimized(self):
 - `src/model_builder.py` - Fix log directory resolution
 - `src/api_server.py` - Update TensorBoard server to look in correct location
 
-#### **Step 7A.3: Verification & Testing**
+#### **Step 6A.3: Verification & Testing**
 
 **Automated Testing:**
 ```python
@@ -1665,10 +649,10 @@ def test_consistent_timestamps():
 
 ---
 
-### **Phase 7B: Embedded Training Visualizations** 📊
+### **Phase 6B: Embedded Training Visualizations** 📊
 **Status**: Replace TensorBoard embedding with immediate plot-based insights
 
-#### **Step 7B.1: Integrate Plot Generation in ModelBuilder**
+#### **Step 6B.1: Integrate Plot Generation in ModelBuilder**
 **Objective**: Generate comprehensive training plots immediately after each trial completes
 
 **Implementation Details:**
@@ -1733,7 +717,7 @@ def train(self, data, validation_split=0.2):
 - `src/plot_creation/gradient_flow.py` - Add missing functions if needed
 - `src/plot_creation/weights_bias.py` - Add missing functions if needed
 
-#### **Step 7B.2: Add Plot Serving API Endpoints**
+#### **Step 6B.2: Add Plot Serving API Endpoints**
 **Objective**: Serve generated training plots via REST API
 
 **Implementation Details:**
@@ -1819,7 +803,7 @@ def _generate_health_summary(self, insights_data):
 - `src/api_server.py` - Add plot serving endpoints
 - `src/api_server.py` - Add helper methods for plot file management
 
-#### **Step 7B.3: Update Frontend with Embedded Plot Display**
+#### **Step 6B.3: Update Frontend with Embedded Plot Display**
 **Objective**: Replace TensorBoard iframe with immediate plot visualization
 
 **Implementation Details:**
@@ -2027,7 +1011,7 @@ export default TensorBoardPanel;
 - `web-ui/src/components/visualization/tensorboard-panel.tsx` - Complete rewrite with plot display
 - `web-ui/src/components/ui/select.tsx` - Add if not exists (for plot type selector)
 
-#### **Step 7B.4: Testing & Verification**
+#### **Step 6B.4: Testing & Verification**
 
 **Automated Testing:**
 ```python
@@ -2090,10 +1074,10 @@ def test_frontend_plot_display():
 
 ---
 
-### **Phase 7C: System Integration & File Organization** 🗂️
+### **Phase 6C: System Integration & File Organization** 🗂️
 **Status**: Ensure consistent behavior and proper file management
 
-#### **Step 7C.1: Unified Directory Structure**
+#### **Step 6C.1: Unified Directory Structure**
 **Objective**: Organize all generated files consistently
 
 **Implementation Details:**
@@ -2158,7 +1142,7 @@ class FileManager:
         # Implementation for maintenance
 ```
 
-#### **Step 7C.2: Enhanced Error Handling**
+#### **Step 6C.2: Enhanced Error Handling**
 **Objective**: Graceful degradation when plots or TensorBoard unavailable
 
 **Implementation Details:**
@@ -2195,7 +1179,7 @@ def _generate_error_plot(self, error_message: str) -> Path:
     # Implementation to create informative error image
 ```
 
-#### **Step 7C.3: Performance Optimization**
+#### **Step 6C.3: Performance Optimization**
 **Objective**: Ensure system performs well with multiple trials and large plots
 
 **Implementation Details:**
@@ -2232,7 +1216,7 @@ def _optimize_plot_for_web(self, plot_path: Path):
 
 ## **Comprehensive Testing Plan**
 
-### **Phase 7A Testing: Code Path Consolidation**
+### **Phase 6A Testing: Code Path Consolidation**
 
 #### **Automated Tests**
 ```python
@@ -2312,7 +1296,7 @@ class TestCodePathConsolidation:
 
 ---
 
-### **Phase 7B Testing: Embedded Training Visualizations**
+### **Phase 6B Testing: Embedded Training Visualizations**
 
 #### **Automated Tests**
 ```python
@@ -2539,13 +1523,13 @@ class TestPlotIntegration:
 
 ## **Future Enhancement Opportunities**
 
-### **Phase 7D: Advanced Visualization Features** (Future)
+### **Phase 6D: Advanced Visualization Features** (Future)
 - **Interactive Plots**: Plotly.js integration for zoom/pan capabilities
 - **Animated Training Progress**: Time-lapse visualization of training evolution
 - **Comparative Analysis**: Side-by-side trial comparison plots
 - **Export Functionality**: PDF report generation with all visualizations
 
-### **Phase 7E: Real-Time Training Visualization** (Future)
+### **Phase 6E: Real-Time Training Visualization** (Future)
 - **Live Plot Updates**: Real-time plot updates during training
 - **WebSocket Integration**: Sub-second latency for training progress
 - **Interactive Training Control**: Pause/resume training based on visualizations
@@ -2578,32 +1562,8 @@ This comprehensive plan addresses both the technical debt (dual code paths) and 
 
 ---
 
-### **Phase 8: Dynamic Model Architecture Legend** 🏷️
-**Status**: **READY FOR IMPLEMENTATION**
-
-**Objectives:**
-- Replace static hardcoded legend with dynamic legend based on actual model layers
-- Show only layer types present in the current model architecture 
-- Maintain visual consistency between legend and model diagram
-- Support unknown layer types with default styling
-
-**Key Deliverables:**
-- Dynamic legend component that reads from `architectureData.nodes`
-- Layer type mapping with colors, shapes, and labels
-- Flow-order sorting (Input → Conv → Pool → LSTM → Dense → Dropout → Output)
-- Default styling for unknown layer types
-- Future accessibility support via hover tooltips (planned)
-
-**Implementation Details:**
-- Extract unique layer types from model architecture data
-- Map layer types to visual representations (color, shape, label)
-- Replace hardcoded legend in all layout views (split, architecture-focus, metrics-focus)
-- Handle edge cases: loading states, empty data, unknown types
-
----
-
-### **Phase 9: Enhanced Layer Visualization** 🎯
-**Status**: **PLANNED** (Future enhancement after Phase 8)
+### **Phase 7: Enhanced Layer Visualization** 🎯
+**Status**: **PLANNED** (Future enhancement after Phase 6)
 
 **Objectives:**
 - Add flattening layer visualization as distinct stage in model flow
@@ -2626,8 +1586,8 @@ This comprehensive plan addresses both the technical debt (dual code paths) and 
 
 ---
 
-### **Phase 10: WebSocket Migration** ⚡
-**Status**: Performance enhancement (after Phase 9 complete)
+### **Phase 8: WebSocket Migration** ⚡
+**Status**: Performance enhancement (after Phase 7 complete)
 
 **Objectives:**
 - Replace HTTP polling with WebSocket real-time updates for sub-second latency
