@@ -143,9 +143,30 @@ export interface TrialProgress {
   epoch_progress?: number
   
   // Architecture Information
-  architecture?: any
-  hyperparameters?: any
-  model_size?: any
+  architecture?: {
+    type?: string
+    conv_layers?: number
+    dense_layers?: number
+    activation?: string
+    filters_per_layer?: number
+    first_dense_nodes?: number
+    batch_normalization?: boolean
+    kernel_size?: number[] | number | string
+    convLayers?: number | string
+    denseLayers?: number | string
+    totalLayers?: number | string
+    filterSizes?: number[]
+    activations?: string[]
+    keyFeatures?: string[]
+    parameters?: number
+    [key: string]: unknown
+  }
+  hyperparameters?: {
+    [key: string]: unknown
+  }
+  model_size?: {
+    [key: string]: unknown
+  }
   
   // Health Metrics (includes test_loss, overall_health, etc.)
   health_metrics?: {
@@ -158,20 +179,20 @@ export interface TrialProgress {
     gradient_health?: number
     convergence_quality?: number
     accuracy_consistency?: number
-    [key: string]: any
+    [key: string]: unknown
   }
-  training_stability?: any
+  training_stability?: Record<string, unknown>
   
   // Performance Data
   performance?: {
     total_score?: number
     accuracy?: number
-    [key: string]: any
+    [key: string]: unknown
   }
-  training_history?: any
+  training_history?: Record<string, unknown>
   
   // Pruning Information
-  pruning_info?: any
+  pruning_info?: Record<string, unknown>
 }
 
 // Trial data from CSV
@@ -204,7 +225,7 @@ export interface LayerNode {
   position: [number, number, number]
   size: [number, number, number]
   parameters: {
-    [key: string]: any
+    [key: string]: unknown
   }
   connections: string[]
   health_score?: number

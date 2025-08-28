@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState } from 'react';
-import { BarChart3, Activity, Zap, Brain, Target, Play, Skull, TrendingUp, LineChart } from 'lucide-react';
+import { Activity, Zap, Brain, Target, Skull, TrendingUp, LineChart } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import TensorBoardPanel from './tensorboard-panel';
 
@@ -33,7 +33,7 @@ interface MetricsTabsProps {
   onExpandClick?: () => void;
 }
 
-export const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
+const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   jobId,
   trialId,
   className = "",
@@ -42,7 +42,7 @@ export const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   const [activeTab, setActiveTab] = useState<string>('training_progress');
 
   // Optimized TensorBoard logs fetching with React Query
-  const { data: tensorboardData, isLoading: loading } = useQuery({
+  const { isLoading: loading } = useQuery({
     queryKey: ['tensorboard-logs', jobId],
     queryFn: async (): Promise<TensorBoardData> => {
       const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/logs`);
@@ -107,11 +107,6 @@ export const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
     }
   ];
 
-  const formatFileSize = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
 
   if (loading) {
     return (
@@ -163,5 +158,7 @@ export const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
     </div>
   );
 });
+
+MetricsTabs.displayName = 'MetricsTabs'
 
 export default MetricsTabs;

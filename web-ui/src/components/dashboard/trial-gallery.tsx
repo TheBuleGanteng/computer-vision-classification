@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog"
 import { useDashboard } from "./dashboard-provider"
 import { apiClient } from "@/lib/api-client"
-import { TrialProgress, TrialData } from "@/types/optimization"
+import { TrialProgress } from "@/types/optimization"
 import { 
   Eye,
   Target,
@@ -29,7 +29,7 @@ function EducationalVisualizationContainer({
   jobId: string | null; 
   selectedTrial: TrialProgress | null;
 }) {
-  const { data: visualizationData, isLoading, error } = useModelVisualization(
+  const { data: visualizationData } = useModelVisualization(
     jobId, 
     !!jobId && !!selectedTrial
   );
@@ -198,9 +198,9 @@ export function TrialGallery() {
   // Debug logging for best trial identification
   useEffect(() => {
     if (bestTrial) {
-      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${(bestTrial.performance?.total_score! * 100).toFixed(1)}%`)
+      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${((bestTrial.performance?.total_score ?? 0) * 100).toFixed(1)}%`)
     }
-  }, [bestTrial?.trial_id, bestTrial?.trial_number])
+  }, [bestTrial])
 
   return (
     <>
@@ -359,7 +359,7 @@ export function TrialGallery() {
                               <span className="font-medium">
                                 {Array.isArray(trial.architecture.kernel_size) 
                                   ? `${trial.architecture.kernel_size[0]}×${trial.architecture.kernel_size[1]}`
-                                  : trial.architecture.kernel_size}
+                                  : String(trial.architecture.kernel_size || 'N/A')}
                               </span>
                             </div>
                             <div className="flex justify-between">
@@ -540,7 +540,7 @@ export function TrialGallery() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-3">
               Model visualization: Trial #{selectedTrial?.trial_number}
-              <Badge variant="outline">{selectedTrial?.architecture.type}</Badge>
+              <Badge variant="outline">{selectedTrial?.architecture?.type || 'Unknown'}</Badge>
             </DialogTitle>
             <DialogClose onClose={handleCloseDialog} />
           </DialogHeader>
@@ -577,15 +577,15 @@ export function TrialGallery() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   <div>
                     <p className="text-muted-foreground">Conv Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture?.convLayers || 'N/A'}</p>
+                    <p className="font-medium">{String(selectedTrial.architecture?.convLayers || 'N/A')}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Dense Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture?.denseLayers || 'N/A'}</p>
+                    <p className="font-medium">{String(selectedTrial.architecture?.denseLayers || 'N/A')}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Total Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture?.totalLayers || 'N/A'}</p>
+                    <p className="font-medium">{String(selectedTrial.architecture?.totalLayers || 'N/A')}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Parameters</p>

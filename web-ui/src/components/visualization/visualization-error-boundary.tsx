@@ -22,7 +22,7 @@ export class VisualizationErrorBoundary extends React.Component<
     this.state = { hasError: false, error: null, errorInfo: null };
   }
 
-  static getDerivedStateFromError(error: Error): Partial<VisualizationErrorBoundaryState> {
+  static getDerivedStateFromError(): Partial<VisualizationErrorBoundaryState> {
     // Update state so the next render will show the fallback UI
     return { hasError: true };
   }
@@ -55,7 +55,7 @@ export class VisualizationErrorBoundary extends React.Component<
             <div className="text-6xl mb-4">🔧</div>
             <p className="text-lg font-semibold mb-2">3D Visualization Error</p>
             <p className="text-sm text-gray-300 mb-4">
-              The 3D model visualization encountered an error and couldn't render.
+              The 3D model visualization encountered an error and couldn&apos;t render.
             </p>
             <details className="text-xs text-gray-400 mb-4 text-left">
               <summary className="cursor-pointer hover:text-gray-300">

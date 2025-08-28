@@ -17,7 +17,7 @@ const queryClient = new QueryClient({
       gcTime: 10 * 60 * 1000, // 10 minutes cache retention
       
       // Keep previous data while fetching to prevent UI flashing
-      placeholderData: (previousData: any) => previousData,
+      placeholderData: (previousData: unknown) => previousData,
       
       // Retry configuration for robustness
       retry: (failureCount, error) => {

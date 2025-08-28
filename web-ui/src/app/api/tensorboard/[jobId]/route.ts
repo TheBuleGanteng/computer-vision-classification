@@ -35,7 +35,7 @@ export async function GET(
     } else {
       port = getTensorBoardPort(jobId); // Fallback to calculation
     }
-  } catch (error) {
+  } catch {
     port = getTensorBoardPort(jobId); // Fallback to calculation
   }
   
@@ -117,7 +117,7 @@ export async function GET(
     
     return nextResponse;
     
-  } catch (error) {
+  } catch {
     console.error('[TensorBoard Proxy Root] Fetch error:', error);
     
     return NextResponse.json(

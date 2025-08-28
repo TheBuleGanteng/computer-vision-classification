@@ -4,7 +4,6 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useDashboard } from '@/components/dashboard/dashboard-provider';
 import { apiClient } from '@/lib/api-client';
-import { TrialProgress } from '@/types/optimization';
 
 /**
  * Centralized hook for all trial data fetching and management

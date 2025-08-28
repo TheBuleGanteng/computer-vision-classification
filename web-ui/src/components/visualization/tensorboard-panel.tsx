@@ -1,10 +1,11 @@
 "use client"
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import Image from 'next/image';
 import { useQuery } from '@tanstack/react-query';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+// import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, Download, ExternalLink, AlertCircle, BarChart3, Activity, Zap, Maximize2, Minimize2, Brain, Target, Play, Skull, TrendingUp, LineChart } from 'lucide-react';
 
 interface TrainingMetricsPanelProps {
@@ -43,7 +44,6 @@ interface TensorBoardConfig {
 export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({ 
   jobId, 
   trialId, 
-  height = 600,
   onExpandClick,
   isFullscreen = false,
   defaultPlotType
@@ -78,7 +78,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
   });
 
   // Query to keep TensorBoard as fallback option
-  const { data: tbConfig, error: tbError } = useQuery({
+  const { data: tbConfig } = useQuery({
     queryKey: ['tensorboard-config', jobId],
     queryFn: async (): Promise<TensorBoardConfig | null> => {
       const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
@@ -93,8 +93,8 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
     staleTime: 60000, // 1 minute
   });
 
-  // Determine which plots are available - MOVED BEFORE EARLY RETURNS
-  const availablePlots = plotsData?.plots || [];
+  // Memoize plots to prevent dependency warning
+  const availablePlots = useMemo(() => plotsData?.plots || [], [plotsData?.plots]);
   const hasPlots = availablePlots.length > 0;
   
   // Set active tab to defaultPlotType or first available plot if current tab doesn't exist
@@ -309,10 +309,13 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                   <div 
                     className="border border-border rounded-lg overflow-hidden relative group bg-white"
                   >
-                    <img
+                    <Image
                       src={`${API_BASE_URL}${currentPlot.url}`}
                       alt={`${getPlotDisplayName(currentPlot.plot_type)} visualization`}
                       className="w-full h-auto max-h-[600px] object-contain"
+                      width={800}
+                      height={600}
+                      unoptimized={true}
                       onError={(e) => {
                         const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
                         console.error('❌ Failed to load plot:', fullUrl);

@@ -16,7 +16,7 @@ import { useTrials } from "@/hooks/use-trials"
 import { useDashboard } from "@/components/dashboard/dashboard-provider"
 import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
 
-export const BestArchitectureView = React.memo(() => {
+const BestArchitectureView = React.memo(() => {
   const { currentJobId, isOptimizationRunning } = useDashboard()
   const { bestTrial, isLoading, error } = useTrials()
   const [isNewBest, setIsNewBest] = useState(false)
@@ -309,3 +309,7 @@ export const BestArchitectureView = React.memo(() => {
     </Card>
   )
 })
+
+BestArchitectureView.displayName = 'BestArchitectureView'
+
+export { BestArchitectureView }

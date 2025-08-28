@@ -8,7 +8,7 @@ import React from 'react';
  */
 
 // Higher-order component for memoizing components that receive trial data
-export function withTrialMemoization<T extends Record<string, any>>(
+export function withTrialMemoization<T extends Record<string, unknown>>(
   Component: React.ComponentType<T>
 ) {
   const MemoizedComponent = React.memo(Component, (prevProps, nextProps) => {
@@ -50,10 +50,10 @@ export function withTrialMemoization<T extends Record<string, any>>(
 
 // Memoized wrapper for components that display individual trial data
 export const TrialCard = React.memo<{
-  trial: any;
-  onSelect?: (trial: any) => void;
+  trial: Record<string, unknown>;
+  onSelect?: (trial: Record<string, unknown>) => void;
   isSelected?: boolean;
-}>(({ trial, onSelect, isSelected }) => {
+}>(({ }) => {
   // This will only re-render when trial data, selection state, or handler changes
   return null; // Placeholder - implement actual card content
 }, (prevProps, nextProps) => {
@@ -69,7 +69,7 @@ export const TrialCard = React.memo<{
 TrialCard.displayName = 'TrialCard';
 
 // Stable callback hook to prevent callback recreation on every render
-export function useStableCallback<T extends (...args: any[]) => any>(callback: T): T {
+export function useStableCallback<T extends (...args: unknown[]) => unknown>(callback: T): T {
   const callbackRef = React.useRef(callback);
   
   // Update the callback ref on every render

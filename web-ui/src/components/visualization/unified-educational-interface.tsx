@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState } from 'react';
-import { LayoutGrid, Monitor, Maximize2, Minimize2 } from 'lucide-react';
+import { LayoutGrid, Maximize2, Minimize2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
 import ModelGraph from './model-graph';
@@ -205,7 +205,7 @@ const DynamicLegend: React.FC<{ architectureData: CytoscapeData | null }> = Reac
 
 DynamicLegend.displayName = 'DynamicLegend';
 
-export const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfaceProps> = React.memo(({
+const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfaceProps> = React.memo(({
   jobId,
   trialId,
   className = ""
@@ -440,7 +440,7 @@ export const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfacePr
             <div className="absolute bottom-0 left-0 right-0 bg-gray-800 border-t border-gray-700 p-2">
               <div className="flex items-center gap-4 text-xs text-gray-400">
                 <span>💡 <strong>Tip:</strong> Click layers to learn about their functions</span>
-                <span>🎯 <strong>Animation:</strong> Use "Forward Pass" to see data flow</span>
+                <span>🎯 <strong>Animation:</strong> Use &quot;Forward Pass&quot; to see data flow</span>
               </div>
             </div>
           </div>
@@ -602,4 +602,7 @@ export const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfacePr
   );
 });
 
+UnifiedEducationalInterface.displayName = 'UnifiedEducationalInterface'
+
+export { UnifiedEducationalInterface }
 export default UnifiedEducationalInterface;

@@ -4,9 +4,11 @@ import React, { useEffect, useRef } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
+import elk from 'cytoscape-elk';
 
-// Register layout
+// Register layouts
 cytoscape.use(dagre);
+cytoscape.use(elk);
 
 interface LayerData {
   id: string;
@@ -182,23 +184,36 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         'font-weight': 'bold'
       }
     },
-    // Edges with tensor information
+    // Edges with tensor information - Enhanced for collision avoidance
     {
       selector: 'edge',
       style: {
         'curve-style': 'bezier',
+        'control-point-step-size': 40,    // Better curve control for avoiding nodes
+        
+        // Arrow styling
         'target-arrow-shape': 'triangle',
-        'target-arrow-color': '#64748B',  // Fixed: use target-arrow-color instead of arrow-color
+        'target-arrow-color': '#64748B',
+        'arrow-scale': 1.2,              // Slightly larger arrows for better visibility
+        
+        // Line styling  
         'line-color': '#64748B',
         'width': 2,
+        
+        // Enhanced label positioning to avoid overlapping nodes
         'label': 'data(tensor_transform)',
         'font-size': '8px',
         'text-rotation': 'autorotate',
-        'text-margin-y': -10,
+        'text-margin-x': 10,             // Horizontal offset from edge
+        'text-margin-y': -15,            // Position above the edge (increased)
         'color': '#9CA3AF',
+        
+        // Improved label background for better visibility
         'text-background-color': '#1F2937',
-        'text-background-opacity': 0.8,
-        'text-background-padding': '2px'
+        'text-background-opacity': 0.9,  // Increased opacity
+        'text-background-padding': '3px', // Increased padding
+        'text-border-width': 1,          // Add border for better separation
+        'text-border-color': '#374151'
       }
     },
     // Highlighted node (selected)
@@ -234,19 +249,125 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
     }
   ];
 
-  const layout = {
-    name: 'dagre',
-    rankDir: 'LR',  // Left to right
-    spacingFactor: 1.0, // Tighter layout for better fit
-    nodeDimensionsIncludeLabels: true,
-    rankSep: 50,    // Reduced spacing between ranks
-    nodeSep: 25,    // Reduced spacing between nodes  
-    edgeSep: 10,    // Reduced edge spacing
-    fit: true,      // Ensure layout fits in viewport
-    padding: 15     // Minimal padding for better use of space
+  // Multi-row layout algorithm for better space utilization
+  const calculateOptimalLayout = (nodeCount: number) => {
+    // Determine if we should use multi-row layout
+    const shouldWrapRows = nodeCount > 6; // Wrap for models with >6 nodes
+    
+    if (shouldWrapRows) {
+      // Calculate optimal row breaks for better readability
+      const maxNodesPerRow = Math.max(3, Math.ceil(Math.sqrt(nodeCount * 1.5))); // 3-6 nodes per row typically
+      const rowCount = Math.ceil(nodeCount / maxNodesPerRow);
+      
+      return {
+        useMultiRow: true,
+        maxNodesPerRow,
+        rowCount,
+        // Optimized spacing for multi-row layout
+        rankSep: 80,  // Reduced horizontal spacing since we wrap
+        nodeSep: 50,  // Good vertical spacing between rows
+        edgeSep: 15,
+        rowSep: 120   // Space between rows
+      };
+    } else {
+      // Simple single-row layout for small models
+      return {
+        useMultiRow: false,
+        rankSep: 100,  // Comfortable spacing for small models
+        nodeSep: 60,
+        edgeSep: 20
+      };
+    }
   };
 
-  const handleNodeClick = (event: any) => {
+  // Dynamic spacing calculation based on model complexity (kept for future hybrid layouts)
+  // const calculateLayoutSpacing = (nodeCount: number, hasMultipleDense: boolean) => {
+  //   const baseRankSep = 120;  // Increased base horizontal spacing
+  //   const baseNodeSep = 60;   // Increased base vertical spacing
+  //   const baseEdgeSep = 20;   // Increased base edge spacing
+  //   
+  //   // Increase spacing for complex models
+  //   const complexityFactor = nodeCount > 8 ? 1.4 : 1.0;
+  //   const denseFactor = hasMultipleDense ? 1.3 : 1.0;
+  //   
+  //   return {
+  //     rankSep: Math.round(baseRankSep * complexityFactor),
+  //     nodeSep: Math.round(baseNodeSep * denseFactor),
+  //     edgeSep: Math.round(baseEdgeSep * complexityFactor)
+  //   };
+  // };
+
+  // Analyze architecture to determine layout needs
+  const nodeCount = architectureData?.nodes?.length || 0;
+  const hasMultipleDense = architectureData?.nodes ? 
+    architectureData.nodes.filter(node => node.data.type?.toLowerCase() === 'dense').length > 1 : false;
+  
+  const optimalLayout = calculateOptimalLayout(nodeCount);
+  // Keeping fallbackSpacing for potential future use in hybrid layouts
+  // const fallbackSpacing = calculateLayoutSpacing(nodeCount, hasMultipleDense);
+
+  // Debug logging for layout calculation
+  React.useEffect(() => {
+    if (architectureData?.nodes) {
+      console.log('🔧 Layout calculation:', {
+        nodeCount,
+        hasMultipleDense,
+        optimalLayout,
+        nodeTypes: architectureData.nodes.map(n => n.data.type)
+      });
+    }
+  }, [nodeCount, hasMultipleDense, optimalLayout, architectureData?.nodes]);
+
+  // Choose layout configuration based on model complexity
+  const layout = optimalLayout.useMultiRow ? {
+    name: 'elk',
+    elk: {
+      'algorithm': 'layered',
+      'direction': 'RIGHT',
+      
+      // Multi-row layout configuration
+      'spacing.nodeNodeBetweenLayers': optimalLayout.rankSep,
+      'spacing.nodeNode': optimalLayout.nodeSep,
+      'spacing.edgeNodeBetweenLayers': optimalLayout.edgeSep,
+      
+      // Row wrapping settings
+      'layered.wrapping.strategy': 'MULTI_EDGE',
+      'layered.wrapping.additionalEdgeSpacing': 20,
+      'layered.wrapping.correctionFactor': 1.2,
+      
+      // Node placement for better readability
+      'layered.nodePlacement.strategy': 'NETWORK_SIMPLEX', 
+      'layered.spacing.nodeNodeBetweenLayers': optimalLayout.rowSep,
+      
+      // Edge routing for cleaner connections
+      'layered.edgeRouting.strategy': 'ORTHOGONAL',
+      'layered.unnecessaryBendpoints': 'true',
+      
+      // Port constraints for better edge flow
+      'portConstraints': 'FIXED_ORDER'
+    },
+    fit: true,
+    padding: 40  // More padding for multi-row layout
+  } : {
+    name: 'dagre',
+    rankDir: 'LR',  // Left to right flow
+    
+    // Single-row optimized spacing
+    rankSep: optimalLayout.rankSep,
+    nodeSep: optimalLayout.nodeSep,
+    edgeSep: optimalLayout.edgeSep,
+    
+    // Collision avoidance and proper sizing
+    avoidOverlap: true,              // Prevent node overlap
+    nodeDimensionsIncludeLabels: true, // Account for label size in spacing
+    spacingFactor: 1.0,              // No additional spacing factor needed
+    
+    // Viewport management
+    fit: true,                       // Ensure layout fits in viewport
+    padding: 30                      // Standard padding for single-row
+  };
+
+  const handleNodeClick = (event: { target: { addClass: (className: string) => void; data: (key?: string) => unknown } }) => {
     const node = event.target;
     
     // Remove previous highlights
@@ -257,10 +378,10 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
     }
     
     // Call parent handler
-    onNodeClick?.(node.data());
+    onNodeClick?.(node.data() as LayerData);
   };
 
-  const handleNodeHover = (event: any) => {
+  const handleNodeHover = () => {
     // Cursor styling is handled by CSS instead of Cytoscape style
     const container = cyRef.current?.container();
     if (container) {
@@ -268,7 +389,7 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
     }
   };
 
-  const handleNodeMouseLeave = (event: any) => {
+  const handleNodeMouseLeave = () => {
     const container = cyRef.current?.container();
     if (container) {
       container.style.cursor = 'default';
@@ -407,14 +528,18 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
             
             // Multiple passes to ensure proper fitting with progressive adjustments
             setTimeout(() => {
-              cy.fit(undefined, 15);
-              cy.center();
-              
-              // Final adjustment after layout settles
-              setTimeout(() => {
-                cy.fit(undefined, 10); // Very tight fit for maximum use of space
-                cy.center();
-              }, 100);
+              if (cyRef.current) {
+                cyRef.current.fit(undefined, 15);
+                cyRef.current.center();
+                
+                // Final adjustment after layout settles
+                setTimeout(() => {
+                  if (cyRef.current) {
+                    cyRef.current.fit(undefined, 10); // Very tight fit for maximum use of space
+                    cyRef.current.center();
+                  }
+                }, 100);
+              }
             }, 200);
           });
         }}

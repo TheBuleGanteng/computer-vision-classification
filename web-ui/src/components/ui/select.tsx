@@ -13,9 +13,10 @@ interface SelectProps {
 interface SelectItemProps {
   value: string
   children: React.ReactNode
+  onClick?: () => void
 }
 
-export function SelectItem({ value, children, ...props }: SelectItemProps & { onClick?: () => void }) {
+export function SelectItem({ children, ...props }: SelectItemProps) {
   return (
     <div
       className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-gray-200 hover:text-gray-900"

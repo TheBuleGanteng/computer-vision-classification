@@ -37,7 +37,7 @@ export async function GET(
     } else {
       port = getTensorBoardPort(jobId); // Fallback to calculation
     }
-  } catch (error) {
+  } catch {
     port = getTensorBoardPort(jobId); // Fallback to calculation
   }
   
@@ -153,7 +153,7 @@ export async function POST(
     } else {
       port = getTensorBoardPort(jobId); // Fallback to calculation
     }
-  } catch (error) {
+  } catch {
     port = getTensorBoardPort(jobId); // Fallback to calculation
   }
   

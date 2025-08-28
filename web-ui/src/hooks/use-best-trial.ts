@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useDashboard } from '@/components/dashboard/dashboard-provider';
 import { apiClient } from '@/lib/api-client';
 import { TrialProgress } from '@/types/optimization';
@@ -33,7 +33,7 @@ export function useBestTrial() {
   };
 
   // Fetch trial data from API
-  const fetchTrials = async (jobId: string) => {
+  const fetchTrials = useCallback(async (jobId: string) => {
     setIsLoading(true);
     setError(null);
     try {
@@ -63,7 +63,7 @@ export function useBestTrial() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [bestTrial]);
 
   // Poll for trial updates
   useEffect(() => {
@@ -84,7 +84,7 @@ export function useBestTrial() {
     }, pollFrequency);
 
     return () => clearInterval(pollInterval);
-  }, [currentJobId, isOptimizationRunning]);
+  }, [currentJobId, isOptimizationRunning, fetchTrials]);
 
   return {
     bestTrial,

@@ -34,7 +34,7 @@ const TARGET_METRICS = [
 ]
 
 export function OptimizationControls() {
-  const { progress, optimizationMode, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
+  const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
   
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)

@@ -12,7 +12,7 @@ import React, { useMemo } from "react"
 import { useDashboard } from "./dashboard-provider"
 import { useTrials } from "@/hooks/use-trials"
 
-export const SummaryStats = React.memo(() => {
+const SummaryStats = React.memo(() => {
   const { optimizationMode } = useDashboard()
   const { stats, bestTrial } = useTrials()
   
@@ -21,12 +21,6 @@ export const SummaryStats = React.memo(() => {
     const bestAccuracy = bestTrial?.performance?.accuracy ?? 0
     const bestTotalScore = bestTrial?.performance?.total_score ?? 0
     
-    const formatDuration = (seconds: number | undefined) => {
-      if (!seconds) return "N/A"
-      const mins = Math.floor(seconds / 60)
-      const secs = Math.floor(seconds % 60)
-      return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
-    }
 
     const formatScore = (score: number) => `${(score * 100).toFixed(1)}%`
     
@@ -99,6 +93,10 @@ export const SummaryStats = React.memo(() => {
     </div>
   )
 })
+
+SummaryStats.displayName = 'SummaryStats'
+
+export { SummaryStats }
 
 /* 
 IMPLEMENTATION NOTES:

@@ -15,11 +15,9 @@ import {
   Clock,
   Layers,
   Hash,
-  Download,
   Loader2
 } from "lucide-react"
 import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
-import { useModelVisualization, useVisualizationDownload } from "@/hooks/use-model-visualization"
 
 // Optimized Educational Visualization Container Component
 const EducationalVisualizationContainer = React.memo(({ 
@@ -53,7 +51,7 @@ const EducationalVisualizationContainer = React.memo(({
 
 EducationalVisualizationContainer.displayName = 'EducationalVisualizationContainer'
 
-export const TrialGallery = React.memo(() => {
+const TrialGallery = React.memo(() => {
   const { currentJobId } = useDashboard()
   const [selectedTrial, setSelectedTrial] = useState<TrialProgress | null>(null)
   const { trials, bestTrial, isLoading, error } = useTrials()
@@ -72,21 +70,26 @@ export const TrialGallery = React.memo(() => {
   }, [])
 
   // Memoized trial status badge to prevent re-renders
-  const TrialStatusBadge = useMemo(() => React.memo(({ status }: { status: string }) => {
-    const statusConfig = {
-      completed: { variant: "default" as const, color: "text-green-600", label: "Completed" },
-      running: { variant: "secondary" as const, color: "text-blue-600", label: "Running" },
-      failed: { variant: "destructive" as const, color: "text-red-600", label: "Failed" },
-    }
+  const TrialStatusBadge = useMemo(() => {
+    const StatusBadge = React.memo(({ status }: { status: string }) => {
+      const statusConfig = {
+        completed: { variant: "default" as const, color: "text-green-600", label: "Completed" },
+        running: { variant: "secondary" as const, color: "text-blue-600", label: "Running" },
+        failed: { variant: "destructive" as const, color: "text-red-600", label: "Failed" },
+      }
+      
+      const config = statusConfig[status as keyof typeof statusConfig] || statusConfig.completed
+      
+      return (
+        <Badge variant={config.variant} className={`${config.color} text-xs`}>
+          {config.label}
+        </Badge>
+      )
+    })
     
-    const config = statusConfig[status as keyof typeof statusConfig] || statusConfig.completed
-    
-    return (
-      <Badge variant={config.variant} className={`${config.color} text-xs`}>
-        {config.label}
-      </Badge>
-    )
-  }), [])
+    StatusBadge.displayName = 'TrialStatusBadge'
+    return StatusBadge
+  }, [])
 
   // Loading state
   if (isLoading) {
@@ -252,7 +255,7 @@ export const TrialGallery = React.memo(() => {
             />
           </div>
           
-          <DialogClose className="absolute right-4 top-4" />
+          <DialogClose />
         </DialogContent>
       </Dialog>
     </>
@@ -260,3 +263,5 @@ export const TrialGallery = React.memo(() => {
 })
 
 TrialGallery.displayName = 'TrialGallery'
+
+export { TrialGallery }
