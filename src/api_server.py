@@ -12,9 +12,12 @@ Designed for deployment on RunPod with GPU acceleration and local development.
 """
 
 import asyncio
+import concurrent.futures
+from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 import json
 import numpy as np
@@ -22,6 +25,8 @@ import os
 from pathlib import Path
 from pydantic import BaseModel, Field
 import shutil
+from optimizer import ModelOptimizer, OptimizationConfig, OptimizationMode, OptimizationObjective
+import subprocess
 import tempfile
 import traceback
 from typing import Dict, Any, List, Optional, Union
@@ -30,9 +35,187 @@ import uvicorn
 import zipfile
 
 # UPDATED IMPORTS - Fixed compatibility
-from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, TrialProgress
+from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, UnifiedProgress
 from dataset_manager import DatasetManager
-from utils.logger import logger
+from utils.logger import logger, setup_logging
+
+
+class TensorBoardManager:
+    """
+    Manages TensorBoard server processes for different jobs
+    
+    Handles starting, stopping, and tracking TensorBoard servers with proper
+    process management and port allocation.
+    """
+    
+    def __init__(self):
+        self.running_servers = {}  # job_id -> (process, port)
+    
+    def get_port_for_job(self, job_id: str) -> int:
+        """Generate consistent port for job"""
+        return 6006 + hash(job_id) % 1000
+    
+    def start_server(self, job_id: str, log_dir: Path) -> Dict[str, Any]:
+        """
+        Start TensorBoard server for a job
+        
+        Args:
+            job_id: Unique job identifier
+            log_dir: Path to TensorBoard logs directory
+            
+        Returns:
+            Dictionary with server info
+        """
+        port = self.get_port_for_job(job_id)
+        
+        # Check if server already running
+        if job_id in self.running_servers:
+            process, existing_port = self.running_servers[job_id]
+            if process.poll() is None:  # Process still running
+                return {
+                    "status": "already_running",
+                    "job_id": job_id,
+                    "port": existing_port,
+                    "tensorboard_url": f"http://localhost:{existing_port}",
+                    "message": "TensorBoard server is already running"
+                }
+            else:
+                # Process died, clean up
+                del self.running_servers[job_id]
+        
+        try:
+            # Start TensorBoard server
+            cmd = [
+                "tensorboard",
+                "--logdir", str(log_dir),
+                "--port", str(port),
+                "--host", "0.0.0.0",
+                "--reload_interval", "10"
+            ]
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=os.environ.copy()
+            )
+            
+            # Store process reference
+            self.running_servers[job_id] = (process, port)
+            
+            logger.info(f"Started TensorBoard server for job {job_id} on port {port}")
+            
+            return {
+                "status": "started",
+                "job_id": job_id,
+                "port": port,
+                "tensorboard_url": f"http://localhost:{port}",
+                "pid": process.pid,
+                "message": f"TensorBoard server started successfully on port {port}"
+            }
+            
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="TensorBoard not installed. Run: pip install tensorboard"
+            )
+        except Exception as e:
+            logger.error(f"Failed to start TensorBoard server for job {job_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to start TensorBoard server: {str(e)}"
+            )
+    
+    def stop_server(self, job_id: str) -> Dict[str, Any]:
+        """
+        Stop TensorBoard server for a job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with stop status
+        """
+        if job_id not in self.running_servers:
+            return {
+                "status": "not_running",
+                "job_id": job_id,
+                "message": "TensorBoard server is not running for this job"
+            }
+        
+        try:
+            process, port = self.running_servers[job_id]
+            
+            if process.poll() is None:  # Process still running
+                process.terminate()
+                try:
+                    process.wait(timeout=5)  # Wait up to 5 seconds
+                except subprocess.TimeoutExpired:
+                    process.kill()  # Force kill if it doesn't terminate gracefully
+                    process.wait()
+            
+            del self.running_servers[job_id]
+            
+            logger.info(f"Stopped TensorBoard server for job {job_id} (port {port})")
+            
+            return {
+                "status": "stopped",
+                "job_id": job_id,
+                "port": port,
+                "message": f"TensorBoard server stopped successfully"
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to stop TensorBoard server for job {job_id}: {e}")
+            # Clean up entry even if stop failed
+            if job_id in self.running_servers:
+                del self.running_servers[job_id]
+            
+            return {
+                "status": "error",
+                "job_id": job_id,
+                "message": f"Error stopping TensorBoard server: {str(e)}"
+            }
+    
+    def get_server_status(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get status of TensorBoard server for a job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with server status
+        """
+        if job_id not in self.running_servers:
+            return {
+                "status": "stopped",
+                "job_id": job_id,
+                "running": False,
+                "port": self.get_port_for_job(job_id),
+                "tensorboard_url": f"http://localhost:{self.get_port_for_job(job_id)}"
+            }
+        
+        process, port = self.running_servers[job_id]
+        running = process.poll() is None
+        
+        if not running:
+            # Process died, clean up
+            del self.running_servers[job_id]
+        
+        return {
+            "status": "running" if running else "stopped",
+            "job_id": job_id,
+            "running": running,
+            "port": port,
+            "tensorboard_url": f"http://localhost:{port}",
+            "pid": process.pid if running else None
+        }
+    
+    def cleanup_all(self):
+        """Stop all running TensorBoard servers"""
+        for job_id in list(self.running_servers.keys()):
+            self.stop_server(job_id)
 
 
 class JobStatus(str, Enum):
@@ -58,37 +241,51 @@ class JobStatus(str, Enum):
 
 class OptimizationRequest(BaseModel):
     """
-    Request model for starting a new hyperparameter optimization job
+    API request model for commonly modified user configs.
     
-    UPDATED: Aligned with new optimizer.py parameters
-    
-    Attributes:
-        dataset_name: Name of dataset to optimize (e.g., 'cifar10', 'imdb')
-        mode: Optimization mode ('simple' or 'health')
-        optimize_for: Optimization objective ('val_accuracy', 'accuracy', etc.)
-        trials: Number of optimization trials to run
-        health_weight: Health weighting (0.0-1.0, only used in health mode)
-        config_overrides: Additional configuration parameters
-        
-    Example:
-        {
-            "dataset_name": "cifar10",
-            "mode": "health",
-            "optimize_for": "val_accuracy",
-            "trials": 50,
-            "health_weight": 0.3,
-            "config_overrides": {
-                "max_epochs_per_trial": 25,
-                "n_startup_trials": 15
-            }
-        }
+    Contains only the 8 most commonly modified variables with their defaults.
+    All other variables are system variables handled by OptimizationConfig.
     """
-    dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'imdb')")
-    mode: str = Field(default="simple", description="Optimization mode ('simple' or 'health')")
-    optimize_for: str = Field(default="val_accuracy", description="Optimization objective")
-    trials: int = Field(default=50, ge=1, le=200, description="Number of optimization trials")
-    health_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Health weighting (health mode only)")
-    config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration")
+    
+    # Required field - no default anywhere
+    dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'mnist', 'imdb')")
+    
+    # Commonly modified user-controlled variables with defaults HERE
+    mode: str = Field("simple", pattern="^(simple|health)$", description="Optimization mode")
+    optimize_for: str = Field("val_accuracy", description="Optimization objective")
+    trials: int = Field(2, ge=1, le=500, description="Number of optimization trials")
+    max_epochs_per_trial: int = Field(6, ge=1, le=100, description="Maximum epochs per trial")
+    min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
+    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
+    use_runpod_service: bool = Field(False, description="Use RunPod cloud service")
+    
+    # Legacy compatibility
+    config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration overrides")
+
+
+def create_optimization_config(request: OptimizationRequest) -> OptimizationConfig:
+    """
+    Convert API request to business configuration.
+    
+    Passes all user-controlled variables directly (simple pass-through).
+    OptimizationConfig will fail fast if any required values are missing/invalid.
+    """
+    
+    return OptimizationConfig(
+        # Pass all 8 user-controlled variables directly from OptimizationRequest
+        dataset_name=request.dataset_name,
+        mode=OptimizationMode(request.mode),
+        optimize_for=request.optimize_for,
+        trials=request.trials,
+        max_epochs_per_trial=request.max_epochs_per_trial,
+        min_epochs_per_trial=request.min_epochs_per_trial,
+        health_weight=request.health_weight,
+        use_runpod_service=request.use_runpod_service,
+        
+        # Apply any config overrides
+        **request.config_overrides
+        # System variables will use OptimizationConfig defaults (not passed from request)
+    )
 
 
 class JobResponse(BaseModel):
@@ -118,7 +315,7 @@ class JobResponse(BaseModel):
             "progress": {
                 "current_trial": 15,
                 "total_trials": 50,
-                "best_value": 0.8750,
+                "best_total_score": 0.8750,
                 "elapsed_time": 1800.5
             },
             "result": null,
@@ -260,12 +457,13 @@ class OptimizationJob:
         current = job.get_current_trial()
     """
     
-    def __init__(self, request: OptimizationRequest):
+    def __init__(self, request: OptimizationRequest, tensorboard_manager=None):
         """
         Initialize a new optimization job with real-time progress tracking
         
         Args:
             request: OptimizationRequest containing job parameters
+            tensorboard_manager: TensorBoard manager for automatic server startup
         """
         self.job_id = str(uuid.uuid4())
         self.request = request
@@ -278,54 +476,231 @@ class OptimizationJob:
         self.error: Optional[str] = None
         self.task: Optional[asyncio.Task] = None
         
-        # NEW: Real-time trial tracking
+        # Real-time aggregated progress tracking
         self.optimizer: Optional[Any] = None  # Will be ModelOptimizer instance
-        self.trial_progress_history: List[TrialProgress] = []
-        self.current_trial_progress: Optional[TrialProgress] = None
-        self.best_trial_progress: Optional[TrialProgress] = None
+        self.latest_aggregated_progress: Optional[Dict[str, Any]] = None
+        
+        # TensorBoard manager for automatic server startup
+        self.tensorboard_manager = tensorboard_manager
+        self.tensorboard_logs_dir: Optional[Path] = None  # Will be set when optimization starts
+        self._current_epoch_info: Dict[str, Any] = {}
         
         logger.debug(f"running OptimizationJob.__init__ ... Created job {self.job_id} for dataset {request.dataset_name}")
         logger.debug(f"running OptimizationJob.__init__ ... Mode: {request.mode}, Objective: {request.optimize_for}")
         logger.debug(f"running OptimizationJob.__init__ ... Real-time trial tracking enabled")
     
-    def _progress_callback(self, trial_progress: TrialProgress) -> None:
+    def _progress_callback(self, progress_data: Any) -> None:
         """
-        Callback function to receive real-time trial progress updates
+        Callback function to receive real-time progress updates
         
-        This method is called by the optimizer whenever trial progress is updated.
-        It maintains the job's trial tracking state and updates progress metrics.
+        This method is called by the optimizer whenever progress is updated.
+        The optimizer can send either TrialProgress or AggregatedProgress objects.
         
         Args:
-            trial_progress: TrialProgress object with current trial state
+            progress_data: Either TrialProgress or AggregatedProgress object with current optimization state
         """
-        logger.debug(f"running OptimizationJob._progress_callback ... Trial {trial_progress.trial_number} update: {trial_progress.status}")
-        
-        # Store trial progress
-        self.trial_progress_history.append(trial_progress)
-        
-        # Update current trial
-        if trial_progress.status == "running":
-            self.current_trial_progress = trial_progress
-        elif trial_progress.status in ["completed", "failed", "pruned"]:
-            # Clear current trial when completed
-            if self.current_trial_progress and self.current_trial_progress.trial_id == trial_progress.trial_id:
-                self.current_trial_progress = None
+        try:
+            # Check progress data type - prioritize UnifiedProgress
+            if isinstance(progress_data, UnifiedProgress):
+                # This is the new UnifiedProgress object (Phase 1: unified progress system)
+                logger.debug(f"running OptimizationJob._progress_callback ... Received unified progress update")
+                self._handle_unified_progress(progress_data)
+            elif hasattr(progress_data, 'trial_number'):
+                # Legacy: TrialProgress object (individual trial update) 
+                logger.debug(f"running OptimizationJob._progress_callback ... Received individual trial progress update for trial {progress_data.trial_number}")
+                self._handle_trial_progress(progress_data)
+            else:
+                # Legacy: AggregatedProgress object (consolidated update)
+                logger.debug(f"running OptimizationJob._progress_callback ... Received aggregated progress update")
+                self._handle_aggregated_progress(progress_data)
+                
+        except Exception as e:
+            logger.error(f"running OptimizationJob._progress_callback ... Error processing progress update: {e}")
+            # Don't re-raise to avoid disrupting optimization
+
+    def _handle_unified_progress(self, unified_progress: UnifiedProgress) -> None:
+        """
+        Handle unified progress updates containing both trial statistics and epoch information
+        This replaces the dual callback system and eliminates race conditions
+        """
+        try:
+            # Extract data from UnifiedProgress object
+            completed_count = len(unified_progress.completed_trials)
+            running_count = len(unified_progress.running_trials)
+            failed_count = len(unified_progress.failed_trials)
+            total_trials = unified_progress.total_trials
             
-            # Update best trial if this one performed better
-            if (trial_progress.status == "completed" and 
-                trial_progress.performance and 
-                trial_progress.performance.get('final_val_accuracy')):
+            # Calculate current trial count for UI display
+            current_trial = completed_count
+            if running_count > 0:
+                current_trial = completed_count + running_count
+            
+            # Calculate elapsed time
+            elapsed_time = 0
+            if self.started_at:
+                start_time = datetime.fromisoformat(self.started_at.replace('Z', '+00:00').replace('T', ' '))
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+            
+            # Store latest progress data
+            self.latest_aggregated_progress = {
+                "completed_trials": unified_progress.completed_trials,
+                "running_trials": unified_progress.running_trials,
+                "failed_trials": unified_progress.failed_trials,
+                "total_trials": total_trials,
+                "current_best_total_score": unified_progress.current_best_total_score
+            }
+            
+            # Create progress update with all information
+            progress_update = {
+                "current_trial": current_trial,
+                "total_trials": total_trials,
+                "completed_trials": completed_count,
+                "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
+                "best_total_score": unified_progress.current_best_total_score,
+                "best_accuracy": unified_progress.current_best_accuracy,
+                "trials_performed": completed_count,
+                "average_duration_per_trial": unified_progress.average_duration_per_trial,
+                "elapsed_time": elapsed_time,
+                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
+            }
+            
+            # Include epoch information directly from unified progress (no more race conditions!)
+            if unified_progress.current_epoch is not None:
+                progress_update["current_epoch"] = unified_progress.current_epoch
+            if unified_progress.total_epochs is not None:
+                progress_update["total_epochs"] = unified_progress.total_epochs
+            if unified_progress.epoch_progress is not None:
+                progress_update["epoch_progress"] = unified_progress.epoch_progress
+            
+            self.progress = progress_update
+            
+            # 🔍 UNIFIED PROGRESS DEBUG: Log all data being sent to UI
+            logger.info(f"🚀 UNIFIED PROGRESS UPDATE:")
+            logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')}")
+            logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
+            logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
+            logger.info(f"  ⏱️ Epoch Info:")
+            logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')}")
+            logger.info(f"    - Total Epochs: {progress_update.get('total_epochs', 'None')}")
+            logger.info(f"    - Epoch Progress: {progress_update.get('epoch_progress', 'None')}")
+            logger.info(f"  📊 Complete Progress Object: {progress_update}")
+            
+            # Log best score information
+            best_total_score = unified_progress.current_best_total_score
+            if best_total_score is not None:
+                logger.info(f"📊 BEST SCORE: {best_total_score:.4f} (after {completed_count} completed trials)")
+            
+            logger.info(f"🔄 UNIFIED PROGRESS: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_total_score}")
+            
+        except Exception as e:
+            logger.error(f"running OptimizationJob._handle_unified_progress ... Error processing unified progress: {e}")
+            logger.error(f"running OptimizationJob._handle_unified_progress ... Traceback: {traceback.format_exc()}")
+    
+    def _handle_trial_progress(self, trial_progress: Any) -> None:
+        """Handle individual trial progress updates with epoch information"""
+        try:
+            # 🔍 COMPREHENSIVE DEBUG: Log all trial progress data received
+            logger.info(f"🔍 TRIAL PROGRESS UPDATE DEBUG:")
+            logger.info(f"  📊 Trial Number: {getattr(trial_progress, 'trial_number', 'None')}")
+            logger.info(f"  📊 Trial Status: {getattr(trial_progress, 'status', 'None')}")
+            logger.info(f"  📊 Raw Epoch Data:")
+            logger.info(f"    - current_epoch: {getattr(trial_progress, 'current_epoch', 'None')}")
+            logger.info(f"    - total_epochs: {getattr(trial_progress, 'total_epochs', 'None')}")
+            logger.info(f"    - epoch_progress: {getattr(trial_progress, 'epoch_progress', 'None')}")
+            logger.info(f"  📊 All Trial Progress Attributes: {[attr for attr in dir(trial_progress) if not attr.startswith('_')]}")
+            
+            # Store epoch information from individual trial
+            self._current_epoch_info = {
+                'current_epoch': getattr(trial_progress, 'current_epoch', None),
+                'total_epochs': getattr(trial_progress, 'total_epochs', None),
+                'epoch_progress': getattr(trial_progress, 'epoch_progress', None)
+            }
+            logger.info(f"🔍 STORED EPOCH INFO: {self._current_epoch_info}")
+            
+        except Exception as e:
+            logger.error(f"running OptimizationJob._handle_trial_progress ... Error handling trial progress: {e}")
+    
+    def _handle_aggregated_progress(self, aggregated_progress: Any) -> None:
+        """Handle aggregated progress updates and update UI"""
+        try:
+            # Extract data from AggregatedProgress object
+            completed_count = len(aggregated_progress.completed_trials) if hasattr(aggregated_progress, 'completed_trials') else 0
+            running_count = len(aggregated_progress.running_trials) if hasattr(aggregated_progress, 'running_trials') else 0
+            failed_count = len(aggregated_progress.failed_trials) if hasattr(aggregated_progress, 'failed_trials') else 0
+            total_trials = getattr(aggregated_progress, 'total_trials', 0)
+            
+            # FIXED: Calculate current trial count for UI display (not trial numbers)
+            # The UI expects "X/Y trials" where X is the count of trials processed
+            current_trial = completed_count
+            if running_count > 0:
+                # If there are trials running, show the next trial count
+                current_trial = completed_count + running_count
+            
+            # Calculate elapsed time
+            elapsed_time = 0
+            if self.started_at:
+                start_time = datetime.fromisoformat(self.started_at.replace('Z', '+00:00').replace('T', ' '))
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+            
+            # Store latest aggregated progress data
+            self.latest_aggregated_progress = {
+                "completed_trials": aggregated_progress.completed_trials if hasattr(aggregated_progress, 'completed_trials') else [],
+                "running_trials": aggregated_progress.running_trials if hasattr(aggregated_progress, 'running_trials') else [],
+                "failed_trials": aggregated_progress.failed_trials if hasattr(aggregated_progress, 'failed_trials') else [],
+                "total_trials": total_trials,
+                "current_best_total_score": getattr(aggregated_progress, 'current_best_total_score', None)
+            }
+            
+            # Extract epoch information from stored trial progress if available
+            current_epoch = self._current_epoch_info.get('current_epoch')
+            total_epochs = self._current_epoch_info.get('total_epochs')  
+            epoch_progress = self._current_epoch_info.get('epoch_progress')
+            
+            # Update progress directly from aggregated data
+            progress_update = {
+                "current_trial": current_trial,
+                "total_trials": total_trials,
+                "completed_trials": completed_count,
+                "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
+                "best_total_score": getattr(aggregated_progress, 'current_best_total_score', None),
+                "elapsed_time": elapsed_time,
+                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
+            }
+            
+            # Add epoch information if available
+            if current_epoch is not None:
+                progress_update["current_epoch"] = current_epoch
+            if total_epochs is not None:
+                progress_update["total_epochs"] = total_epochs
+            if epoch_progress is not None:
+                progress_update["epoch_progress"] = epoch_progress
                 
-                current_val_acc = trial_progress.performance['final_val_accuracy']
-                best_val_acc = (self.best_trial_progress.performance.get('final_val_accuracy', 0) 
-                              if self.best_trial_progress and self.best_trial_progress.performance else 0)
-                
-                if current_val_acc > best_val_acc:
-                    self.best_trial_progress = trial_progress
-                    logger.debug(f"running OptimizationJob._progress_callback ... New best trial: {trial_progress.trial_number} with val_acc: {current_val_acc:.4f}")
-        
-        # Update job progress
-        self._update_job_progress()
+            self.progress = progress_update
+            
+            # 🔍 COMPREHENSIVE DEBUG: Log all progress data being sent to UI
+            logger.info(f"🔍 FULL PROGRESS UPDATE DEBUG:")
+            logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')}")
+            logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
+            logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
+            logger.info(f"  📊 Epoch Info:")
+            logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')}")
+            logger.info(f"    - Total Epochs: {progress_update.get('total_epochs', 'None')}")
+            logger.info(f"    - Epoch Progress: {progress_update.get('epoch_progress', 'None')}")
+            logger.info(f"  📊 Stored Epoch Info: {self._current_epoch_info}")
+            logger.info(f"  📊 Complete Progress Object: {progress_update}")
+            
+            # ENHANCED: Log best score information for UI verification
+            best_total_score = getattr(aggregated_progress, 'current_best_total_score', None)
+            if best_total_score is not None:
+                logger.info(f"📊 BEST SCORE UPDATE: Current best value = {best_total_score:.4f} (after {completed_count} completed trials)")
+            
+            # Log detailed progress summary for verification
+            logger.info(f"🔄 PROGRESS UPDATE: {completed_count}/{total_trials} completed, {running_count} running, {failed_count} failed, best_score={best_total_score}")
+            
+        except Exception as e:
+            logger.error(f"running OptimizationJob._handle_aggregated_progress ... Error handling aggregated progress: {e}")
     
     def _update_job_progress(self) -> None:
         """
@@ -346,7 +721,7 @@ class OptimizationJob:
                 "total_trials": opt_progress["total_trials"],
                 "completed_trials": opt_progress["completed_trials"],
                 "success_rate": opt_progress["success_rate"],
-                "best_value": opt_progress["best_value"],
+                "best_total_score": opt_progress["best_total_score"],
                 "elapsed_time": opt_progress["elapsed_time"],
                 "status_message": f"Trial {opt_progress['current_trial']}/{opt_progress['total_trials']} running"
             }
@@ -388,6 +763,50 @@ class OptimizationJob:
         
         # Start the optimization task
         self.task = asyncio.create_task(self._run_optimization())
+        
+        # Auto-start TensorBoard server in the background
+        asyncio.create_task(self._auto_start_tensorboard())
+    
+    async def _auto_start_tensorboard(self) -> None:
+        """
+        Automatically start TensorBoard server after optimization begins
+        
+        Waits for TensorBoard logs to be created, then starts the server automatically.
+        This eliminates the need for manual TensorBoard server startup.
+        """
+        try:
+            if not self.tensorboard_manager:
+                logger.info(f"No TensorBoard manager available for job {self.job_id}")
+                return
+                
+            logger.info(f"Auto-starting TensorBoard for job {self.job_id}")
+            
+            # Wait a bit for optimization to start and create log directories
+            await asyncio.sleep(10)  # Give time for first trial to start logging
+            
+            # Wait for tensorboard logs directory to be available
+            max_wait = 30  # Wait up to 30 more seconds
+            wait_count = 0
+            while not self.tensorboard_logs_dir and wait_count < max_wait:
+                await asyncio.sleep(1)
+                wait_count += 1
+            
+            if not self.tensorboard_logs_dir:
+                logger.warning(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard logs directory not available after waiting")
+                return
+            
+            if not self.tensorboard_logs_dir.exists():
+                logger.warning(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard logs directory does not exist: {self.tensorboard_logs_dir}")
+                return
+            
+            # Start TensorBoard server automatically
+            logger.info(f"Starting TensorBoard server with logs from: {self.tensorboard_logs_dir}")
+            result = self.tensorboard_manager.start_server(self.job_id, self.tensorboard_logs_dir)
+            logger.info(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard auto-started: {result}")
+                
+        except Exception as e:
+            logger.warning(f"running OptimizationJob._auto_start_tensorboard ... Failed to auto-start TensorBoard: {e}")
+            # Don't fail the optimization if TensorBoard startup fails
     
     async def _run_optimization(self) -> None:
         """
@@ -422,7 +841,7 @@ class OptimizationJob:
                 "total_trials": self.request.trials,
                 "completed_trials": 0,
                 "success_rate": 0.0,
-                "best_value": None,
+                "best_total_score": None,
                 "elapsed_time": 0,
                 "status_message": "Initializing optimization..."
             }
@@ -434,11 +853,48 @@ class OptimizationJob:
             self.progress["status_message"] = "Loading dataset and initializing optimizer..."
             logger.debug(f"running OptimizationJob._run_optimization ... Loading dataset {self.request.dataset_name}")
             
-            # Execute optimization
-            result = await loop.run_in_executor(
-                None,  # Use default thread pool
-                self._execute_optimization
-            )
+            # Execute optimization with cancellation handling
+            # Use a dedicated executor so we can control cancellation better
+            result = None  # Initialize to avoid "possibly unbound" errors
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                try:
+                    future = executor.submit(self._execute_optimization)
+                    
+                    # Check for cancellation periodically while waiting for result
+                    while not future.done():
+                        if self.status == JobStatus.CANCELLED:
+                            logger.info(f"running OptimizationJob._run_optimization ... Cancellation detected, requesting optimizer stop")
+                            if hasattr(self, 'optimizer') and self.optimizer:
+                                self.optimizer.cancel()
+                            
+                            # Give the optimization a short time to stop gracefully
+                            try:
+                                result = await asyncio.wait_for(
+                                    asyncio.wrap_future(future), 
+                                    timeout=5.0
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(f"running OptimizationJob._run_optimization ... Optimization didn't stop gracefully, forcing cancellation")
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                raise asyncio.CancelledError("Optimization forcefully cancelled")
+                            break
+                        
+                        await asyncio.sleep(0.5)  # Check every 500ms
+                    
+                    if future.done():
+                        result = future.result()
+                    
+                except asyncio.CancelledError:
+                    logger.info(f"running OptimizationJob._run_optimization ... Job {self.job_id} was cancelled")
+                    self.status = JobStatus.CANCELLED
+                    self.completed_at = datetime.now().isoformat()
+                    self.progress["status_message"] = "Optimization cancelled by user"
+                    raise
+            
+            # Ensure we have a valid result before processing
+            if result is None:
+                raise RuntimeError("Optimization completed but no result was obtained")
             
             # Convert OptimizationResult to API format
             api_result = self._convert_optimization_result(result)
@@ -451,10 +907,10 @@ class OptimizationJob:
             # Update final progress
             self.progress["status_message"] = "Optimization completed successfully"
             self.progress["current_trial"] = self.request.trials
-            self.progress["best_value"] = result.best_value
+            self.progress["best_total_score"] = result.best_total_score
             
             logger.debug(f"running OptimizationJob._run_optimization ... Job {self.job_id} completed successfully")
-            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.best_value:.4f}")
+            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.best_total_score:.4f}")
             
         except Exception as e:
             # Handle any optimization errors
@@ -487,6 +943,11 @@ class OptimizationJob:
         """
         logger.debug(f"running OptimizationJob._execute_optimization ... Executing optimization for job {self.job_id}")
         
+        # CRITICAL FIX: Ensure logging setup is applied before running optimization
+        # This guarantees UI-triggered optimizations write to the same log file as command-line runs
+        setup_logging()
+        logger.info(f"Starting UI-triggered optimization job {self.job_id} - logs will be written to logs/non-cron.log")
+        
         # Validate mode and objective
         try:
             opt_mode = OptimizationMode(self.request.mode.lower())
@@ -505,33 +966,31 @@ class OptimizationJob:
         # FIXED: Use enhanced optimize_model function to avoid duplicating run_name generation logic
         # This ensures consistency and eliminates code duplication
         
-        # Apply config overrides
-        config_overrides = self.request.config_overrides.copy()
-        config_overrides['health_weight'] = self.request.health_weight
+        # Use clean conversion function - gets all user values + system defaults
+        opt_config = create_optimization_config(self.request)
         
-        logger.debug(f"running OptimizationJob._execute_optimization ... Using optimize_model function")
-        logger.debug(f"running OptimizationJob._execute_optimization ... Config overrides: {config_overrides}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Using clean OptimizationConfig conversion")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Config created with user values: dataset_name={opt_config.dataset_name}, mode={opt_config.mode}, trials={opt_config.trials}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... System defaults: batch_size={opt_config.batch_size}, learning_rate={opt_config.learning_rate}")
         
-        # Use the enhanced optimize_model function with progress callback support
-        from optimizer import optimize_model
-        
-        result = optimize_model(
+        # Create optimizer instance and store reference for cancellation
+        self.optimizer = ModelOptimizer(
             dataset_name=self.request.dataset_name,
-            mode=self.request.mode,
-            optimize_for=self.request.optimize_for,
-            trials=self.request.trials,
-            run_name=None,  # Let optimize_model generate the run_name using its established logic
-            progress_callback=self._progress_callback,  # Real-time progress updates
-            **config_overrides
+            optimization_config=opt_config,
+            run_name=None,
+            progress_callback=self._progress_callback,
+            activation_override=opt_config.activation_functions[0] if opt_config.activation_functions else None
         )
         
-        # Note: The optimizer instance is not directly accessible when using optimize_model
-        # but that's okay since the progress_callback handles real-time updates
-        self.optimizer = None  # Will be set by the optimize_model function if needed
+        # Store TensorBoard logs directory for auto-start
+        if hasattr(self.optimizer, 'results_dir') and self.optimizer.results_dir:
+            self.tensorboard_logs_dir = self.optimizer.results_dir / "tensorboard_logs"
+        
+        result = self.optimizer.optimize()
         
         logger.debug(f"running OptimizationJob._execute_optimization ... Optimization completed for job {self.job_id}")
         logger.debug(f"running OptimizationJob._execute_optimization ... Results directory: {result.results_dir}")
-        logger.debug(f"running OptimizationJob._execute_optimization ... Best value: {result.best_value:.4f}")
+        logger.debug(f"running OptimizationJob._execute_optimization ... Best value: {result.best_total_score:.4f}")
         
         return result
             
@@ -551,7 +1010,7 @@ class OptimizationJob:
             # Convert to API format
             api_result = {
                 "optimization_result": {
-                    "best_value": result.best_value,
+                    "best_total_score": result.best_total_score,
                     "best_params": result.best_params,
                     "total_trials": result.total_trials,
                     "successful_trials": result.successful_trials,
@@ -566,11 +1025,11 @@ class OptimizationJob:
                 },
                 "model_result": {
                     "model_path": result.best_model_path,
-                    "test_accuracy": result.best_value if (result.optimization_config and "accuracy" in str(result.optimization_config.objective)) else None,
+                    "test_accuracy": result.best_total_score if (result.optimization_config and "accuracy" in str(result.optimization_config.objective)) else None,
                     "results_dir": str(result.results_dir) if result.results_dir else None
                 } if result.best_model_path else None,
                 "run_name": self.job_id,
-                "best_value": result.best_value,
+                "best_total_score": result.best_total_score,
                 "best_params": result.best_params,
                 "health_data": {
                     "best_trial_health": result.best_trial_health,
@@ -587,7 +1046,7 @@ class OptimizationJob:
             # Return minimal result on conversion error
             return {
                 "optimization_result": {
-                    "best_value": result.best_value,
+                    "best_total_score": result.best_total_score,
                     "best_params": result.best_params,
                     "total_trials": result.total_trials,
                     "successful_trials": result.successful_trials,
@@ -595,7 +1054,7 @@ class OptimizationJob:
                     "optimization_mode": result.optimization_mode
                 },
                 "run_name": self.job_id,
-                "best_value": result.best_value,
+                "best_total_score": result.best_total_score,
                 "best_params": result.best_params,
                 "conversion_error": str(e)
             }
@@ -637,8 +1096,8 @@ class OptimizationJob:
         if self.optimizer:
             return self.optimizer.get_trial_history()
         else:
-            # Fallback to stored progress history
-            return [trial.to_dict() for trial in self.trial_progress_history]
+            # Fallback when optimizer is not available
+            return []
     
     def get_current_trial(self) -> Optional[Dict[str, Any]]:
         """
@@ -652,7 +1111,12 @@ class OptimizationJob:
         if self.optimizer:
             return self.optimizer.get_current_trial()
         else:
-            return self.current_trial_progress.to_dict() if self.current_trial_progress else None
+            # Fallback: use aggregated progress data if available
+            if self.latest_aggregated_progress and self.latest_aggregated_progress.get('running_trials'):
+                running_trials = self.latest_aggregated_progress['running_trials']
+                if running_trials:
+                    return {"trial_id": f"trial_{running_trials[0]}", "trial_number": running_trials[0], "status": "running"}
+            return None
     
     def get_best_trial(self) -> Optional[Dict[str, Any]]:
         """
@@ -666,7 +1130,14 @@ class OptimizationJob:
         if self.optimizer:
             return self.optimizer.get_best_trial()
         else:
-            return self.best_trial_progress.to_dict() if self.best_trial_progress else None
+            # Fallback: use aggregated progress data if available
+            if self.latest_aggregated_progress and self.latest_aggregated_progress.get('current_best_total_score') is not None:
+                return {
+                    "trial_id": "best_trial", 
+                    "status": "completed",
+                    "best_total_score": self.latest_aggregated_progress['current_best_total_score']
+                }
+            return None
     
     def get_architecture_trends(self) -> Dict[str, List[float]]:
         """
@@ -728,6 +1199,11 @@ class OptimizationJob:
         if self.task:
             self.task.cancel()
         
+        # Cancel the optimizer if it exists
+        if hasattr(self, 'optimizer') and self.optimizer:
+            logger.debug(f"running OptimizationJob.cancel ... Cancelling optimizer for job {self.job_id}")
+            self.optimizer.cancel()
+        
         if self.progress:
             self.progress["status_message"] = "Job cancelled by user"
         
@@ -764,19 +1240,55 @@ class OptimizationAPI:
         # Run with: uvicorn api_server:app --host 0.0.0.0 --port 8000
     """
     
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI):
+        """
+        Lifespan event handler for FastAPI application
+        Replaces deprecated on_event handlers
+        """
+        # Startup - nothing needed currently
+        yield
+        # Shutdown - cleanup TensorBoard servers
+        logger.info("Shutting down API server - cleaning up TensorBoard servers")
+        if hasattr(self, 'tensorboard_manager'):
+            self.tensorboard_manager.cleanup_all()
+    
     def __init__(self):
         """
         Initialize the FastAPI application with all endpoints
         
         Sets up the FastAPI instance, configures CORS, initializes
         job storage, and registers all API endpoints.
+        
+        FIXED: Ensures consistent logging to files for all optimizations
         """
+        # CRITICAL FIX: Ensure logging is configured consistently for both UI and command-line triggers
+        # This ensures logs always go to logs/non-cron.log regardless of how optimization is started
+        setup_logging()
+        logger.info("API server initializing - logging configured to write to logs/non-cron.log")
         self.app = FastAPI(
             title="Hyperparameter Optimization API",
             description="REST API for automated hyperparameter optimization with GPU acceleration",
             version="1.0.0",
             docs_url="/docs",
-            redoc_url="/redoc"
+            redoc_url="/redoc",
+            lifespan=self.lifespan
+        )
+        
+        # Initialize TensorBoard manager
+        self.tensorboard_manager = TensorBoardManager()
+        
+        # Configure CORS for Next.js development server
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",  # Next.js dev server
+                "http://127.0.0.1:3000",
+                "http://0.0.0.0:3000"
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
         )
         
         # Job storage - in production, use Redis or database
@@ -788,7 +1300,7 @@ class OptimizationAPI:
         # Register API endpoints
         self._register_routes()
         
-        logger.debug("running OptimizationAPI.__init__ ... FastAPI application initialized")
+        logger.debug("running OptimizationAPI.__init__ ... FastAPI application initialized with CORS")
         logger.debug("running OptimizationAPI.__init__ ... Available datasets: " + 
                     ", ".join(self.dataset_manager.get_available_datasets()))
     
@@ -898,6 +1410,22 @@ class OptimizationAPI:
             """Get best performing trial so far"""
             return await self._get_best_trial(job_id)
         
+        # 3D Visualization endpoints
+        @self.app.get("/jobs/{job_id}/best-model")
+        async def get_best_model_visualization(job_id: str):
+            """Get best model data with 3D visualization information"""
+            return await self._get_best_model_visualization(job_id)
+        
+        @self.app.get("/jobs/{job_id}/best-model/download")
+        async def download_best_model_visualization(job_id: str):
+            """Download 3D visualization data as JSON file"""
+            return await self._download_best_model_visualization(job_id)
+        
+        @self.app.get("/jobs/{job_id}/cytoscape/architecture")
+        async def get_cytoscape_architecture(job_id: str, trial_id: Optional[str] = None):
+            """Get Cytoscape.js architecture data for best model or specific trial"""
+            return await self._get_cytoscape_architecture(job_id, trial_id)
+        
         @self.app.get("/jobs/{job_id}/trends")
         async def get_trends(job_id: str):
             """Get architecture and health trends for visualization"""
@@ -929,6 +1457,43 @@ class OptimizationAPI:
         async def stop_job(job_id: str):
             """Stop a specific running job"""
             return await self._stop_job(job_id)
+        
+        # TensorBoard integration endpoints
+        @self.app.get("/jobs/{job_id}/tensorboard/logs")
+        async def get_tensorboard_logs(job_id: str):
+            """Get available TensorBoard log directories for a job"""
+            return await self._get_tensorboard_logs(job_id)
+        
+        @self.app.get("/jobs/{job_id}/tensorboard/url")
+        async def get_tensorboard_url(job_id: str):
+            """Get TensorBoard server URL for a job"""
+            return await self._get_tensorboard_url(job_id)
+        
+        @self.app.post("/jobs/{job_id}/tensorboard/start")
+        async def start_tensorboard_server(job_id: str):
+            """Start TensorBoard server for a job"""
+            return await self._start_tensorboard_server(job_id)
+        
+        @self.app.post("/jobs/{job_id}/tensorboard/stop")
+        async def stop_tensorboard_server(job_id: str):
+            """Stop TensorBoard server for a job"""
+            return await self._stop_tensorboard_server(job_id)
+        
+        # Plot serving endpoints for embedded visualizations
+        @self.app.get("/jobs/{job_id}/plots/{trial_id}/{plot_type}")
+        async def get_trial_plot(job_id: str, trial_id: str, plot_type: str):
+            """Serve training visualization plots for specific trial"""
+            return await self._get_trial_plot(job_id, trial_id, plot_type)
+        
+        @self.app.get("/jobs/{job_id}/plots/{trial_id}")
+        async def list_trial_plots(job_id: str, trial_id: str):
+            """List available plots for a specific trial"""
+            return await self._list_trial_plots(job_id, trial_id)
+        
+        @self.app.get("/jobs/{job_id}/plots")
+        async def list_job_plots(job_id: str):
+            """List available plots for all trials in a job"""
+            return await self._list_job_plots(job_id)
         
         logger.debug("running OptimizationAPI._register_routes ... All API endpoints registered")
                
@@ -998,36 +1563,21 @@ class OptimizationAPI:
                 detail=f"Cannot use health-only objective '{request.optimize_for}' in simple mode. Available for simple mode: {universal_objectives}"
             )
         
-        # Ensure epoch configuration is sane BEFORE creating the job
-        config_overrides = request.config_overrides.copy()
-        
-        # Ensure the values for max and min epochs are valid to avoid configuration issues
-        max_epochs = config_overrides.get('max_epochs_per_trial', 20)  # Default 20
-        min_epochs = 5  # Always use 3 as minimum for API requests
+        # Validate epoch configuration is sane BEFORE creating the job
+        max_epochs = request.max_epochs_per_trial
+        min_epochs = request.min_epochs_per_trial
         
         # Ensure max_epochs is at least min_epochs
         if max_epochs < min_epochs:
             logger.warning(f"running _start_optimization ... max_epochs_per_trial ({max_epochs}) too low, setting to {min_epochs}")
-            max_epochs = min_epochs
+            # Update the request in place
+            request.max_epochs_per_trial = min_epochs
         
-        # Update config overrides with corrected values
-        config_overrides['max_epochs_per_trial'] = max_epochs
-        config_overrides['min_epochs_per_trial'] = min_epochs
+        logger.debug(f"running _start_optimization ... Using epoch configuration: min={request.min_epochs_per_trial}, max={request.max_epochs_per_trial}")
+        logger.debug(f"running _start_optimization ... User parameters: trials={request.trials}, mode={request.mode}, health_weight={request.health_weight}, use_runpod_service={request.use_runpod_service}")
         
-        logger.debug(f"running _start_optimization ... Using epoch configuration: min={min_epochs}, max={max_epochs}")
-        
-        # Create optimization request with fixed config
-        fixed_request = OptimizationRequest(
-            dataset_name=request.dataset_name,
-            mode=request.mode,
-            optimize_for=request.optimize_for,
-            trials=request.trials,
-            health_weight=request.health_weight,
-            config_overrides=config_overrides  # Use the fixed config
-        )
-        
-        # Create new job with the fixed request
-        job = OptimizationJob(fixed_request)
+        # Create new job with the comprehensive request (no need to recreate)
+        job = OptimizationJob(request, self.tensorboard_manager)
         self.jobs[job.job_id] = job
         
         # Start optimization in background
@@ -1073,7 +1623,7 @@ class OptimizationAPI:
                 job_status.progress.update({
                     "total_trials": optimization_result.get("total_trials", 0),
                     "completed_trials": optimization_result.get("successful_trials", 0),
-                    "best_value": optimization_result.get("best_value", 0.0),
+                    "best_total_score": optimization_result.get("best_total_score", 0.0),
                     "success_rate": (
                         optimization_result.get("successful_trials", 0) / 
                         max(optimization_result.get("total_trials", 1), 1)
@@ -1081,14 +1631,14 @@ class OptimizationAPI:
                     "status_message": "Optimization completed successfully"
                 })
                 
-                # FIXED: Also update the main result best_value for monitor display
-                if "best_value" in optimization_result:
+                # FIXED: Also update the main result best_total_score for monitor display
+                if "best_total_score" in optimization_result:
                     # Ensure the job result reflects the actual best value
                     if isinstance(job_status.result, dict):
-                        job_status.result["best_value"] = optimization_result["best_value"]
+                        job_status.result["best_total_score"] = optimization_result["best_total_score"]
                 
                 logger.debug(f"running OptimizationAPI._get_job_status ... "
-                            f"Enhanced completed job status: best_value={optimization_result.get('best_value', 'N/A')}")
+                            f"Enhanced completed job status: best_total_score={optimization_result.get('best_total_score', 'N/A')}")
                 
             except Exception as e:
                 logger.warning(f"running OptimizationAPI._get_job_status ... "
@@ -1189,15 +1739,17 @@ class OptimizationAPI:
     
     async def _download_model(self, job_id: str) -> FileResponse:
         """
-        Download the trained model from completed optimization job
+        Download the trained model and metadata from completed optimization job
         
-        UPDATED: Uses new result format
+        ENHANCED: Creates ZIP archive containing:
+        - .keras model file
+        - best_hyperparameters.yaml metadata file
         
         Args:
             job_id: Unique job identifier
             
         Returns:
-            FileResponse with model file
+            FileResponse with ZIP archive containing model and metadata
             
         Raises:
             HTTPException: If job not found, not completed, or model not available
@@ -1234,13 +1786,137 @@ class OptimizationAPI:
                 detail=f"Model file not found for job {job_id}"
             )
         
-        logger.debug(f"running OptimizationAPI._download_model ... Serving model file for job {job_id}: {model_path}")
+        try:
+            # Create ZIP archive with model and metadata
+            return await self._create_model_download_archive(job_id, model_path)
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._download_model ... Failed to create download archive: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare model download: {str(e)}"
+            )
+    
+    async def _create_model_download_archive(self, job_id: str, model_path: str) -> FileResponse:
+        """
+        Create ZIP archive containing model file and metadata
         
-        return FileResponse(
-            path=model_path,
-            media_type="application/octet-stream",
-            filename=Path(model_path).name
-        )
+        Args:
+            job_id: Job identifier for naming and metadata lookup
+            model_path: Path to the .keras model file
+            
+        Returns:
+            FileResponse with ZIP archive
+        """
+        import zipfile
+        import tempfile
+        from datetime import datetime
+        
+        model_path_obj = Path(model_path)
+        
+        # Determine the hyperparameters YAML file path
+        # The YAML file is in the same directory as the model
+        yaml_path = model_path_obj.parent / "best_hyperparameters.yaml"
+        
+        logger.debug(f"running _create_model_download_archive ... Model path: {model_path}")
+        logger.debug(f"running _create_model_download_archive ... YAML path: {yaml_path}")
+        
+        # Create temporary ZIP file
+        temp_dir = Path(tempfile.gettempdir())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"optimized_model_{job_id}_{timestamp}.zip"
+        temp_zip_path = temp_dir / zip_filename
+        
+        try:
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # Add the .keras model file
+                if model_path_obj.exists():
+                    zip_file.write(model_path_obj, model_path_obj.name)
+                    logger.debug(f"running _create_model_download_archive ... Added model file: {model_path_obj.name}")
+                else:
+                    logger.warning(f"running _create_model_download_archive ... Model file not found: {model_path}")
+                
+                # Add the hyperparameters YAML file
+                if yaml_path.exists():
+                    zip_file.write(yaml_path, yaml_path.name)
+                    logger.debug(f"running _create_model_download_archive ... Added YAML file: {yaml_path.name}")
+                else:
+                    logger.warning(f"running _create_model_download_archive ... YAML file not found: {yaml_path}")
+                    # Create a minimal YAML file if it doesn't exist
+                    minimal_yaml_content = f"""# Optimization Metadata
+dataset: "unknown"
+optimization_mode: "unknown"
+job_id: "{job_id}"
+note: "Original hyperparameters file not found"
+generated_at: "{datetime.now().isoformat()}"
+"""
+                    yaml_in_zip = "best_hyperparameters.yaml"
+                    zip_file.writestr(yaml_in_zip, minimal_yaml_content)
+                    logger.debug(f"running _create_model_download_archive ... Created minimal YAML file in archive")
+                
+                # Add a README file for user guidance
+                readme_content = f"""# Optimized Model Package
+
+This archive contains your optimized neural network model and configuration.
+
+## Contents
+
+1. **{model_path_obj.name}** - Your trained TensorFlow/Keras model
+   - Load with: `tensorflow.keras.models.load_model('{model_path_obj.name}')`
+   - Ready for inference and deployment
+
+2. **best_hyperparameters.yaml** - Optimization metadata
+   - Contains the hyperparameters that achieved the best performance
+   - Includes dataset info, optimization settings, and performance scores
+   - Use these settings to reproduce or fine-tune your model
+
+## Usage Example
+
+```python
+import tensorflow as tf
+import yaml
+
+# Load the trained model
+model = tf.keras.models.load_model('{model_path_obj.name}')
+
+# Load the hyperparameters
+with open('best_hyperparameters.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+print("Model loaded successfully!")
+print(f"Dataset: {{config['dataset']}}")
+print(f"Best score: {{config['best_total_score']:.4f}}")
+
+# Use model for predictions
+# predictions = model.predict(your_data)
+```
+
+Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Job ID: {job_id}
+"""
+                zip_file.writestr("README.md", readme_content)
+                logger.debug(f"running _create_model_download_archive ... Added README.md")
+            
+            logger.info(f"running _create_model_download_archive ... Created download archive: {temp_zip_path}")
+            
+            return FileResponse(
+                path=str(temp_zip_path),
+                media_type="application/zip",
+                filename=zip_filename,
+                headers={
+                    "Content-Disposition": f"attachment; filename=\"{zip_filename}\"",
+                    "Content-Type": "application/zip",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0"
+                }
+            )
+            
+        except Exception as e:
+            # Clean up temp file if creation failed
+            if temp_zip_path.exists():
+                temp_zip_path.unlink()
+            raise e
     
     async def _get_trial_history(self, job_id: str) -> Dict[str, Any]:
         """
@@ -1263,6 +1939,16 @@ class OptimizationAPI:
             )
         
         job = self.jobs[job_id]
+        
+        # Check if optimizer is available
+        if not hasattr(job, 'optimizer') or not job.optimizer:
+            logger.warning(f"running OptimizationAPI._get_trial_history ... No optimizer instance for job {job_id}")
+            return {
+                "job_id": job_id,
+                "trials": [],
+                "total_trials": 0
+            }
+        
         trial_history = job.get_trial_history()
         
         return {
@@ -1326,6 +2012,253 @@ class OptimizationAPI:
             "job_id": job_id,
             "best_trial": best_trial
         }
+    
+    async def _get_best_model_visualization(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get best model data with 3D visualization information
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with best model data and 3D visualization information
+            
+        Raises:
+            HTTPException: If job not found or no completed trials
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._get_best_model_visualization ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        # Get the 3D visualization data from the optimizer
+        if not hasattr(job, 'optimizer') or not job.optimizer:
+            logger.error(f"running OptimizationAPI._get_best_model_visualization ... No optimizer instance for job {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No optimizer instance found for job {job_id}"
+            )
+        
+        visualization_data = job.optimizer.get_best_model_visualization_data()
+        
+        if not visualization_data:
+            logger.warning(f"running OptimizationAPI._get_best_model_visualization ... No visualization data available for job {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No completed trials yet for job {job_id}"
+            )
+        
+        logger.debug(f"running OptimizationAPI._get_best_model_visualization ... Returning 3D visualization data for job {job_id}, trial {visualization_data.get('trial_number')}")
+        
+        return {
+            "job_id": job_id,
+            **visualization_data
+        }
+    
+    async def _download_best_model_visualization(self, job_id: str) -> FileResponse:
+        """
+        Download 3D visualization data as JSON file
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            FileResponse with JSON file containing visualization data
+            
+        Raises:
+            HTTPException: If job not found or no completed trials
+        """
+        # Get the visualization data (reuse existing method)
+        visualization_data = await self._get_best_model_visualization(job_id)
+        
+        # Create temporary file for download
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        trial_number = visualization_data.get('trial_number', 'unknown')
+        filename = f"best_model_visualization_job_{job_id}_trial_{trial_number}_{timestamp}.json"
+        
+        # Create temporary directory if it doesn't exist
+        temp_dir = Path(tempfile.gettempdir()) / "model_visualizations"
+        temp_dir.mkdir(exist_ok=True)
+        temp_file_path = temp_dir / filename
+        
+        try:
+            # Write visualization data to temporary file
+            with open(temp_file_path, 'w', encoding='utf-8') as f:
+                json.dump(visualization_data, f, indent=2, default=str)
+            
+            logger.info(f"running OptimizationAPI._download_best_model_visualization ... Created download file: {temp_file_path}")
+            
+            return FileResponse(
+                path=str(temp_file_path),
+                filename=filename,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}",
+                    "Cache-Control": "no-cache"
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"running OptimizationAPI._download_best_model_visualization ... Failed to create download file: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare visualization download: {str(e)}"
+            )
+    
+    async def _get_cytoscape_architecture(self, job_id: str, trial_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get Cytoscape.js architecture data for visualization
+        
+        Args:
+            job_id: Unique job identifier
+            trial_id: Optional specific trial ID, defaults to best trial
+            
+        Returns:
+            Dictionary containing Cytoscape.js nodes and edges data
+            
+        Raises:
+            HTTPException: If job not found or no completed trials
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        try:
+            # Get the best trial or specific trial
+            if trial_id:
+                # Check if optimizer is available
+                if not hasattr(job, 'optimizer') or not job.optimizer:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"No optimizer instance found for job {job_id}"
+                    )
+                
+                # Find specific trial using trial history
+                trial_history = job.optimizer.get_trial_history()
+                target_trial = None
+                for trial_dict in trial_history:
+                    trial_number = trial_dict.get('trial_number')
+                    if trial_number is not None and str(trial_number) == trial_id:
+                        target_trial = trial_dict
+                        break
+                
+                if not target_trial:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Trial {trial_id} not found in job {job_id}"
+                    )
+                
+                best_trial = target_trial
+            else:
+                # Check if optimizer is available
+                if not hasattr(job, 'optimizer') or not job.optimizer:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"No optimizer instance found for job {job_id}"
+                    )
+                
+                # Get best trial
+                best_trial_result = job.optimizer.get_best_model_visualization_data()
+                if not best_trial_result:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"No completed trials found for job {job_id}"
+                    )
+                best_trial = best_trial_result.get('trial_data')
+            
+            if not best_trial:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No trial data available"
+                )
+            
+            # Check if trial has architecture data
+            if isinstance(best_trial, dict):
+                architecture_data = best_trial.get('architecture')
+                health_metrics = best_trial.get('health_metrics')
+                # For dictionary-based trials, performance data is often in the trial itself
+                performance_data = best_trial.get('performance') or best_trial
+            else:
+                # Fallback for object-based trials
+                architecture_data = getattr(best_trial, 'architecture', None)
+                health_metrics = getattr(best_trial, 'health_metrics', None)
+                performance_data = getattr(best_trial, 'performance', None)
+                
+            if not architecture_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No architecture data available for trial"
+                )
+            
+            # Get performance and health scores
+            performance_score = 0.0
+            health_score = None
+            
+            if isinstance(performance_data, dict):
+                performance_score = performance_data.get('total_score', 0.0)
+            elif performance_data and hasattr(performance_data, 'total_score'):
+                performance_score = performance_data.total_score
+            
+            if isinstance(health_metrics, dict):
+                health_score = health_metrics.get('overall_health')
+            elif health_metrics and hasattr(health_metrics, 'overall_health'):
+                health_score = health_metrics.overall_health
+            
+            # Import and use ModelVisualizer
+            from model_visualizer import create_model_visualizer
+            
+            visualizer = create_model_visualizer()
+            
+            # Prepare the architecture visualization
+            arch_viz = visualizer.prepare_visualization_data(
+                architecture_data, 
+                performance_score, 
+                health_score
+            )
+            
+            # Convert to Cytoscape format
+            cytoscape_data = visualizer.export_cytoscape_architecture(arch_viz)
+            
+            # Add additional metadata
+            if isinstance(best_trial, dict):
+                trial_number = best_trial.get('trial_number')
+                trial_status = best_trial.get('status', 'unknown')
+            else:
+                trial_number = getattr(best_trial, 'number', None)
+                trial_status = getattr(best_trial, 'status', 'unknown')
+                
+            result = {
+                "job_id": job_id,
+                "trial_id": trial_id or trial_number or 'best',
+                "cytoscape_data": cytoscape_data,
+                "generated_at": datetime.utcnow().isoformat(),
+                "trial_info": {
+                    "trial_number": trial_number,
+                    "status": trial_status,
+                    "performance_score": performance_score,
+                    "health_score": health_score
+                }
+            }
+            
+            logger.info(f"Generated Cytoscape architecture data for job {job_id}, trial {trial_id or 'best'}")
+            return result
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to generate Cytoscape architecture data for job {job_id}: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate Cytoscape data: {str(e)}"
+            )
     
     async def _get_trends(self, job_id: str) -> Dict[str, Any]:
         """
@@ -1695,7 +2628,384 @@ class OptimizationAPI:
         except Exception as e:
             logger.error(f"running OptimizationAPI._get_job_results_directory ... Error finding results directory: {e}")
             return None
+
+    async def _get_tensorboard_logs(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get available TensorBoard log directories for a job
         
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with available log directories and trial information
+            
+        Note:
+            Works with any job_id as long as TensorBoard logs exist
+        """
+        # Remove job existence check - allow any job_id if logs exist
+        
+        try:
+            tensorboard_dir = Path("tensorboard_logs")
+            log_directories = []
+            
+            if tensorboard_dir.exists():
+                # Find the most recent run directory (new namespaced structure only)
+                run_dirs = [d for d in tensorboard_dir.iterdir() if d.is_dir()]
+                
+                if run_dirs:
+                    # Sort by modification time to get the most recent run
+                    latest_run_dir = max(run_dirs, key=lambda x: x.stat().st_mtime)
+                    
+                    # Find all trial directories within the latest run
+                    trial_dirs = [d for d in latest_run_dir.iterdir() if d.is_dir() and d.name.startswith("trial_")]
+                else:
+                    trial_dirs = []
+                
+                for trial_dir in trial_dirs:
+                    trial_info = {
+                        "trial_directory": str(trial_dir),
+                        "trial_name": trial_dir.name,
+                        "log_files": []
+                    }
+                    
+                    # Check for log files in this trial
+                    if trial_dir.exists():
+                        for log_file in trial_dir.rglob("*"):
+                            if log_file.is_file():
+                                trial_info["log_files"].append({
+                                    "file_path": str(log_file),
+                                    "file_name": log_file.name,
+                                    "size_bytes": log_file.stat().st_size,
+                                    "modified": datetime.fromtimestamp(log_file.stat().st_mtime).isoformat()
+                                })
+                    
+                    log_directories.append(trial_info)
+            
+            return {
+                "job_id": job_id,
+                "tensorboard_logs": log_directories,
+                "total_trials": len(log_directories),
+                "base_log_directory": str(tensorboard_dir)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get TensorBoard logs for job {job_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve TensorBoard logs: {str(e)}"
+            )
+    
+    async def _get_tensorboard_url(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get TensorBoard server URL for a job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with TensorBoard URL and status
+            
+        Note:
+            Works with any job_id for TensorBoard server management
+        """
+        # Remove job existence check - allow any job_id for TensorBoard server management
+        
+        # Get server status from TensorBoard manager
+        return self.tensorboard_manager.get_server_status(job_id)
+    
+    async def _start_tensorboard_server(self, job_id: str) -> Dict[str, Any]:
+        """
+        Start TensorBoard server for a job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with server status and URL
+            
+        Raises:
+            HTTPException: If TensorBoard logs not found or server cannot be started
+        """
+        # Remove job existence check - only check if TensorBoard logs exist
+        
+        try:
+            tensorboard_base_dir = Path("tensorboard_logs")
+            
+            if not tensorboard_base_dir.exists():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No TensorBoard logs found for this job"
+                )
+            
+            # Find the most recent run directory (new namespaced structure only)
+            run_dirs = [d for d in tensorboard_base_dir.iterdir() if d.is_dir()]
+            
+            if not run_dirs:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No run directories found in TensorBoard logs"
+                )
+            
+            # Sort by modification time to get the most recent run
+            latest_run_dir = max(run_dirs, key=lambda x: x.stat().st_mtime)
+            tensorboard_dir = latest_run_dir
+            
+            # Check if there are any trial directories in the chosen directory
+            trial_dirs = [d for d in tensorboard_dir.iterdir() if d.is_dir() and d.name.startswith("trial_")]
+            if not trial_dirs:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No trial directories found in TensorBoard logs"
+                )
+            
+            # Use TensorBoard manager to start server pointing to the correct directory
+            return self.tensorboard_manager.start_server(job_id, tensorboard_dir)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to start TensorBoard server for job {job_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to start TensorBoard server: {str(e)}"
+            )
+    
+    async def _stop_tensorboard_server(self, job_id: str) -> Dict[str, Any]:
+        """
+        Stop TensorBoard server for a job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with stop status
+            
+        Note:
+            Works with any job_id for TensorBoard server management
+        """
+        # Remove job existence check - allow any job_id for TensorBoard server management
+        
+        # Use TensorBoard manager to stop server
+        return self.tensorboard_manager.stop_server(job_id)
+    
+    async def _get_trial_plot(self, job_id: str, trial_id: str, plot_type: str):
+        """
+        Serve a specific training visualization plot for a trial
+        
+        Args:
+            job_id: Unique job identifier
+            trial_id: Trial number (e.g., "0", "1", "2")
+            plot_type: Plot type ("training_history", "weights_bias", "gradient_flow", "dead_neuron_analysis", "gradient_distributions", "training_progress", "activation_maps", "activation_summary", "confusion_matrix", "training_animation")
+            
+        Returns:
+            File response with the plot image
+        """
+        try:
+            # Validate job exists
+            if job_id not in self.jobs:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Job {job_id} not found"
+                )
+            
+            job = self.jobs[job_id]
+            
+            # Determine plot directory from job's optimizer results
+            if not hasattr(job, 'optimizer') or not job.optimizer:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No optimizer instance found for job {job_id}"
+                )
+            
+            results_dir = job.optimizer.results_dir
+            plot_dir = results_dir / "plots" / f"trial_{trial_id}"
+            
+            # Map plot types to filename patterns (scan for actual files)
+            plot_patterns = {
+                "training_history": ["training_history*", "training_progress*", "training_*dashboard*"],
+                "weights_bias": ["weights_bias*", "*weights*bias*"], 
+                "gradient_flow": ["gradient_flow*", "gradient_magnitudes*", "gradient_distributions*"],
+                "dead_neuron_analysis": ["*dead_neuron*"],
+                "gradient_distributions": ["gradient_distributions*"],
+                "training_progress": ["training_progress*"],
+                "activation_maps": ["activation_maps*", "activation_comparison*"],
+                "activation_progression": ["activation_progression*"],
+                "activation_summary": ["activation_summary*"],
+                "confusion_matrix": ["confusion_matrix*"],
+                "training_animation": ["training_animation*"]
+            }
+            
+            if plot_type not in plot_patterns:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid plot type. Available types: {list(plot_patterns.keys())}"
+                )
+            
+            # Find the first matching file for this plot type
+            plot_file = None
+            for pattern in plot_patterns[plot_type]:
+                matching_files = list(plot_dir.glob(f"{pattern}.png"))
+                if matching_files:
+                    plot_file = matching_files[0]  # Use the first match
+                    break
+            
+            if not plot_file or not plot_file.exists():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Plot {plot_type} not found for trial {trial_id}"
+                )
+            
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                path=str(plot_file),
+                media_type="image/png",
+                filename=f"{job_id}_trial_{trial_id}_{plot_type}.png"
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"running _get_trial_plot ... Error serving plot: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to serve plot: {str(e)}"
+            )
+    
+    async def _list_trial_plots(self, job_id: str, trial_id: str) -> Dict[str, Any]:
+        """
+        List available plots for a specific trial
+        
+        Args:
+            job_id: Unique job identifier
+            trial_id: Trial number
+            
+        Returns:
+            Dictionary with available plots and metadata
+        """
+        try:
+            # Validate job exists
+            if job_id not in self.jobs:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Job {job_id} not found"
+                )
+            
+            job = self.jobs[job_id]
+            
+            # Get plot directory
+            if not hasattr(job, 'optimizer') or not job.optimizer:
+                return {"plots": [], "message": "No optimizer instance found"}
+            
+            results_dir = job.optimizer.results_dir
+            plot_dir = results_dir / "plots" / f"trial_{trial_id}"
+            
+            if not plot_dir.exists():
+                return {"plots": [], "message": f"No plots found for trial {trial_id}"}
+            
+            # Check for actual plot files using pattern matching
+            plot_patterns = {
+                "training_history": ["training_history*", "training_progress*", "training_*dashboard*"],
+                "weights_bias": ["weights_bias*", "*weights*bias*"], 
+                "gradient_flow": ["gradient_flow*", "gradient_magnitudes*", "gradient_distributions*"],
+                "dead_neuron_analysis": ["*dead_neuron*"],
+                "gradient_distributions": ["gradient_distributions*"],
+                "training_progress": ["training_progress*"],
+                "activation_maps": ["activation_maps*", "activation_comparison*"],
+                "activation_progression": ["activation_progression*"],
+                "activation_summary": ["activation_summary*"],
+                "confusion_matrix": ["confusion_matrix*"],
+                "training_animation": ["training_animation*"]
+            }
+            
+            available_plots = []
+            for plot_type, patterns in plot_patterns.items():
+                # Find the first matching file for this plot type
+                plot_file = None
+                for pattern in patterns:
+                    matching_files = list(plot_dir.glob(f"{pattern}.png"))
+                    if matching_files:
+                        plot_file = matching_files[0]  # Use the first match
+                        break
+                
+                if plot_file and plot_file.exists():
+                    available_plots.append({
+                        "plot_type": plot_type,
+                        "filename": plot_file.name,
+                        "url": f"/jobs/{job_id}/plots/{trial_id}/{plot_type}",
+                        "size_bytes": plot_file.stat().st_size,
+                        "created_time": plot_file.stat().st_mtime
+                    })
+            
+            return {
+                "job_id": job_id,
+                "trial_id": trial_id,
+                "plots": available_plots,
+                "total_plots": len(available_plots)
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"running _list_trial_plots ... Error listing plots: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to list plots: {str(e)}"
+            )
+    
+    async def _list_job_plots(self, job_id: str) -> Dict[str, Any]:
+        """
+        List available plots for all trials in a job
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary with plots organized by trial
+        """
+        try:
+            # Validate job exists
+            if job_id not in self.jobs:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Job {job_id} not found"
+                )
+            
+            job = self.jobs[job_id]
+            
+            # Get plots directory
+            if not hasattr(job, 'optimizer') or not job.optimizer:
+                return {"trials": {}, "message": "No optimizer instance found"}
+            
+            results_dir = job.optimizer.results_dir
+            plots_dir = results_dir / "plots"
+            
+            if not plots_dir.exists():
+                return {"trials": {}, "message": "No plots directory found"}
+            
+            # Scan for trial directories
+            trials_plots = {}
+            for trial_dir in plots_dir.iterdir():
+                if trial_dir.is_dir() and trial_dir.name.startswith("trial_"):
+                    trial_id = trial_dir.name.replace("trial_", "")
+                    trial_plots = await self._list_trial_plots(job_id, trial_id)
+                    if trial_plots["plots"]:
+                        trials_plots[trial_id] = trial_plots["plots"]
+            
+            return {
+                "job_id": job_id,
+                "trials": trials_plots,
+                "total_trials": len(trials_plots),
+                "total_plots": sum(len(plots) for plots in trials_plots.values())
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"running _list_job_plots ... Error listing job plots: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to list job plots: {str(e)}"
+            )
     
 
 
@@ -1711,6 +3021,9 @@ if __name__ == "__main__":
     For production deployment, use:
     uvicorn api_server:app --host 0.0.0.0 --port 8000
     """
+    # CRITICAL FIX: Ensure logging is set up before server starts
+    setup_logging()
+    logger.info("FastAPI server starting - all logs will be written to logs/non-cron.log")
     logger.debug("running api_server.__main__ ... Starting FastAPI development server")
     
     uvicorn.run(

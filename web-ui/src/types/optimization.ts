@@ -74,7 +74,7 @@ export interface HealthMetrics {
 }
 
 export interface BestResults {
-  best_value: number
+  best_total_score: number
   best_params: Hyperparameters
   best_trial_health: HealthMetrics
 }
@@ -114,7 +114,7 @@ export interface HealthMonitoring {
 export interface OptimizationConfiguration {
   mode: 'simple' | 'health'
   health_weight?: number
-  n_trials: number
+  trials: number
   max_epochs_per_trial: number
   max_training_time_minutes: number
   optimization_objective: string
@@ -128,10 +128,77 @@ export interface OptimizationResults {
   configuration: OptimizationConfiguration
 }
 
+// Trial progress from real-time API
+export interface TrialProgress {
+  trial_id: string
+  trial_number: number
+  status: 'running' | 'completed' | 'failed' | 'pruned'
+  started_at: string
+  completed_at?: string
+  duration_seconds?: number
+  
+  // Epoch-level progress tracking
+  current_epoch?: number
+  total_epochs?: number
+  epoch_progress?: number
+  
+  // Architecture Information
+  architecture?: {
+    type?: string
+    conv_layers?: number
+    dense_layers?: number
+    activation?: string
+    filters_per_layer?: number
+    first_dense_nodes?: number
+    batch_normalization?: boolean
+    kernel_size?: number[] | number | string
+    convLayers?: number | string
+    denseLayers?: number | string
+    totalLayers?: number | string
+    filterSizes?: number[]
+    activations?: string[]
+    keyFeatures?: string[]
+    parameters?: number
+    [key: string]: unknown
+  }
+  hyperparameters?: {
+    [key: string]: unknown
+  }
+  model_size?: {
+    [key: string]: unknown
+  }
+  
+  // Health Metrics (includes test_loss, overall_health, etc.)
+  health_metrics?: {
+    test_loss?: number
+    test_accuracy?: number
+    overall_health?: number
+    neuron_utilization?: number
+    parameter_efficiency?: number
+    training_stability?: number
+    gradient_health?: number
+    convergence_quality?: number
+    accuracy_consistency?: number
+    [key: string]: unknown
+  }
+  training_stability?: Record<string, unknown>
+  
+  // Performance Data
+  performance?: {
+    total_score?: number
+    accuracy?: number
+    [key: string]: unknown
+  }
+  training_history?: Record<string, unknown>
+  
+  // Pruning Information
+  pruning_info?: Record<string, unknown>
+}
+
 // Trial data from CSV
 export interface TrialData {
   trial_number: number
-  objective_value: number
+  total_score: number
   state: 'COMPLETE' | 'FAILED' | 'PRUNED'
   duration_seconds: number
   overall_health: number
@@ -142,7 +209,7 @@ export interface TrialData {
 export interface TrialSummary {
   id: number
   trial_number: number
-  objective_value: number
+  total_score: number
   overall_health: number
   duration_seconds: number
   architecture_type: 'CNN' | 'LSTM'
@@ -158,7 +225,7 @@ export interface LayerNode {
   position: [number, number, number]
   size: [number, number, number]
   parameters: {
-    [key: string]: any
+    [key: string]: unknown
   }
   connections: string[]
   health_score?: number
@@ -176,7 +243,7 @@ export interface Architecture3D {
   }
   metadata: {
     dataset: string
-    objective_value: number
+    total_score: number
     hyperparameters: Hyperparameters
   }
 }

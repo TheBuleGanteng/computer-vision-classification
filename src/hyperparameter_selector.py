@@ -17,10 +17,50 @@ from dataset_manager import DatasetConfig
 
 class HyperparameterSelector:
     """
-    Handles hyperparameter suggestion and validation for different model architectures
+    Hyperparameter suggestion engine that bridges Optuna optimization with ModelConfig.
     
-    Provides clean interface for suggesting hyperparameters based on data type
-    and validates parameter combinations for feasibility.
+    **Core Responsibility:**
+    Generates architecture-specific hyperparameter suggestions using Optuna trials,
+    which are then used to populate ModelConfig instances for model construction.
+    
+    **Configuration Flow Integration:**
+    1. ModelOptimizer calls suggest_hyperparameters(trial) for each optimization trial
+    2. This class uses Optuna to randomly suggest values: kernel_size, use_global_pooling, etc.
+    3. Returns dictionary of suggested parameters to ModelOptimizer  
+    4. ModelOptimizer creates ModelConfig() and populates it with these suggestions
+    5. ModelBuilder receives the populated ModelConfig for model construction
+    
+    **Architecture-Aware Suggestions:**
+    - **CNN Parameters**: num_layers_conv, filters_per_conv_layer, kernel_size, 
+                         use_global_pooling, batch_normalization, activation
+    - **LSTM Parameters**: embedding_dim, lstm_units, use_bidirectional, vocab_size
+    - **Training Parameters**: epochs, optimizer, learning rates (epoch range from config)
+    
+    **Key Features:**
+    - **Data Type Detection**: Automatically determines CNN vs LSTM based on dataset shape
+    - **Parameter Validation**: Validates suggested combinations for feasibility
+    - **Fallback Safety**: Provides conservative defaults when validation fails
+    - **Search Space Management**: Defines reasonable ranges for each parameter type
+    
+    **Integration with ModelConfig:**
+    The suggested parameters directly map to ModelConfig attributes. For example:
+    - suggest_categorical('use_global_pooling', [True, False]) → ModelConfig.use_global_pooling
+    - suggest_int('num_layers_conv', 1, 4) → ModelConfig.num_layers_conv  
+    - suggest_categorical('kernel_size', [3, 5]) → ModelConfig.kernel_size
+    
+    **Example Usage in Optimization:**
+    ```python
+    selector = HyperparameterSelector(dataset_config)
+    params = selector.suggest_hyperparameters(optuna_trial)
+    # params = {'use_global_pooling': True, 'kernel_size': 5, ...}
+    
+    model_config = ModelConfig()
+    for key, value in params.items():
+        setattr(model_config, key, value)  # Populate with suggestions
+    ```
+    
+    This class is essential for the hyperparameter optimization pipeline, serving as
+    the intelligent parameter generation layer between Optuna and model construction.
     """
     
     def __init__(self, dataset_config: DatasetConfig, min_epochs: int = 5, max_epochs: int = 20):
@@ -317,10 +357,32 @@ class HyperparameterSelector:
     
     def _get_fallback_parameters(self) -> Dict[str, Any]:
         """
-        Get safe fallback parameters when validation fails
+        Get safe fallback parameters when Optuna suggestion or validation fails.
+        
+        **Role in Configuration Flow:**
+        This method provides conservative parameter values when the normal Optuna
+        suggestion process fails or produces invalid parameter combinations.
+        These fallback values are used to populate ModelConfig, ensuring the
+        system can always produce a working model configuration.
+        
+        **Relationship to ModelConfig Defaults:**
+        - ModelConfig defaults: Built into the dataclass definition
+        - Fallback parameters: Explicit overrides for problematic scenarios
+        - Both serve as safety nets, but fallbacks are more conservative
+        
+        **Example Scenarios:**
+        - Optuna suggests invalid parameter combination → Use fallbacks
+        - Network/trial error during parameter suggestion → Use fallbacks  
+        - Parameter validation fails → Use fallbacks
+        - Emergency recovery from optimization failure → Use fallbacks
+        
+        **Design Principle:**
+        Fallback values are intentionally conservative (use_global_pooling=False,
+        small network sizes) to maximize likelihood of successful training
+        in recovery scenarios.
         
         Returns:
-            Dictionary of safe default parameters
+            Dictionary of safe parameter values ready for ModelConfig population
         """
         logger.debug(f"running _get_fallback_parameters ... Generating fallback parameters for {self.data_type}")
         

@@ -1,10 +1,13 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog"
+import { useDashboard } from "./dashboard-provider"
+import { apiClient } from "@/lib/api-client"
+import { TrialProgress } from "@/types/optimization"
 import { 
   Eye,
   Target,
@@ -13,119 +16,68 @@ import {
   Layers,
   Hash,
   Download,
-  RotateCcw,
-  ZoomIn,
-  ZoomOut
+  Loader2
 } from "lucide-react"
+import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
+import { useModelVisualization, useVisualizationDownload } from "@/hooks/use-model-visualization"
 
-// Mock trial data - matches your optimization results structure
-const mockTrials = [
-  {
-    trialNumber: 25,
-    overallScore: 0.8956,
-    accuracyScore: 0.9247,
-    duration: 142,
-    architecture: {
-      type: "CNN",
-      convLayers: 3,
-      denseLayers: 2,
-      totalLayers: 8,
-      filterSizes: ["3x3", "5x5", "3x3"],
-      activations: ["relu", "sigmoid"],
-      parameters: 124567,
-      keyFeatures: ["Batch Norm", "Global Pool", "Dropout: 0.35"]
-    },
-    timestamp: "2 minutes ago"
-  },
-  {
-    trialNumber: 24,
-    overallScore: 0.8834,
-    accuracyScore: 0.9156,
-    duration: 156,
-    architecture: {
-      type: "CNN",
-      convLayers: 2,
-      denseLayers: 3,
-      totalLayers: 9,
-      filterSizes: ["5x5", "3x3"],
-      activations: ["relu", "tanh"],
-      parameters: 98432,
-      keyFeatures: ["Batch Norm", "Max Pool", "Dropout: 0.42"]
-    },
-    timestamp: "5 minutes ago"
-  },
-  {
-    trialNumber: 23,
-    overallScore: 0.8723,
-    accuracyScore: 0.9034,
-    duration: 134,
-    architecture: {
-      type: "CNN",
-      convLayers: 4,
-      denseLayers: 1,
-      totalLayers: 7,
-      filterSizes: ["3x3", "3x3", "5x5", "3x3"],
-      activations: ["relu"],
-      parameters: 156789,
-      keyFeatures: ["No Batch Norm", "Average Pool", "Dropout: 0.28"]
-    },
-    timestamp: "8 minutes ago"
-  },
-  {
-    trialNumber: 22,
-    overallScore: 0.8567,
-    accuracyScore: 0.8945,
-    duration: 98,
-    architecture: {
-      type: "CNN",
-      convLayers: 2,
-      denseLayers: 2,
-      totalLayers: 6,
-      filterSizes: ["5x5", "5x5"],
-      activations: ["swish", "sigmoid"],
-      parameters: 67890,
-      keyFeatures: ["Batch Norm", "Global Pool", "Dropout: 0.50"]
-    },
-    timestamp: "12 minutes ago"
-  },
-  {
-    trialNumber: 21,
-    overallScore: 0.8445,
-    accuracyScore: 0.8823,
-    duration: 189,
-    architecture: {
-      type: "CNN",
-      convLayers: 3,
-      denseLayers: 3,
-      totalLayers: 10,
-      filterSizes: ["3x3", "3x3", "3x3"],
-      activations: ["relu", "tanh"],
-      parameters: 203456,
-      keyFeatures: ["Batch Norm", "Max Pool", "Dropout: 0.33"]
-    },
-    timestamp: "15 minutes ago"
-  },
-  {
-    trialNumber: 20,
-    overallScore: 0.8234,
-    accuracyScore: 0.8756,
-    duration: 167,
-    architecture: {
-      type: "CNN",
-      convLayers: 1,
-      denseLayers: 4,
-      totalLayers: 8,
-      filterSizes: ["7x7"],
-      activations: ["relu", "sigmoid"],
-      parameters: 89012,
-      keyFeatures: ["No Batch Norm", "Average Pool", "Dropout: 0.45"]
-    },
-    timestamp: "18 minutes ago"
-  }
-]
+// Modern Educational Visualization Container Component
+function EducationalVisualizationContainer({ 
+  jobId, 
+  selectedTrial 
+}: { 
+  jobId: string | null; 
+  selectedTrial: TrialProgress | null;
+}) {
+  const { data: visualizationData } = useModelVisualization(
+    jobId, 
+    !!jobId && !!selectedTrial
+  );
+
+  const downloadMutation = useVisualizationDownload();
+
+  const handleDownload = () => {
+    if (jobId) {
+      downloadMutation.mutate({ jobId });
+    }
+  };
+
+  return (
+    <>
+      <div className="w-full h-96 bg-gradient-to-br from-gray-900 to-black rounded-lg border overflow-hidden">
+        <UnifiedEducationalInterface
+          jobId={jobId || ''}
+          trialId={selectedTrial?.trial_id}
+          className="w-full h-full"
+        />
+      </div>
+      
+      {/* Visualization Controls */}
+      <div className="absolute top-4 right-4 flex gap-2">
+        <Button 
+          variant="outline" 
+          size="sm"
+          onClick={handleDownload}
+          disabled={!visualizationData || downloadMutation.isPending}
+        >
+          {downloadMutation.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
+        </Button>
+      </div>
+    </>
+  );
+}
 
 export function TrialGallery() {
-  const [selectedTrial, setSelectedTrial] = useState<typeof mockTrials[0] | null>(null)
+  const { isOptimizationRunning, currentJobId } = useDashboard()
+  const [selectedTrial, setSelectedTrial] = useState<TrialProgress | null>(null)
+  const [trials, setTrials] = useState<TrialProgress[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [lastJobId, setLastJobId] = useState<string | null>(null)
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -133,13 +85,122 @@ export function TrialGallery() {
     return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
   }
 
-  const handleTrialClick = (trial: typeof mockTrials[0]) => {
+  // Fetch trial data from API
+  const fetchTrialHistory = async (jobId: string) => {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await apiClient.getTrialHistory(jobId)
+      const rawTrials = response.trials || []
+      
+      // 🔍 DEBUG: Log all trial data received from API
+      console.log('🔍 FRONTEND TRIAL DATA DEBUG:')
+      console.log(`  📊 Total trials received: ${rawTrials.length}`)
+      if (rawTrials.length > 0) {
+        const sampleTrial = rawTrials[0]
+        console.log(`  📊 Sample trial structure:`, sampleTrial)
+        console.log(`  📊 Sample performance:`, sampleTrial.performance)
+        console.log(`  📊 Sample health_metrics:`, sampleTrial.health_metrics)
+        if (sampleTrial.health_metrics) {
+          console.log(`  📊 Health metrics keys:`, Object.keys(sampleTrial.health_metrics))
+          console.log(`  📊 convergence_quality:`, sampleTrial.health_metrics.convergence_quality)
+          console.log(`  📊 accuracy_consistency:`, sampleTrial.health_metrics.accuracy_consistency)
+          console.log(`  📊 gradient_health:`, sampleTrial.health_metrics.gradient_health)
+        }
+      }
+
+      // Deduplicate trials by trial_id and trial_number to prevent duplicate keys
+      const uniqueTrials = rawTrials.filter((trial, index, array) => {
+        const firstIndex = array.findIndex(t => 
+          (t.trial_id && trial.trial_id && t.trial_id === trial.trial_id) ||
+          (t.trial_number !== undefined && trial.trial_number !== undefined && t.trial_number === trial.trial_number)
+        )
+        return firstIndex === index
+      })
+      
+      setTrials(uniqueTrials)
+      console.log('Fetched trial history:', response)
+      console.log('Deduplicated trials:', uniqueTrials)
+    } catch (err) {
+      console.error('Failed to fetch trial history:', err)
+      setError(err instanceof Error ? err.message : 'Failed to fetch trial data')
+      // Fallback to empty array on error
+      setTrials([])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Effect to fetch trial data when job ID changes
+  useEffect(() => {
+    if (currentJobId) {
+      // If this is a new job ID (different from the last one), clear previous trials
+      if (lastJobId && currentJobId !== lastJobId) {
+        setTrials([])
+      }
+      setLastJobId(currentJobId)
+      fetchTrialHistory(currentJobId)
+    }
+    // Note: Don't clear trials when currentJobId becomes null to preserve them after cancellation
+  }, [currentJobId, lastJobId])
+
+  // Polling effect to update trial data during optimization
+  useEffect(() => {
+    if (!currentJobId) return
+
+    // Poll more frequently during optimization, less frequently when not running
+    const pollFrequency = isOptimizationRunning ? 2000 : 10000 // 2s when running, 10s when idle
+    
+    const pollInterval = setInterval(() => {
+      fetchTrialHistory(currentJobId)
+    }, pollFrequency)
+
+    return () => clearInterval(pollInterval)
+  }, [currentJobId, isOptimizationRunning])
+
+  // Also poll immediately when optimization status changes
+  useEffect(() => {
+    if (currentJobId && isOptimizationRunning) {
+      fetchTrialHistory(currentJobId)
+    }
+  }, [isOptimizationRunning, currentJobId])
+
+  const handleTrialClick = (trial: TrialProgress) => {
     setSelectedTrial(trial)
   }
 
   const handleCloseDialog = () => {
     setSelectedTrial(null)
   }
+
+  // Find the best trial based on highest total_score
+  const findBestTrial = () => {
+    if (!trials || trials.length === 0) return null
+    
+    // Only consider completed trials for best trial selection
+    const completedTrials = trials.filter(trial => 
+      trial.status === 'completed' && 
+      trial.performance?.total_score !== undefined && 
+      trial.performance?.total_score !== null
+    )
+    
+    if (completedTrials.length === 0) return null
+    
+    return completedTrials.reduce((best, current) => {
+      const bestScore = best.performance?.total_score || 0
+      const currentScore = current.performance?.total_score || 0
+      return currentScore > bestScore ? current : best
+    })
+  }
+
+  const bestTrial = findBestTrial()
+
+  // Debug logging for best trial identification
+  useEffect(() => {
+    if (bestTrial) {
+      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${((bestTrial.performance?.total_score ?? 0) * 100).toFixed(1)}%`)
+    }
+  }, [bestTrial])
 
   return (
     <>
@@ -153,104 +214,323 @@ export function TrialGallery() {
               </p>
             </div>
             <Badge variant="outline">
-              {mockTrials.length} trials completed
+              {trials.filter(trial => trial.status === 'completed').length} trials completed
             </Badge>
           </div>
 
+          {/* Loading State */}
+          {isLoading && (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin mr-2" />
+              <span>Loading trial data...</span>
+            </div>
+          )}
+
+          {/* Error State */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+              <p className="text-red-700 text-sm">
+                Error loading trial data: {error}
+              </p>
+            </div>
+          )}
+
+          {/* Empty State */}
+          {!isLoading && !error && trials.length === 0 && (
+            <div className="text-center py-8 text-muted-foreground">
+              <Layers className="h-12 w-12 mx-auto mb-4 opacity-50" />
+              <p>No trials available yet.</p>
+              <p className="text-sm">Trials will appear here as optimization progresses.</p>
+            </div>
+          )}
+
           {/* Trial Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {mockTrials.map((trial) => (
-              <Card 
-                key={trial.trialNumber} 
-                className="cursor-pointer hover:shadow-md transition-all duration-200 hover:border-primary/50"
-                onClick={() => handleTrialClick(trial)}
+          {!isLoading && !error && trials.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {trials.map((trial, index) => {
+                // Calculate trial number for display
+                const displayTrialNumber = trial.trial_number !== undefined && trial.trial_number !== null 
+                  ? trial.trial_number 
+                  : trials.length - index  // For in-progress trials, calculate based on position
+                
+                // Create a robust unique key combining multiple identifiers
+                const uniqueKey = `trial_${trial.trial_id || ''}_${displayTrialNumber}_${index}`
+                
+                // Check if this is the best trial
+                const isBestTrial = bestTrial && (
+                  (trial.trial_id && trial.trial_id === bestTrial.trial_id) ||
+                  (trial.trial_number !== undefined && trial.trial_number === bestTrial.trial_number)
+                )
+                
+                return (
+                <Card 
+                  key={uniqueKey} 
+                  className={`cursor-pointer transition-all duration-300 min-h-[200px] ${
+                    isBestTrial 
+                      ? "border-4 border-orange-500 shadow-lg shadow-orange-500/25 hover:shadow-xl hover:shadow-orange-500/30 ring-4 ring-orange-200 dark:ring-orange-500/20" 
+                      : "border hover:shadow-md hover:border-primary/50"
+                  }`}
+                  onClick={() => handleTrialClick(trial)}
               >
-                <CardContent className="p-4">
+                <CardContent className="p-4 flex flex-col h-full">
                   {/* Trial Header */}
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
                       <Hash className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-semibold">Trial {trial.trialNumber}</span>
+                      <span className="font-semibold">Trial {displayTrialNumber}</span>
+                      {isBestTrial && (
+                        <Badge className="bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold animate-pulse">
+                          🏆 BEST
+                        </Badge>
+                      )}
                     </div>
-                    <Badge variant={trial.overallScore > 0.85 ? "default" : "secondary"}>
-                      {trial.architecture.type}
+                    <Badge 
+                      variant={
+                        trial.status === 'completed' ? "default" : 
+                        trial.status === 'running' ? "secondary" : 
+                        trial.status === 'failed' ? "destructive" : 
+                        trial.status === 'pruned' ? "outline" : 
+                        "secondary"
+                      }
+                      className={
+                        trial.status === 'completed' ? "bg-green-500 hover:bg-green-600 text-white font-normal" :
+                        trial.status === 'running' ? "bg-yellow-500 hover:bg-yellow-600 text-white font-normal" :
+                        trial.status === 'failed' ? "bg-red-500 hover:bg-red-600 text-white font-normal" :
+                        trial.status === 'pruned' ? "bg-gray-500 hover:bg-gray-600 text-white font-normal" :
+                        "bg-gray-400 hover:bg-gray-500 text-white font-normal"
+                      }
+                    >
+                      {trial.status === 'running' ? 'In Progress' : 
+                       trial.status === 'completed' ? 'Completed' :
+                       trial.status === 'failed' ? 'Failed' :
+                       trial.status === 'pruned' ? 'Pruned' :
+                       'Unknown'}
                     </Badge>
                   </div>
 
-                  {/* Scores */}
+                  {/* Basic Info */}
                   <div className="space-y-2 mb-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-1">
-                        <Activity className="h-3 w-3 text-purple-500" />
-                        <span className="text-muted-foreground">Overall Score</span>
+                    {trial.started_at && (
+                      <div className="flex items-center justify-between text-sm">
+                        <div className="flex items-center gap-1">
+                          <Eye className="h-3 w-3 text-blue-500" />
+                          <span className="text-muted-foreground">Started:</span>
+                        </div>
+                        <span className="font-medium text-xs">{new Date(trial.started_at).toLocaleTimeString()}</span>
                       </div>
-                      <span className="font-medium">{(trial.overallScore * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-1">
-                        <Target className="h-3 w-3 text-green-500" />
-                        <span className="text-muted-foreground">Accuracy</span>
-                      </div>
-                      <span className="font-medium">{(trial.accuracyScore * 100).toFixed(1)}%</span>
-                    </div>
+                    )}
                     <div className="flex items-center justify-between text-sm">
                       <div className="flex items-center gap-1">
                         <Clock className="h-3 w-3 text-orange-500" />
-                        <span className="text-muted-foreground">Duration</span>
+                        <span className="text-muted-foreground">Duration:</span>
                       </div>
-                      <span className="font-medium">{formatDuration(trial.duration)}</span>
+                      <span className="font-medium">
+                        {trial.duration_seconds ? formatDuration(trial.duration_seconds) : 'N/A'}
+                      </span>
                     </div>
                   </div>
 
-                  {/* Architecture Summary */}
+                  {/* Architecture Info */}
                   <div className="space-y-2 mb-3">
                     <div className="flex items-center gap-1 text-sm">
                       <Layers className="h-3 w-3 text-indigo-500" />
                       <span className="text-muted-foreground">Architecture</span>
                     </div>
+                    
+                    {trial.architecture ? (
+                      <div className="text-xs space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Type:</span>
+                          <span className="font-medium">{trial.architecture.type}</span>
+                        </div>
+                        
+                        {trial.architecture.type === 'CNN' && (
+                          <>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Conv Layers:</span>
+                              <span className="font-medium">{trial.architecture.conv_layers?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Filters:</span>
+                              <span className="font-medium">{trial.architecture.filters_per_layer?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Kernel Size (pixels):</span>
+                              <span className="font-medium">
+                                {Array.isArray(trial.architecture.kernel_size) 
+                                  ? `${trial.architecture.kernel_size[0]}×${trial.architecture.kernel_size[1]}`
+                                  : String(trial.architecture.kernel_size || 'N/A')}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Layers:</span>
+                              <span className="font-medium">{trial.architecture.dense_layers?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Nodes:</span>
+                              <span className="font-medium">{trial.architecture.first_dense_nodes?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Activation:</span>
+                              <span className="font-medium capitalize">{trial.architecture.activation}</span>
+                            </div>
+                          </>
+                        )}
+                        
+                        {trial.architecture.type === 'LSTM' && (
+                          <>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">LSTM Units:</span>
+                              <span className="font-medium">{trial.architecture.lstm_units?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Layers:</span>
+                              <span className="font-medium">{trial.architecture.dense_layers?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Dense Nodes:</span>
+                              <span className="font-medium">{trial.architecture.first_dense_nodes?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Activation:</span>
+                              <span className="font-medium capitalize">{trial.architecture.activation}</span>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">
+                        Architecture data pending...
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Performance Metrics */}
+                  <div className="space-y-2 mb-3">
+                    <div className="flex items-center gap-1 text-sm">
+                      <Target className="h-3 w-3 text-green-500" />
+                      <span className="text-muted-foreground">Performance</span>
+                    </div>
+                    
+                    {/* Core Performance - Always Show Structure */}
                     <div className="text-xs space-y-1">
                       <div className="flex justify-between">
-                        <span className="text-muted-foreground">Conv Layers:</span>
-                        <span>{trial.architecture.convLayers}</span>
+                        <span className="text-muted-foreground">Total Score:</span>
+                        <span className="font-medium">
+                          {trial.performance?.total_score ? `${(trial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}
+                        </span>
                       </div>
+                      
                       <div className="flex justify-between">
-                        <span className="text-muted-foreground">Dense Layers:</span>
-                        <span>{trial.architecture.denseLayers}</span>
+                        <span className="text-muted-foreground">Accuracy:</span>
+                        <span className="font-medium">
+                          {trial.performance?.accuracy ? `${(trial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}
+                        </span>
                       </div>
+                      
+                      {/* Show loss for completed trials */}
                       <div className="flex justify-between">
-                        <span className="text-muted-foreground">Filters:</span>
-                        <span>{trial.architecture.filterSizes.join(", ")}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Parameters:</span>
-                        <span>{(trial.architecture.parameters / 1000).toFixed(0)}K</span>
+                        <span className="text-muted-foreground">Final Loss:</span>
+                        <span className="font-medium">
+                          {trial.health_metrics?.test_loss ? trial.health_metrics.test_loss.toFixed(4) : 'N/A'}
+                        </span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Key Features */}
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">Key features:</p>
-                    <div className="flex flex-wrap gap-1">
-                      {trial.architecture.keyFeatures.map((feature, index) => (
-                        <Badge key={index} variant="outline" className="text-xs">
-                          {feature}
-                        </Badge>
-                      ))}
+                  {/* Health Analysis Section (Health Mode Only) */}
+                  <div className="space-y-2 mb-3">
+                    <div className="flex items-center gap-1 text-sm">
+                      <Activity className="h-3 w-3 text-purple-500" />
+                      <span className="text-muted-foreground">Health Analysis</span>
+                    </div>
+                    
+                    <div className="text-xs space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Overall Health:</span>
+                        <span className="font-medium text-purple-600">
+                          {trial.health_metrics?.overall_health ? `${(trial.health_metrics.overall_health * 100).toFixed(1)}%` : 'N/A'}
+                        </span>
+                      </div>
+                      
+                      {/* Health Components with Weights */}
+                      <div className="pl-2 space-y-1 border-l border-purple-200">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Neuron Usage:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.neuron_utilization ? `${(trial.health_metrics.neuron_utilization * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Efficiency:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.parameter_efficiency ? `${(trial.health_metrics.parameter_efficiency * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Stability:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.training_stability ? `${(trial.health_metrics.training_stability * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Gradients:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.gradient_health ? `${(trial.health_metrics.gradient_health * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Convergence:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.convergence_quality ? `${(trial.health_metrics.convergence_quality * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Consistency:</span>
+                          <span className="font-medium">
+                            {trial.health_metrics?.accuracy_consistency ? `${(trial.health_metrics.accuracy_consistency * 100).toFixed(1)}%` : 'N/A'}
+                          </span>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
-                  {/* Timestamp */}
-                  <div className="mt-3 pt-2 border-t border-border/50">
-                    <p className="text-xs text-muted-foreground flex items-center gap-1">
-                      <Eye className="h-3 w-3" />
-                      {trial.timestamp}
+                  {/* Spacer to push Trial ID to bottom */}
+                  <div className="flex-grow"></div>
+
+                  {/* Trial ID and 3D Model Button */}
+                  <div className="mt-3 pt-2 border-t border-border/50 space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      ID: {trial.trial_id || 'N/A'}
                     </p>
+                    
+                    {/* 3D Model Button for Best Trial */}
+                    {isBestTrial && (
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        className="w-full text-xs bg-orange-50 border-orange-200 hover:bg-orange-100 dark:bg-orange-950/20 dark:border-orange-800 dark:hover:bg-orange-900/30"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTrialClick(trial);
+                        }}
+                      >
+                        <Layers className="h-3 w-3 mr-1" />
+                        View 3D Model
+                      </Button>
+                    )}
                   </div>
                 </CardContent>
               </Card>
-            ))}
-          </div>
+              )
+              })}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -259,8 +539,8 @@ export function TrialGallery() {
         <DialogContent className="max-w-4xl w-full max-h-[90vh] overflow-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-3">
-              Trial #{selectedTrial?.trialNumber} - 3D Architecture
-              <Badge variant="outline">{selectedTrial?.architecture.type}</Badge>
+              Model visualization: Trial #{selectedTrial?.trial_number}
+              <Badge variant="outline">{selectedTrial?.architecture?.type || 'Unknown'}</Badge>
             </DialogTitle>
             <DialogClose onClose={handleCloseDialog} />
           </DialogHeader>
@@ -270,49 +550,25 @@ export function TrialGallery() {
               {/* Trial Summary */}
               <div className="grid grid-cols-3 gap-4 p-4 bg-muted/20 rounded-lg">
                 <div className="text-center">
-                  <p className="text-sm text-muted-foreground">Overall Score</p>
-                  <p className="text-lg font-bold">{(selectedTrial.overallScore * 100).toFixed(1)}%</p>
+                  <p className="text-sm text-muted-foreground">Total Score</p>
+                  <p className="text-lg font-bold">{selectedTrial.performance?.total_score ? `${(selectedTrial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}</p>
                 </div>
                 <div className="text-center">
                   <p className="text-sm text-muted-foreground">Accuracy</p>
-                  <p className="text-lg font-bold">{(selectedTrial.accuracyScore * 100).toFixed(1)}%</p>
+                  <p className="text-lg font-bold">{selectedTrial.performance?.accuracy ? `${(selectedTrial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-sm text-muted-foreground">Duration</p>
-                  <p className="text-lg font-bold">{formatDuration(selectedTrial.duration)}</p>
+                  <p className="text-sm text-muted-foreground">Total Loss</p>
+                  <p className="text-lg font-bold">{selectedTrial.health_metrics?.test_loss ? selectedTrial.health_metrics.test_loss.toFixed(4) : 'N/A'}</p>
                 </div>
               </div>
 
               {/* 3D Visualization Area */}
               <div className="relative">
-                <div className="w-full h-96 bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg border flex items-center justify-center">
-                  <div className="text-center">
-                    <Layers className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
-                    <p className="text-xl font-medium text-muted-foreground">3D Architecture Visualization</p>
-                    <p className="text-sm text-muted-foreground mt-2">
-                      Interactive 3D model for Trial #{selectedTrial.trialNumber}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Will be implemented with React Three Fiber in Phase 2
-                    </p>
-                  </div>
-                </div>
-                
-                {/* 3D Controls */}
-                <div className="absolute top-4 right-4 flex gap-2">
-                  <Button variant="outline" size="sm">
-                    <ZoomOut className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <ZoomIn className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <RotateCcw className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <Download className="h-4 w-4" />
-                  </Button>
-                </div>
+                <EducationalVisualizationContainer
+                  jobId={currentJobId}
+                  selectedTrial={selectedTrial}
+                />
               </div>
 
               {/* Architecture Details */}
@@ -321,26 +577,26 @@ export function TrialGallery() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   <div>
                     <p className="text-muted-foreground">Conv Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture.convLayers}</p>
+                    <p className="font-medium">{String(selectedTrial.architecture?.convLayers || 'N/A')}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Dense Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture.denseLayers}</p>
+                    <p className="font-medium">{String(selectedTrial.architecture?.denseLayers || 'N/A')}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Total Layers</p>
-                    <p className="font-medium">{selectedTrial.architecture.totalLayers}</p>
+                    <p className="font-medium">{String(selectedTrial.architecture?.totalLayers || 'N/A')}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Parameters</p>
-                    <p className="font-medium">{selectedTrial.architecture.parameters.toLocaleString()}</p>
+                    <p className="font-medium">{selectedTrial.architecture?.parameters?.toLocaleString() || 'N/A'}</p>
                   </div>
                 </div>
                 
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Filter Sizes:</p>
                   <div className="flex gap-2">
-                    {selectedTrial.architecture.filterSizes.map((size, index) => (
+                    {(selectedTrial.architecture?.filterSizes || []).map((size: number, index: number) => (
                       <Badge key={index} variant="outline">{size}</Badge>
                     ))}
                   </div>
@@ -349,7 +605,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Activations:</p>
                   <div className="flex gap-2">
-                    {selectedTrial.architecture.activations.map((activation, index) => (
+                    {(selectedTrial.architecture?.activations || []).map((activation: string, index: number) => (
                       <Badge key={index} variant="outline">{activation}</Badge>
                     ))}
                   </div>
@@ -358,7 +614,7 @@ export function TrialGallery() {
                 <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">Key Features:</p>
                   <div className="flex flex-wrap gap-2">
-                    {selectedTrial.architecture.keyFeatures.map((feature, index) => (
+                    {(selectedTrial.architecture?.keyFeatures || []).map((feature: string, index: number) => (
                       <Badge key={index} variant="secondary">{feature}</Badge>
                     ))}
                   </div>

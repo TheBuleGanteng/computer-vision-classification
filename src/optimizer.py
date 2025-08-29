@@ -45,6 +45,7 @@ from utils.logger import logger
 
 # Import modular components
 from hyperparameter_selector import HyperparameterSelector
+from model_visualizer import ModelVisualizer, ArchitectureVisualization
 from plot_generator import PlotGenerator
 
 
@@ -77,6 +78,11 @@ class TrialProgress:
     completed_at: Optional[str] = None
     duration_seconds: Optional[float] = None
     
+    # Epoch-level progress tracking
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    epoch_progress: Optional[float] = None  # 0.0 to 1.0 within current epoch
+    
     # Architecture Information
     architecture: Optional[Dict[str, Any]] = None
     hyperparameters: Optional[Dict[str, Any]] = None
@@ -102,6 +108,9 @@ class TrialProgress:
             'started_at': self.started_at,
             'completed_at': self.completed_at,
             'duration_seconds': self.duration_seconds,
+            'current_epoch': self.current_epoch,
+            'total_epochs': self.total_epochs,
+            'epoch_progress': self.epoch_progress,
             'architecture': self.architecture,
             'hyperparameters': self.hyperparameters,
             'model_size': self.model_size,
@@ -196,77 +205,110 @@ class PlotGenerationMode(Enum):
 
 @dataclass
 class OptimizationConfig:
-    """Configuration for optimization process"""
+    """Business logic configuration with system defaults only"""
     
-    # Optimization mode and strategy
-    mode: OptimizationMode = OptimizationMode.SIMPLE
-    objective: OptimizationObjective = OptimizationObjective.VAL_ACCURACY
-    n_trials: int = 50
-    timeout_hours: Optional[float] = None
-    gpu_proxy_sample_percentage: float = 0.5
+    # User-controlled variables - NO DEFAULTS (fail fast if not provided)
+    dataset_name: str = field(default="")  # Will trigger validation error if empty
+    mode: OptimizationMode = field(default=OptimizationMode.SIMPLE)  # Will use provided value
+    optimize_for: str = field(default="")  # Will trigger validation error if empty
+    trials: int = field(default=0)  # Will trigger validation error if 0
+    max_epochs_per_trial: int = field(default=0)  # Will trigger validation error if 0  
+    min_epochs_per_trial: int = field(default=0)  # Will trigger validation error if 0
+    health_weight: float = field(default=-1.0)  # Will trigger validation error if negative
+    use_runpod_service: bool = field(default=False)  # Will use provided value
     
-    # Health weighting (only used in HEALTH mode with universal objectives)
-    health_weight: float = 0.3
+    # System variables - ONLY here with their defaults
+    objective: OptimizationObjective = field(default=OptimizationObjective.VAL_ACCURACY)
+    timeout_hours: Optional[float] = field(default=None)
+    health_monitoring_frequency: int = field(default=1)
+    max_bias_change_per_epoch: float = field(default=10.0)
+    runpod_service_endpoint: Optional[str] = field(default=None)
+    runpod_service_timeout: int = field(default=600)
+    runpod_service_fallback_local: bool = field(default=True)
+    concurrent: bool = field(default=True)
+    config_overrides: Dict[str, Any] = field(default_factory=dict)
     
-    # Pruning and sampling
-    n_startup_trials: int = 10
-    n_warmup_steps: int = 5
-    random_seed: int = 42
+    # System training parameters - ONLY here with their defaults
+    batch_size: int = field(default=32)
+    learning_rate: float = field(default=0.001)
+    optimizer_name: str = field(default="adam")
+    validation_split: float = field(default=0.2)
+    test_size: float = field(default=0.2)
     
-    # Resource constraints
-    max_epochs_per_trial: int = 20
-    max_training_time_minutes: float = 60.0
-    max_parameters: int = 10_000_000
-    min_accuracy_threshold: float = 0.5
+    # System optimization parameters - ONLY here with their defaults
+    activation_functions: List[str] = field(default_factory=lambda: ["relu", "tanh", "sigmoid"])
+    startup_trials: int = field(default=10)
+    warmup_steps: int = field(default=5)
+    random_seed: int = field(default=42)
+    gpu_proxy_sample_percentage: float = field(default=0.5)
     
-    # Stability detection parameters
-    min_epochs_per_trial: int = 5
-    enable_stability_checks: bool = True
-    stability_window: int = 3
-    max_bias_change_per_epoch: float = 10.0
+    # System resource constraints - ONLY here with their defaults
+    max_training_time_minutes: float = field(default=60.0)
+    max_parameters: int = field(default=10_000_000)
+    min_accuracy_threshold: float = field(default=0.5)
     
-    # Health analysis settings
-    health_analysis_sample_size: int = 50
-    health_monitoring_frequency: int = 1
+    # System stability parameters - ONLY here with their defaults
+    enable_stability_checks: bool = field(default=True)
+    stability_window: int = field(default=3)
+    health_analysis_sample_size: int = field(default=50)
     
-    # Validation settings
-    validation_split: float = 0.2
-    test_size: float = 0.2
+    # System advanced options - ONLY here with their defaults
+    enable_early_stopping: bool = field(default=True)
+    early_stopping_patience: int = field(default=5)
     
-    # Output settings
-    save_best_model: bool = True
-    save_optimization_history: bool = True
-    create_comparison_plots: bool = True
+    # System output settings - ONLY here with their defaults
+    save_best_model: bool = field(default=True)
+    save_optimization_history: bool = field(default=True)
+    create_comparison_plots: bool = field(default=True)
+    plot_generation: PlotGenerationMode = field(default=PlotGenerationMode.ALL)
+    show_activation_maps: bool = field(default=True)
+    show_training_history: bool = field(default=True)
+    show_confusion_matrix: bool = field(default=True)
+    show_training_animation: bool = field(default=False)
     
-    # Advanced options
-    enable_early_stopping: bool = True
-    early_stopping_patience: int = 5
-    
-    # RunPod Service Integration (replaces GPU proxy)
-    use_runpod_service: bool = False               # Enable/disable RunPod service usage
-    runpod_service_endpoint: Optional[str] = None  # RunPod service endpoint URL
-    runpod_service_timeout: int = 600              # Request timeout in seconds (10 minutes)
-    runpod_service_fallback_local: bool = True     # Fall back to local execution if service fails
-    
-    # Plot generation configuration
-    plot_generation: PlotGenerationMode = PlotGenerationMode.ALL
-    
-    # Concurrency (only applies when using RunPod service)
-    concurrent: bool = True
-    concurrent_workers: int = 2
-    
-    # Multi-GPU Configuration (for RunPod workers)
-    use_multi_gpu: bool = False                    # Enable multi-GPU per worker
-    target_gpus_per_worker: int = 2               # Desired GPUs per worker
-    auto_detect_gpus: bool = True                 # Auto-detect available GPUs
-    multi_gpu_batch_size_scaling: bool = True     # Scale batch size for multi-GPU
-    max_gpus_per_worker: int = 4                  # Maximum GPUs to use per worker
+    # System concurrency settings - ONLY here with their defaults
+    concurrent_workers: int = field(default=2)
+    use_multi_gpu: bool = field(default=False)
+    target_gpus_per_worker: int = field(default=2)
+    auto_detect_gpus: bool = field(default=True)
+    multi_gpu_batch_size_scaling: bool = field(default=True)
+    max_gpus_per_worker: int = field(default=4)
     
     
     def __post_init__(self) -> None:
-        """Validate configuration after initialization"""
-        if self.n_trials <= 0:
-            raise ValueError("n_trials must be positive")
+        """Fail-fast validation and system setup"""
+        
+        # Validate all required user-controlled variables are provided
+        if not self.dataset_name:
+            raise ValueError("dataset_name is required")
+        if not self.optimize_for:
+            raise ValueError("optimize_for is required")
+        if self.trials <= 0:
+            raise ValueError("trials must be > 0")
+        if self.max_epochs_per_trial <= 0:
+            raise ValueError("max_epochs_per_trial must be > 0")
+        if self.min_epochs_per_trial <= 0:
+            raise ValueError("min_epochs_per_trial must be > 0")
+        if self.health_weight < 0:
+            raise ValueError("health_weight must be >= 0")
+        
+        # Convert optimize_for string to objective enum (system conversion)
+        if isinstance(self.optimize_for, str):
+            objective_mapping = {
+                "val_accuracy": OptimizationObjective.VAL_ACCURACY,
+                "accuracy": OptimizationObjective.ACCURACY,
+                "training_time": OptimizationObjective.TRAINING_TIME,
+                "parameter_efficiency": OptimizationObjective.PARAMETER_EFFICIENCY,
+                "memory_efficiency": OptimizationObjective.MEMORY_EFFICIENCY,
+                "inference_speed": OptimizationObjective.INFERENCE_SPEED,
+                "overall_health": OptimizationObjective.OVERALL_HEALTH,
+                "neuron_utilization": OptimizationObjective.NEURON_UTILIZATION,
+                "training_stability": OptimizationObjective.TRAINING_STABILITY,
+                "gradient_health": OptimizationObjective.GRADIENT_HEALTH
+            }
+            self.objective = objective_mapping.get(self.optimize_for, OptimizationObjective.VAL_ACCURACY)
+        
+        # System validations and adjustments
         if not 0 < self.validation_split < 1:
             raise ValueError("validation_split must be between 0 and 1")
         if not 0 < self.test_size < 1:
@@ -276,6 +318,11 @@ class OptimizationConfig:
         if self.concurrent_workers < 1:
             self.concurrent_workers = 1
             logger.debug("running OptimizationConfig.__post_init__ ... concurrent_workers < 1; coerced to 1")
+        
+        # System configuration and backward compatibility
+        self.n_trials = self.trials  # Backward compatibility
+        self.n_startup_trials = self.startup_trials
+        self.n_warmup_steps = self.warmup_steps
         
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
@@ -329,7 +376,7 @@ class OptimizationResult:
     """Results from optimization process"""
     
     # Best trial results
-    best_value: float
+    best_total_score: float
     best_params: Dict[str, Any]
     best_model_path: Optional[str] = None
     
@@ -377,7 +424,7 @@ class OptimizationResult:
 Optimization Summary for {self.dataset_name}:
 ===========================================
 Optimization Mode: {mode_name}
-Best {objective_name}: {self.best_value:.4f}
+Best {objective_name}: {self.best_total_score:.4f}
 Successful trials: {self.successful_trials}/{self.total_trials}
 Optimization time: {self.optimization_time_hours:.2f} hours{health_summary}
 
@@ -435,14 +482,14 @@ class ConcurrentProgressAggregator:
         estimated_time_remaining = self.calculate_eta(all_trial_statuses)
         
         # Get current best value (this will be implemented in the callback)
-        current_best_value = self.get_current_best_value()
+        current_best_value = self.get_current_best_total_score()
         
         return AggregatedProgress(
             total_trials=self.total_trials,
             running_trials=running_trials,
             completed_trials=completed_trials,
             failed_trials=failed_trials,
-            current_best_value=current_best_value,
+            current_best_total_score=current_best_value,
             estimated_time_remaining=estimated_time_remaining
         )
     
@@ -460,9 +507,109 @@ class ConcurrentProgressAggregator:
         
         return remaining_trials * avg_time_per_trial
     
-    def get_current_best_value(self) -> Optional[float]:
+    def get_current_best_total_score(self) -> Optional[float]:
         """Get current best value - placeholder for now"""
         return None  # Will be populated by the ModelOptimizer instance
+
+
+class EpochProgressCallback(keras.callbacks.Callback):
+    """
+    Real-time epoch progress callback that tracks progress within epochs
+    Updates progress during batch training for live progress updates
+    """
+    
+    def __init__(self, trial_number: int, total_epochs: int, optimizer_instance=None):
+        super().__init__()
+        self.trial_number = trial_number
+        self.total_epochs = total_epochs
+        self.optimizer_instance = optimizer_instance
+        self.current_epoch = 0
+        self.total_batches = 0
+        self.current_batch = 0
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        """Called at the beginning of each epoch"""
+        # Check for cancellation first
+        if self.optimizer_instance and self.optimizer_instance.is_cancelled():
+            logger.info(f"EpochProgressCallback.on_epoch_begin ... Cancellation detected, stopping training")
+            self.model.stop_training = True
+            return
+        
+        self.current_epoch = epoch + 1  # Convert 0-based to 1-based
+        self.current_batch = 0
+        
+        # Try to get total batches from params
+        if hasattr(self, 'params') and self.params:
+            self.total_batches = self.params.get('steps', 0)
+        
+        self._update_progress(0.0)
+        logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} started")
+    
+    def on_batch_end(self, batch, logs=None):
+        """Called at the end of each batch - update progress within epoch"""
+        # Check for cancellation first
+        if self.optimizer_instance and self.optimizer_instance.is_cancelled():
+            logger.info(f"EpochProgressCallback.on_batch_end ... Cancellation detected, stopping training")
+            self.model.stop_training = True
+            return
+        
+        self.current_batch = batch + 1  # Convert 0-based to 1-based
+        
+        if self.total_batches > 0:
+            batch_progress = min(self.current_batch / self.total_batches, 1.0)
+            self._update_progress(batch_progress)
+    
+    def on_epoch_end(self, epoch, logs=None):
+        """Called at the end of each epoch"""
+        self._update_progress(1.0)
+        logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} completed")
+    
+    def _update_progress(self, epoch_progress: float):
+        """Update epoch progress and trigger unified progress update"""
+        # Update epoch info in the optimizer
+        if self.optimizer_instance and hasattr(self.optimizer_instance, '_current_epoch_info'):
+            self.optimizer_instance._current_epoch_info[self.trial_number] = {
+                'current_epoch': self.current_epoch,
+                'total_epochs': self.total_epochs,
+                'epoch_progress': epoch_progress
+            }
+            
+            # Trigger unified progress update every 10 batches or at epoch boundaries
+            if (epoch_progress == 0.0 or epoch_progress == 1.0 or 
+                (self.current_batch > 0 and self.current_batch % 10 == 0)):
+                self._trigger_unified_progress_update()
+    
+    def _trigger_unified_progress_update(self):
+        """Trigger a unified progress update with current epoch information"""
+        if self.optimizer_instance and hasattr(self.optimizer_instance, 'progress_callback') and self.optimizer_instance.progress_callback:
+            try:
+                # Create a mock trial progress for aggregation
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{self.trial_number}",
+                    trial_number=self.trial_number,
+                    status="running",
+                    started_at=datetime.now().isoformat(),
+                    current_epoch=self.current_epoch,
+                    total_epochs=self.total_epochs,
+                    epoch_progress=self.optimizer_instance._current_epoch_info.get(self.trial_number, {}).get('epoch_progress', 0.0)
+                )
+                
+                # Get best trial info for aggregation
+                best_trial_number, best_trial_value = self.optimizer_instance.get_best_trial_info()
+                self.optimizer_instance._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
+                
+                # Create aggregated progress using the progress aggregator
+                aggregated_progress = self.optimizer_instance._progress_aggregator.aggregate_progress(
+                    current_trial=trial_progress,
+                    all_trial_statuses=self.optimizer_instance._trial_statuses
+                )
+                
+                # Create unified progress and send update
+                unified_progress = self.optimizer_instance._create_unified_progress(aggregated_progress)
+                self.optimizer_instance.progress_callback(unified_progress)
+                
+            except Exception as e:
+                logger.warning(f"EpochProgressCallback._trigger_unified_progress_update error: {e}")
 
 
 @dataclass 
@@ -472,8 +619,32 @@ class AggregatedProgress:
     running_trials: List[int]
     completed_trials: List[int]
     failed_trials: List[int]
-    current_best_value: Optional[float]
+    current_best_total_score: Optional[float]
     estimated_time_remaining: Optional[float]
+
+
+@dataclass
+class UnifiedProgress:
+    """
+    Unified progress data combining trial statistics with epoch information
+    This replaces the dual callback system to eliminate race conditions
+    """
+    # Trial statistics (from AggregatedProgress)
+    total_trials: int
+    running_trials: List[int]
+    completed_trials: List[int]
+    failed_trials: List[int]
+    current_best_total_score: Optional[float]  # Optimization objective (accuracy or weighted score)
+    current_best_accuracy: Optional[float]     # Raw accuracy for comparison
+    average_duration_per_trial: Optional[float]  # Average duration in seconds
+    estimated_time_remaining: Optional[float]
+    
+    # Current epoch information (from most recent TrialProgress)
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    epoch_progress: Optional[float] = None
+    current_trial_id: Optional[str] = None
+    current_trial_status: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API serialization"""
@@ -482,22 +653,43 @@ class AggregatedProgress:
             'running_trials': self.running_trials,
             'completed_trials': self.completed_trials,
             'failed_trials': self.failed_trials,
-            'current_best_value': self.current_best_value,
-            'estimated_time_remaining': self.estimated_time_remaining
+            'current_best_total_score': self.current_best_total_score,
+            'current_best_accuracy': self.current_best_accuracy,
+            'estimated_time_remaining': self.estimated_time_remaining,
+            'current_epoch': self.current_epoch,
+            'total_epochs': self.total_epochs,
+            'epoch_progress': self.epoch_progress,
+            'current_trial_id': self.current_trial_id,
+            'current_trial_status': self.current_trial_status
         }
 
 
 # Progress callback
-def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress]) -> None:
+def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress, UnifiedProgress]) -> None:
     """Default progress callback that prints progress updates to console"""
-    if isinstance(progress, AggregatedProgress):
+    if isinstance(progress, UnifiedProgress):
+        # New unified progress system
         print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
               f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
-        if progress.current_best_value is not None:
-            print(f"   Best value so far: {progress.current_best_value:.4f}")
+        if progress.current_best_total_score is not None:
+            print(f"📈 Best value so far: {progress.current_best_total_score:.4f}")
+        if progress.current_epoch is not None and progress.total_epochs is not None:
+            print(f"⏱️ Current epoch: {progress.current_epoch}/{progress.total_epochs}")
         if progress.estimated_time_remaining is not None:
             eta_minutes = progress.estimated_time_remaining / 60
             print(f"   ETA: {eta_minutes:.1f} minutes")
+    elif isinstance(progress, AggregatedProgress):
+        # Legacy aggregated progress (deprecated)
+        print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
+              f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
+        if progress.current_best_total_score is not None:
+            print(f"📈 Best value so far: {progress.current_best_total_score:.4f}")
+        if progress.estimated_time_remaining is not None:
+            eta_minutes = progress.estimated_time_remaining / 60
+            print(f"   ETA: {eta_minutes:.1f} minutes")
+    else:
+        # TrialProgress (legacy - should not be used anymore)
+        print(f"🔄 Trial {progress.trial_number} ({progress.status})")
 
 
 class ModelOptimizer:
@@ -511,7 +703,7 @@ class ModelOptimizer:
     def __init__(self, dataset_name: str, optimization_config: Optional[OptimizationConfig] = None, 
         datasets_root: Optional[str] = None, run_name: Optional[str] = None,
         health_analyzer: Optional[HealthAnalyzer] = None,
-        progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress]], None]] = None,
+        progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress, UnifiedProgress]], None]] = None,
         activation_override: Optional[str] = None):
         """
         Initialize ModelOptimizer with RunPod service support
@@ -529,6 +721,10 @@ class ModelOptimizer:
         self.config = optimization_config or OptimizationConfig()
         self.run_name = run_name
         self.activation_override = activation_override
+        
+        # Generate single timestamp for this entire optimization run
+        from datetime import datetime
+        self.run_timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         if self.activation_override:
             logger.debug(f"running ModelOptimizer.__init__ ... Activation override: {self.activation_override} (will force this activation for all trials)")
         
@@ -582,9 +778,15 @@ class ModelOptimizer:
         default_model_config = ModelConfig()
         self.plot_generator = PlotGenerator(
             dataset_config=self.dataset_config,
-            model_config=default_model_config
+            model_config=default_model_config,
+            optimization_config=optimization_config
         )
         logger.debug(f"running ModelOptimizer.__init__ ... PlotGenerator initialized for data type: {self.plot_generator.data_type}")
+        
+        # Initialize ModelVisualizer for 3D architecture visualization
+        logger.debug(f"running ModelOptimizer.__init__ ... Initializing ModelVisualizer")
+        self.model_visualizer = ModelVisualizer()
+        logger.debug(f"running ModelOptimizer.__init__ ... ModelVisualizer initialized for 3D architecture preparation")
         
         # Initialize optimization state
         self.study: Optional[optuna.Study] = None
@@ -610,9 +812,13 @@ class ModelOptimizer:
         self._best_trial_progress: Optional[TrialProgress] = None
         
         # Progress aggregation infrastructure
-        self._progress_aggregator = ConcurrentProgressAggregator(self.config.n_trials)
+        self._progress_aggregator = ConcurrentProgressAggregator(self.config.trials)
+        
+        # Cancellation flag for graceful shutdown
+        self._cancelled = threading.Event()
         self._trial_start_times: Dict[int, float] = {}
         self._trial_statuses: Dict[int, str] = {}  # "running", "completed", "failed"
+        self._current_epoch_info: Dict[int, Dict[str, Any]] = {}  # Trial -> {current_epoch, total_epochs, epoch_progress}
         
         # Architecture and health trends (protected by _state_lock)
         self._architecture_trends: Dict[str, List[float]] = {}
@@ -621,6 +827,12 @@ class ModelOptimizer:
         # Best trial tracking (protected by _best_trial_lock)
         self._best_trial_number: Optional[int] = None
         self._best_trial_value: Optional[float] = None
+        self._best_trial_accuracy: Optional[float] = None
+        self._last_trial_accuracy: Optional[float] = None  # Temporary storage for latest trial accuracy
+        self._last_trial_health_metrics: Optional[Dict[str, Any]] = None  # Temporary storage for latest trial health metrics
+        
+        # Current trial progress for unified progress updates
+        self._current_trial_progress: Optional[TrialProgress] = None
         
         
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
@@ -628,7 +840,7 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.__init__ ... Objective: {self.config.objective.value}")
         if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
             logger.debug(f"running ModelOptimizer.__init__ ... Health weight: {self.config.health_weight} ({(1-self.config.health_weight)*100:.0f}% objective, {self.config.health_weight*100:.0f}% health)")
-        logger.debug(f"running ModelOptimizer.__init__ ... Max trials: {self.config.n_trials}")
+        logger.debug(f"running ModelOptimizer.__init__ ... Max trials: {self.config.trials}")
         if self.run_name:
             logger.debug(f"running ModelOptimizer.__init__ ... Run name: {self.run_name}")
         
@@ -667,17 +879,224 @@ class ModelOptimizer:
         with self._state_lock:
             return self._best_trial_health
 
-    def update_best_trial(self, trial_number: int, trial_value: float) -> None:
+    def update_best_trial(self, trial_number: int, trial_value: float, trial_accuracy: Optional[float] = None) -> None:
         """Thread-safe method to update best trial tracking"""
         with self._best_trial_lock:
             if self._best_trial_value is None or trial_value > self._best_trial_value:
                 self._best_trial_number = trial_number
                 self._best_trial_value = trial_value
+                self._best_trial_accuracy = trial_accuracy
+
+    def _create_unified_progress(self, aggregated_progress: AggregatedProgress, trial_progress: Optional[TrialProgress] = None) -> UnifiedProgress:
+        """
+        Create unified progress by combining aggregated progress with current trial progress
+        This eliminates the race condition between dual callbacks
+        """
+        # Use the provided trial_progress or the stored current trial progress
+        current_trial = trial_progress or self._current_trial_progress
+        
+        # Get epoch information from the most recent running trial
+        current_epoch = None
+        total_epochs = None
+        epoch_progress = None
+        
+        # Find the most recent epoch info from any running trial
+        if self._current_epoch_info:
+            for trial_num in aggregated_progress.running_trials:
+                if trial_num in self._current_epoch_info:
+                    epoch_info = self._current_epoch_info[trial_num]
+                    current_epoch = epoch_info.get('current_epoch')
+                    total_epochs = epoch_info.get('total_epochs')
+                    epoch_progress = epoch_info.get('epoch_progress')
+                    break  # Use the first running trial's epoch info
+        
+        current_trial_id = getattr(current_trial, 'trial_id', None) if current_trial else None
+        current_trial_status = getattr(current_trial, 'status', None) if current_trial else None
+        
+        # Calculate average duration per trial for completed trials
+        average_duration = None
+        if self._trial_progress_history:
+            completed_durations = [
+                trial.duration_seconds for trial in self._trial_progress_history 
+                if trial.status == "completed" and trial.duration_seconds is not None
+            ]
+            if completed_durations:
+                average_duration = round(sum(completed_durations) / len(completed_durations))
+        
+        return UnifiedProgress(
+            # Copy all aggregated progress data
+            total_trials=aggregated_progress.total_trials,
+            running_trials=aggregated_progress.running_trials,
+            completed_trials=aggregated_progress.completed_trials,
+            failed_trials=aggregated_progress.failed_trials,
+            current_best_total_score=aggregated_progress.current_best_total_score,
+            current_best_accuracy=self._best_trial_accuracy,  # Track raw accuracy separately
+            average_duration_per_trial=average_duration,
+            estimated_time_remaining=aggregated_progress.estimated_time_remaining,
+            # Add epoch information from current trial
+            current_epoch=current_epoch,
+            total_epochs=total_epochs,
+            epoch_progress=epoch_progress,
+            current_trial_id=current_trial_id,
+            current_trial_status=current_trial_status
+        )
 
     def get_best_trial_info(self) -> Tuple[Optional[int], Optional[float]]:
         """Thread-safe method to get best trial info"""
         with self._best_trial_lock:
             return self._best_trial_number, self._best_trial_value
+    
+    def cancel(self) -> None:
+        """Request cancellation of the optimization process"""
+        logger.info("running ModelOptimizer.cancel ... Cancellation requested")
+        self._cancelled.set()
+    
+    def is_cancelled(self) -> bool:
+        """Check if cancellation has been requested"""
+        return self._cancelled.is_set()
+    
+    def get_trial_history(self) -> List[Dict[str, Any]]:
+        """
+        Get complete trial history for UI visualization
+        
+        Returns all trials from _trial_progress_history as API-friendly dictionaries
+        sorted by trial number (most recent first for UI display)
+        
+        Returns:
+            List of trial dictionaries with trial_number, status, timestamps, etc.
+        """
+        with self._progress_lock:
+            trials = []
+            for trial_progress in self._trial_progress_history:
+                trial_dict = trial_progress.to_dict()
+                trials.append(trial_dict)
+            
+            # Sort by trial number descending (most recent first)
+            trials.sort(key=lambda x: x.get('trial_number', 0), reverse=True)
+            return trials
+    
+    def get_current_trial(self) -> Optional[Dict[str, Any]]:
+        """
+        Get currently running trial if any exists
+        
+        Returns:
+            Trial dictionary for currently running trial, or None
+        """
+        with self._progress_lock:
+            for trial_progress in self._trial_progress_history:
+                if trial_progress.status == "running":
+                    return trial_progress.to_dict()
+            return None
+    
+    def get_best_trial(self) -> Optional[Dict[str, Any]]:
+        """
+        Get best completed trial based on _best_trial_number
+        
+        Returns:
+            Trial dictionary for best trial, or None if no trials completed
+        """
+        with self._best_trial_lock:
+            best_number = self._best_trial_number
+        
+        if best_number is None:
+            return None
+        
+        with self._progress_lock:
+            for trial_progress in self._trial_progress_history:
+                if trial_progress.trial_number == best_number:
+                    return trial_progress.to_dict()
+            return None
+    
+    def get_best_model_visualization_data(self) -> Optional[Dict[str, Any]]:
+        """
+        Get 3D visualization data for the best performing model
+        
+        Returns:
+            Dictionary containing best model data with 3D visualization information,
+            or None if no completed trials exist
+        """
+        # Get the best trial data
+        best_trial = self.get_best_trial()
+        if not best_trial:
+            logger.debug("No best trial available for visualization")
+            return None
+        
+        # Extract architecture and performance data
+        architecture = best_trial.get('architecture')
+        if not architecture:
+            logger.warning(f"Best trial {best_trial.get('trial_number')} has no architecture data")
+            return None
+        
+        # Get performance scores
+        performance = best_trial.get('performance', {})
+        health_metrics = best_trial.get('health_metrics', {})
+        
+        performance_score = performance.get('total_score', 0.0)
+        health_score = health_metrics.get('overall_health') if health_metrics else None
+        
+        logger.debug(f"Preparing 3D visualization for best trial {best_trial.get('trial_number')} "
+                    f"(score: {performance_score:.3f}, health: {health_score})")
+        
+        try:
+            # Generate 3D visualization data
+            visualization_data = self.model_visualizer.prepare_visualization_data(
+                architecture=architecture,
+                performance_score=performance_score,
+                health_score=health_score
+            )
+            
+            # Get color scheme
+            color_scheme = self.model_visualizer.get_performance_color_scheme(
+                performance_score, health_score
+            )
+            
+            # Combine all data for API response
+            return {
+                'trial_id': best_trial.get('trial_id'),
+                'trial_number': best_trial.get('trial_number'),
+                'total_score': performance_score,
+                'accuracy': performance.get('accuracy'),
+                'architecture': architecture,
+                'health_metrics': health_metrics,
+                'training_duration': best_trial.get('duration_seconds'),
+                'updated_at': best_trial.get('completed_at'),
+                
+                # 3D visualization data
+                'visualization_data': {
+                    'type': visualization_data.architecture_type,
+                    'layers': [
+                        {
+                            'layer_id': layer.layer_id,
+                            'layer_type': layer.layer_type,
+                            'position_z': layer.position_z,
+                            'width': layer.width,
+                            'height': layer.height,
+                            'depth': layer.depth,
+                            'parameters': layer.parameters,
+                            'activation': layer.activation,
+                            'filters': layer.filters,
+                            'kernel_size': layer.kernel_size,
+                            'units': layer.units,
+                            'color_intensity': layer.color_intensity,
+                            'opacity': layer.opacity
+                        }
+                        for layer in visualization_data.layers
+                    ],
+                    'total_parameters': visualization_data.total_parameters,
+                    'model_depth': visualization_data.model_depth,
+                    'max_layer_width': visualization_data.max_layer_width,
+                    'max_layer_height': visualization_data.max_layer_height,
+                    'performance_score': visualization_data.performance_score,
+                    'health_score': visualization_data.health_score
+                },
+                
+                # Color scheme for 3D rendering
+                'color_scheme': color_scheme
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to generate 3D visualization data: {e}")
+            return None
         
     def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
         """
@@ -693,6 +1112,23 @@ class ModelOptimizer:
             self._trial_statuses[trial_progress.trial_number] = trial_progress.status
             logger.debug(f"running _thread_safe_progress_callback ... updated trial {trial_progress.trial_number} status to '{trial_progress.status}'")
             
+            # Update or add trial progress to history
+            # Find existing trial and update it, or append if it's new
+            existing_trial_index = None
+            for i, existing_trial in enumerate(self._trial_progress_history):
+                if existing_trial.trial_number == trial_progress.trial_number:
+                    existing_trial_index = i
+                    break
+            
+            if existing_trial_index is not None:
+                # Update existing trial with latest status and data
+                self._trial_progress_history[existing_trial_index] = trial_progress
+                logger.debug(f"running _thread_safe_progress_callback ... updated existing trial {trial_progress.trial_number} in history")
+            else:
+                # Add new trial to history
+                self._trial_progress_history.append(trial_progress)
+                logger.debug(f"running _thread_safe_progress_callback ... added new trial {trial_progress.trial_number} to history")
+            
             # Call user-provided progress callback if available
             if self.progress_callback:
                 try:
@@ -700,7 +1136,7 @@ class ModelOptimizer:
                     best_trial_number, best_trial_value = self.get_best_trial_info()
                     
                     # Update the progress aggregator with current best value
-                    self._progress_aggregator.get_current_best_value = lambda: best_trial_value
+                    self._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
                     
                     # Create aggregated progress
                     aggregated_progress = self._progress_aggregator.aggregate_progress(
@@ -714,8 +1150,17 @@ class ModelOptimizer:
                     logger.debug(f"running _thread_safe_progress_callback ... - Completed: {len(aggregated_progress.completed_trials)}")
                     logger.debug(f"running _thread_safe_progress_callback ... - Failed: {len(aggregated_progress.failed_trials)}")
                     
-                    # Call the user's progress callback with aggregated progress
-                    self.progress_callback(aggregated_progress)
+                    # PHASE 1: Unified progress callback system
+                    # Store current trial progress for epoch information
+                    self._current_trial_progress = trial_progress
+                    
+                    # Create unified progress combining trial statistics with epoch information
+                    unified_progress = self._create_unified_progress(aggregated_progress, trial_progress)
+                    
+                    # Single call with all information the UI needs
+                    logger.debug(f"running _thread_safe_progress_callback ... calling user progress callback with unified progress")
+                    logger.debug(f"running _thread_safe_progress_callback ... - Epoch info: {unified_progress.current_epoch}/{unified_progress.total_epochs} (progress: {unified_progress.epoch_progress})")
+                    self.progress_callback(unified_progress)
                     
                 except Exception as e:
                     logger.error(f"running _thread_safe_progress_callback ... error in progress callback: {e}")
@@ -760,7 +1205,7 @@ class ModelOptimizer:
         plots_dir.mkdir(exist_ok=True)
         
         # Create trial directories
-        for trial_num in range(self.config.n_trials):
+        for trial_num in range(self.config.trials):
             trial_dir = plots_dir / f"trial_{trial_num + 1}"
             trial_dir.mkdir(exist_ok=True)
         
@@ -790,6 +1235,47 @@ class ModelOptimizer:
         logger.debug(f"running _suggest_hyperparameters ... Architecture type: {params.get('architecture_type', 'unknown')}")
         
         return params
+
+    def _extract_architecture_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract architecture information from hyperparameters for display in trial gallery
+        
+        Args:
+            params: Hyperparameter dictionary from _suggest_hyperparameters
+            
+        Returns:
+            Dictionary containing structured architecture information
+        """
+        architecture_type = params.get('architecture_type', 'unknown')
+        
+        if architecture_type == 'cnn':
+            return {
+                'type': 'CNN',
+                'conv_layers': params.get('num_layers_conv', 0),
+                'filters_per_layer': params.get('filters_per_conv_layer', 0),
+                'kernel_size': params.get('kernel_size', (0, 0)),
+                'dense_layers': params.get('num_layers_hidden', 0),
+                'first_dense_nodes': params.get('first_hidden_layer_nodes', 0),
+                'activation': params.get('activation', 'unknown'),
+                'batch_normalization': params.get('batch_normalization', False),
+                'use_global_pooling': params.get('use_global_pooling', False),
+                'kernel_initializer': params.get('kernel_initializer', 'unknown')
+            }
+        elif architecture_type == 'lstm':
+            return {
+                'type': 'LSTM',
+                'lstm_units': params.get('lstm_units', 0),
+                'dense_layers': params.get('num_layers_hidden', 0),
+                'first_dense_nodes': params.get('first_hidden_layer_nodes', 0),
+                'activation': params.get('activation', 'unknown'),
+                'dropout_rate': params.get('dropout_rate', 0.0),
+                'recurrent_dropout': params.get('recurrent_dropout', 0.0)
+            }
+        else:
+            return {
+                'type': 'Unknown',
+                'raw_params': params
+            }
 
     # RunPod Service Methods (replacing GPU proxy)
     
@@ -890,10 +1376,10 @@ class ModelOptimizer:
                         if not metrics:
                             raise RuntimeError("No metrics returned from RunPod service")
 
-                        objective_value = self._calculate_objective_from_service_response(metrics, output, trial)
+                        total_score = self._calculate_total_score_from_service_response(metrics, output, trial)
                         logger.debug(f"running _train_via_runpod_service ... Trial {trial.number} completed via RunPod service")
-                        logger.debug(f"running _train_via_runpod_service ... Objective value: {objective_value:.4f}")
-                        return objective_value
+                        logger.debug(f"running _train_via_runpod_service ... Total score: {total_score:.4f}")
+                        return total_score
 
                     if job_status == 'FAILED':
                         error_logs = status_data.get('error', 'Job failed without details')
@@ -917,14 +1403,14 @@ class ModelOptimizer:
             raise RuntimeError(f"RunPod service training failed for trial {trial.number}: {e}")
 
     
-    def _calculate_objective_from_service_response(
+    def _calculate_total_score_from_service_response(
         self, 
         metrics: Dict[str, Any], 
         full_result: Dict[str, Any], 
         trial: optuna.Trial
     ) -> float:
         """
-        Calculate objective value from RunPod service response
+        Calculate total score from RunPod service response
         
         Processes the comprehensive metrics returned by the RunPod service
         (which uses the same HealthAnalyzer logic as local execution).
@@ -935,10 +1421,10 @@ class ModelOptimizer:
             trial: Optuna trial object
             
         Returns:
-            Objective value for optimization
+            Total score for optimization
         """
-        logger.debug(f"running _calculate_objective_from_service_response ... Calculating objective for trial {trial.number}")
-        logger.debug(f"running _calculate_objective_from_service_response ... Available metrics: {list(metrics.keys())}")
+        logger.debug(f"running _calculate_total_score_from_service_response ... Calculating total score for trial {trial.number}")
+        logger.debug(f"running _calculate_total_score_from_service_response ... Available metrics: {list(metrics.keys())}")
         
         try:
             # Extract basic metrics
@@ -950,10 +1436,35 @@ class ModelOptimizer:
             health_metrics = full_result.get('health_metrics', {})
             overall_health = health_metrics.get('overall_health', 0.5)
             
-            logger.debug(f"running _calculate_objective_from_service_response ... Basic metrics: acc={test_accuracy:.4f}, loss={test_loss:.4f}")
-            logger.debug(f"running _calculate_objective_from_service_response ... Health metrics: overall={overall_health:.3f}")
+            logger.debug(f"running _calculate_total_score_from_service_response ... Basic metrics: acc={test_accuracy:.4f}, loss={test_loss:.4f}")
+            logger.debug(f"running _calculate_total_score_from_service_response ... Health metrics: overall={overall_health:.3f}")
             
-            # Calculate objective based on optimization mode and target
+            # Store the raw accuracy and health metrics for trial progress
+            self._last_trial_accuracy = test_accuracy
+            # Combine basic metrics with health metrics for comprehensive view
+            comprehensive_service_metrics = health_metrics.copy()
+            comprehensive_service_metrics.update({
+                'test_accuracy': test_accuracy,
+                'test_loss': test_loss,
+                'training_time_seconds': training_time_seconds
+            })
+            self._last_trial_health_metrics = comprehensive_service_metrics
+            
+            # 🔍 DEBUG: Log all health metrics from service response for frontend display
+            logger.info(f"🔍 SERVICE HEALTH METRICS DEBUG - Trial {trial.number}:")
+            logger.info(f"  📊 Service comprehensive_service_metrics keys: {list(comprehensive_service_metrics.keys())}")
+            logger.info(f"  📊 test_loss: {comprehensive_service_metrics.get('test_loss', 'MISSING')}")
+            logger.info(f"  📊 test_accuracy: {comprehensive_service_metrics.get('test_accuracy', 'MISSING')}")
+            logger.info(f"  📊 overall_health: {comprehensive_service_metrics.get('overall_health', 'MISSING')}")
+            logger.info(f"  📊 neuron_utilization: {comprehensive_service_metrics.get('neuron_utilization', 'MISSING')}")
+            logger.info(f"  📊 parameter_efficiency: {comprehensive_service_metrics.get('parameter_efficiency', 'MISSING')}")
+            logger.info(f"  📊 training_stability: {comprehensive_service_metrics.get('training_stability', 'MISSING')}")
+            logger.info(f"  📊 gradient_health: {comprehensive_service_metrics.get('gradient_health', 'MISSING')}")
+            logger.info(f"  📊 convergence_quality: {comprehensive_service_metrics.get('convergence_quality', 'MISSING')}")
+            logger.info(f"  📊 accuracy_consistency: {comprehensive_service_metrics.get('accuracy_consistency', 'MISSING')}")
+            logger.info(f"  📊 Complete comprehensive_service_metrics: {comprehensive_service_metrics}")
+            
+            # Calculate total score based on optimization mode and target
             if self.config.objective == OptimizationObjective.VAL_ACCURACY:
                 primary_value = test_accuracy
                 
@@ -963,13 +1474,13 @@ class ModelOptimizer:
                     health_weight = self.config.health_weight
                     final_value = objective_weight * primary_value + health_weight * overall_health
                     
-                    logger.debug(f"running _calculate_objective_from_service_response ... HEALTH mode weighted combination:")
-                    logger.debug(f"running _calculate_objective_from_service_response ... - Primary (acc): {primary_value:.4f} * {objective_weight:.1f} = {primary_value * objective_weight:.4f}")
-                    logger.debug(f"running _calculate_objective_from_service_response ... - Health: {overall_health:.3f} * {health_weight:.1f} = {overall_health * health_weight:.4f}")
-                    logger.debug(f"running _calculate_objective_from_service_response ... - Final: {final_value:.4f}")
+                    logger.debug(f"running _calculate_total_score_from_service_response ... HEALTH mode weighted combination:")
+                    logger.debug(f"running _calculate_total_score_from_service_response ... - Primary (acc): {primary_value:.4f} * {objective_weight:.1f} = {primary_value * objective_weight:.4f}")
+                    logger.debug(f"running _calculate_total_score_from_service_response ... - Health: {overall_health:.3f} * {health_weight:.1f} = {overall_health * health_weight:.4f}")
+                    logger.debug(f"running _calculate_total_score_from_service_response ... - Final: {final_value:.4f}")
                 else:
                     final_value = primary_value
-                    logger.debug(f"running _calculate_objective_from_service_response ... SIMPLE mode: using primary value {final_value:.4f}")
+                    logger.debug(f"running _calculate_total_score_from_service_response ... SIMPLE mode: using primary value {final_value:.4f}")
                 
                 return float(final_value)
             
@@ -1036,11 +1547,11 @@ class ModelOptimizer:
             
             else:
                 # Fallback to test accuracy
-                logger.warning(f"running _calculate_objective_from_service_response ... Unknown objective {self.config.objective.value}, using test_accuracy")
+                logger.warning(f"running _calculate_total_score_from_service_response ... Unknown objective {self.config.objective.value}, using test_accuracy")
                 return float(test_accuracy)
             
         except Exception as e:
-            logger.error(f"running _calculate_objective_from_service_response ... Error calculating objective: {e}")
+            logger.error(f"running _calculate_total_score_from_service_response ... Error calculating total score: {e}")
             return float(metrics.get('test_accuracy', 0.0))
     
     def _train_locally_for_trial(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
@@ -1062,9 +1573,21 @@ class ModelOptimizer:
             trial_start_time = time.time()
             
             # Create ModelConfig from suggested parameters
+            # 
+            # This implements the core of the dual-purpose ModelConfig system:
+            # 1. Start with ModelConfig() containing sensible defaults 
+            # 2. Override defaults with Optuna-suggested parameters
+            # 3. Parameters not suggested by Optuna retain their default values
+            # 4. Result is a fully-configured ModelConfig ready for ModelBuilder
+            #
+            # Example flow:
+            # - ModelConfig.use_global_pooling = False (default)
+            # - params = {'use_global_pooling': True, 'kernel_size': (5,5), ...} (from Optuna)
+            # - After setattr loop: ModelConfig.use_global_pooling = True (overridden)
+            #                      ModelConfig.activation = 'relu' (default retained)
             model_config = ModelConfig()
             
-            # Apply all suggested parameters
+            # Apply all suggested parameters, overriding defaults
             for key, value in params.items():
                 if hasattr(model_config, key):
                     setattr(model_config, key, value)
@@ -1108,8 +1631,8 @@ class ModelOptimizer:
             logger.debug(f"running _train_locally_for_trial ... - ModelConfig.validation_split: {model_config.validation_split}")
             logger.debug(f"running _train_locally_for_trial ... - Creating ModelBuilder with verified config...")
             
-            # Create ModelBuilder (now without GPU proxy since we're doing pure local)
-            model_builder = ModelBuilder(self.dataset_config, model_config)
+            # Create ModelBuilder with trial number, shared timestamp, results directory, and optimization config
+            model_builder = ModelBuilder(self.dataset_config, model_config, trial.number, self.run_timestamp, self.results_dir, self.config)
             
             # Build model
             model_builder.build_model()
@@ -1135,6 +1658,21 @@ class ModelOptimizer:
             final_epochs = max(min_epochs, min(trial_epochs, max_epochs))
             
             model_builder.model_config.epochs = final_epochs
+            
+            # Add epoch progress callback to track training progress
+            epoch_callback = EpochProgressCallback(
+                trial_number=trial.number,
+                total_epochs=final_epochs,
+                optimizer_instance=self
+            )
+            
+            # Add the callback to model_builder's callback setup method
+            original_setup_callbacks = model_builder._setup_training_callbacks_optimized
+            def enhanced_setup_callbacks():
+                callbacks_list = original_setup_callbacks()
+                callbacks_list.append(epoch_callback)
+                return callbacks_list
+            model_builder._setup_training_callbacks_optimized = enhanced_setup_callbacks
             
             # Train the model
             history = model_builder.train(
@@ -1163,21 +1701,39 @@ class ModelOptimizer:
             logger.debug(f"running _train_locally_for_trial ... - Test accuracy: {test_accuracy:.4f}")
             logger.debug(f"running _train_locally_for_trial ... - Overall health: {overall_health:.3f}")
             
+            # Store the raw accuracy and comprehensive health metrics for trial progress
+            self._last_trial_accuracy = test_accuracy
+            self._last_trial_health_metrics = comprehensive_metrics
+            
+            # 🔍 DEBUG: Log all health metrics being stored for frontend display
+            logger.info(f"🔍 HEALTH METRICS DEBUG - Trial {trial.number}:")
+            logger.info(f"  📊 Raw comprehensive_metrics keys: {list(comprehensive_metrics.keys())}")
+            logger.info(f"  📊 test_loss: {comprehensive_metrics.get('test_loss', 'MISSING')}")
+            logger.info(f"  📊 test_accuracy: {comprehensive_metrics.get('test_accuracy', 'MISSING')}")
+            logger.info(f"  📊 overall_health: {comprehensive_metrics.get('overall_health', 'MISSING')}")
+            logger.info(f"  📊 neuron_utilization: {comprehensive_metrics.get('neuron_utilization', 'MISSING')}")
+            logger.info(f"  📊 parameter_efficiency: {comprehensive_metrics.get('parameter_efficiency', 'MISSING')}")
+            logger.info(f"  📊 training_stability: {comprehensive_metrics.get('training_stability', 'MISSING')}")
+            logger.info(f"  📊 gradient_health: {comprehensive_metrics.get('gradient_health', 'MISSING')}")
+            logger.info(f"  📊 convergence_quality: {comprehensive_metrics.get('convergence_quality', 'MISSING')}")
+            logger.info(f"  📊 accuracy_consistency: {comprehensive_metrics.get('accuracy_consistency', 'MISSING')}")
+            logger.info(f"  📊 Complete comprehensive_metrics: {comprehensive_metrics}")
+            
             # Calculate objective (reuse same logic as service response)
             if self.config.objective == OptimizationObjective.VAL_ACCURACY:
                 if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
                     objective_weight = 1.0 - self.config.health_weight
                     health_weight = self.config.health_weight
-                    objective_value = objective_weight * test_accuracy + health_weight * overall_health
+                    total_score = objective_weight * test_accuracy + health_weight * overall_health
                 else:
-                    objective_value = test_accuracy
+                    total_score = test_accuracy
             else:
                 # For other objectives, use test_accuracy as fallback
-                objective_value = test_accuracy
+                total_score = test_accuracy
             
-            logger.debug(f"running _train_locally_for_trial ... Trial {trial.number}: Local fallback objective value: {objective_value:.4f}")
+            logger.debug(f"running _train_locally_for_trial ... Trial {trial.number}: Local fallback total score: {total_score:.4f}")
             
-            return float(objective_value)
+            return float(total_score)
             
         except Exception as e:
             logger.error(f"running _train_locally_for_trial ... Local training fallback failed for trial {trial.number}: {e}")
@@ -1193,7 +1749,7 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.optimize ... Starting optimization for {self.dataset_name}")
         logger.debug(f"running ModelOptimizer.optimize ... Mode: {self.config.mode.value}")
         logger.debug(f"running ModelOptimizer.optimize ... Objective: {self.config.objective.value}")
-        logger.debug(f"running ModelOptimizer.optimize ... Trials: {self.config.n_trials}")
+        logger.debug(f"running ModelOptimizer.optimize ... Trials: {self.config.trials}")
         
         # Log execution approach
         if self.config.use_runpod_service:
@@ -1205,10 +1761,10 @@ class ModelOptimizer:
         # Create Optuna study
         self.study = optuna.create_study(
             direction='maximize',
-            sampler=TPESampler(n_startup_trials=self.config.n_startup_trials, seed=self.config.random_seed),
+            sampler=TPESampler(n_startup_trials=self.config.startup_trials, seed=self.config.random_seed),
             pruner=MedianPruner(
-                n_startup_trials=self.config.n_startup_trials,
-                n_warmup_steps=self.config.n_warmup_steps
+                n_startup_trials=self.config.startup_trials,
+                n_warmup_steps=self.config.warmup_steps
             )
         )
         
@@ -1222,11 +1778,11 @@ class ModelOptimizer:
             else 1
         )
         # Cap by number of trials to avoid oversubscribing the executor
-        n_jobs: int = min(proposed_jobs, self.config.n_trials)
+        n_jobs: int = min(proposed_jobs, self.config.trials)
 
         logger.debug(
             "running ModelOptimizer.optimize ... Optuna n_jobs=%s (concurrent=%s, workers=%s, runpod=%s, trials=%s)",
-            n_jobs, self.config.concurrent, self.config.concurrent_workers, self.config.use_runpod_service, self.config.n_trials
+            n_jobs, self.config.concurrent, self.config.concurrent_workers, self.config.use_runpod_service, self.config.trials
         )
 
         if not self.config.use_runpod_service and (
@@ -1243,9 +1799,9 @@ class ModelOptimizer:
         try:
             self.study.optimize(
                 self._objective_function,
-                n_trials=self.config.n_trials,
+                n_trials=self.config.trials,
                 n_jobs=n_jobs,
-                catch=(Exception,),          # ← don’t let a single trial kill the study
+                catch=(Exception,),          # ← don't let a single trial kill the study
                 gc_after_trial=True          # ← reclaim memory between concurrent trials
             )
             logger.debug(f"running ModelOptimizer.optimize ... Completed {len(self.study.trials)} trials")
@@ -1261,6 +1817,11 @@ class ModelOptimizer:
         
         # Save optimization results
         self._save_results(results)
+        
+        # Build final model with best hyperparameters
+        final_model_path = self._build_final_model(results)
+        if final_model_path:
+            results.best_model_path = final_model_path
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
@@ -1280,9 +1841,14 @@ class ModelOptimizer:
         Returns:
             Objective value (higher is better for maximization objectives)
         """
+        # Check for cancellation at the start of each trial
+        if self.is_cancelled():
+            logger.info(f"running ModelOptimizer._objective_function ... Trial {trial.number} cancelled")
+            raise optuna.TrialPruned()
+        
         trial_start_time = time.time()
     
-        # Track trial start in progress aggregation
+        # Track trial start in progress aggregation (basic info only, epochs added later)
         if self.progress_callback:
             trial_progress = TrialProgress(
                 trial_id=f"trial_{trial.number}",
@@ -1296,6 +1862,7 @@ class ModelOptimizer:
         with self._progress_lock:
             self._trial_start_times[trial.number] = trial_start_time
         
+        params = None  # Initialize to avoid "possibly unbound" errors in except block
         try:
             logger.debug(
                 f"running _objective_function ... start "
@@ -1324,73 +1891,106 @@ class ModelOptimizer:
                 # Silent if TF not installed/needed in this run context
                 pass
 
-            # Create a unique directory for this trial's artifacts (thread-safe)
-            try:
-                current_file = Path(__file__).resolve()
-                project_root = current_file.parent.parent  # Go up 2 levels to project root
-                results_root = project_root / "optimization_results"
-
-                # Ensure a run-scoped directory already exists or create it
-                # (self.run_name should already be set when ModelOptimizer is constructed)
-                run_dir = results_root / (self.run_name or "default_run")
-                run_dir.mkdir(parents=True, exist_ok=True)
-
-                # Trial-specific subdirectory (e.g., trial_003)
-                trial_dir = run_dir / f"trial_{int(trial.number):03d}"
-                trial_dir.mkdir(parents=True, exist_ok=True)
-
-                # Save on the instance for downstream writers; also store on trial for clarity
-                self.current_trial_dir = trial_dir  # type: ignore[attr-defined]
-                trial.set_user_attr("output_dir", str(trial_dir))
-
-                logger.debug(
-                    "running _objective_function ... trial directory ready: %s",
-                    str(trial_dir)
-                )
-            except Exception as e:
-                logger.error("running _objective_function ... failed to prepare trial directory: %s", e)
-                raise
-                    
+                   
             # Use modular hyperparameter suggestion
             params = self._suggest_hyperparameters(trial)
+            
+            # Update trial progress with epoch information now that we have params
+            if self.progress_callback:
+                # Get expected epochs from params or config
+                trial_epochs = params.get('epochs', self.config.max_epochs_per_trial)
+                if not isinstance(trial_epochs, int):
+                    trial_epochs = int(trial_epochs)
+                
+                min_epochs = self.config.min_epochs_per_trial
+                max_epochs = self.config.max_epochs_per_trial
+                final_epochs = max(min_epochs, min(trial_epochs, max_epochs))
+                
+                # Extract architecture information for display
+                architecture_info = self._extract_architecture_info(params)
+                
+                trial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="running",
+                    started_at=datetime.now().isoformat(),
+                    current_epoch=0,
+                    total_epochs=final_epochs,
+                    epoch_progress=0.0,
+                    architecture=architecture_info,
+                    hyperparameters=params
+                )
+                self._thread_safe_progress_callback(trial_progress)
             
             # Check execution method
             if self._should_use_runpod_service():
                 logger.debug(f"running _objective_function ... Trial {trial.number}: 🔄 Using RunPod service (JSON API)")
-                objective_value = self._train_via_runpod_service(trial, params)
+                total_score = self._train_via_runpod_service(trial, params)
             else:
                 logger.debug(f"running _objective_function ... Trial {trial.number}: Using local execution")
-                objective_value = self._train_locally_for_trial(trial, params)
+                total_score = self._train_locally_for_trial(trial, params)
             
             # Track trial completion in progress aggregation
             if self.progress_callback:
                 trial_end_time = time.time()
+                # Extract architecture information for display
+                architecture_info = self._extract_architecture_info(params)
+                
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{trial.number}",
                     trial_number=trial.number,
                     status="completed",
                     started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
                     completed_at=datetime.now().isoformat(),
-                    duration_seconds=trial_end_time - trial_start_time,
-                    performance={'objective_value': objective_value}
+                    duration_seconds=round(trial_end_time - trial_start_time),
+                    architecture=architecture_info,
+                    hyperparameters=params,
+                    performance={
+                        'total_score': total_score,
+                        'accuracy': self._last_trial_accuracy
+                    },
+                    health_metrics=getattr(self, '_last_trial_health_metrics', None)
                 )
+                
+                # 🔍 DEBUG: Log what's actually in the TrialProgress being sent to frontend
+                logger.info(f"🚀 TRIAL PROGRESS TO FRONTEND - Trial {trial.number}:")
+                logger.info(f"  📊 performance: {trial_progress.performance}")
+                logger.info(f"  📊 health_metrics: {trial_progress.health_metrics}")
+                logger.info(f"  📊 health_metrics type: {type(trial_progress.health_metrics)}")
+                if trial_progress.health_metrics:
+                    logger.info(f"  📊 health_metrics keys: {list(trial_progress.health_metrics.keys())}")
+                    logger.info(f"  📊 convergence_quality in health_metrics: {trial_progress.health_metrics.get('convergence_quality', 'MISSING')}")
+                    logger.info(f"  📊 accuracy_consistency in health_metrics: {trial_progress.health_metrics.get('accuracy_consistency', 'MISSING')}")
+                logger.info(f"  📊 Complete trial_progress.to_dict(): {trial_progress.to_dict()}")
                 self._thread_safe_progress_callback(trial_progress)
             
-            # Update best trial tracking
-            self.update_best_trial(trial.number, objective_value)
+            # Update best trial tracking with both total score and raw accuracy
+            self.update_best_trial(trial.number, total_score, self._last_trial_accuracy)
             
-            return objective_value
+            return total_score
             
         except Exception as e:
             # Track trial failure in progress aggregation
             if self.progress_callback:
+                # Extract architecture information if params are available
+                architecture_info = None
+                hyperparameters = None
+                try:
+                    if params is not None:
+                        architecture_info = self._extract_architecture_info(params)
+                        hyperparameters = params
+                except:
+                    pass  # If architecture extraction fails, proceed without it
+                
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{trial.number}",
                     trial_number=trial.number,
                     status="failed",
                     started_at=datetime.fromtimestamp(trial_start_time).isoformat(),
                     completed_at=datetime.now().isoformat(),
-                    duration_seconds=time.time() - trial_start_time
+                    duration_seconds=round(time.time() - trial_start_time),
+                    architecture=architecture_info,
+                    hyperparameters=hyperparameters
                 )
                 self._thread_safe_progress_callback(trial_progress)
             
@@ -1411,7 +2011,7 @@ class ModelOptimizer:
         if not completed_trials:
             logger.warning(f"running ModelOptimizer._compile_results ... No trials completed successfully")
             return OptimizationResult(
-                best_value=0.0,
+                best_total_score=0.0,
                 best_params={},
                 total_trials=len(self.study.trials),
                 successful_trials=0,
@@ -1443,7 +2043,7 @@ class ModelOptimizer:
             importance = {}
         
         return OptimizationResult(
-            best_value=self.study.best_value,
+            best_total_score=self.study.best_value,
             best_params=best_params,
             total_trials=len(self.study.trials),
             successful_trials=len(completed_trials),
@@ -1477,14 +2077,18 @@ class ModelOptimizer:
                 best_params['activation'] = self.activation_override
                 logger.debug(f"running _save_results ... Applied activation override to best_params: '{self.activation_override}'")
             
+            # Add use_flattening field as inverse of use_global_pooling
+            if 'use_global_pooling' in best_params:
+                best_params['use_flattening'] = not best_params['use_global_pooling']
+            
             # Save best hyperparameters as YAML
-            yaml_file = self.results_dir / "best_hyperparameters.yaml"
+            yaml_file = self.results_dir / "optimized_model" / "best_hyperparameters.yaml"
             yaml_data = {
                 "dataset": results.dataset_name,
                 "optimization_mode": results.optimization_mode,
                 "objective": results.optimization_config.objective.value if results.optimization_config else "unknown",
                 "health_weight": results.health_weight,
-                "best_value": float(results.best_value),
+                "best_total_score": float(results.best_total_score),
                 "hyperparameters": best_params,
                 "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # Track execution method
             }
@@ -1498,6 +2102,110 @@ class ModelOptimizer:
         except Exception as e:
             logger.error(f"running ModelOptimizer._save_results ... Failed to save optimization results: {e}")
 
+    def _build_final_model(self, results: OptimizationResult) -> Optional[str]:
+        """
+        Build and train the final model using the best hyperparameters from optimization.
+        Uses the existing ModelBuilder functionality and saves to the correct optimization results directory.
+        
+        Args:
+            results: Optimization results containing best hyperparameters
+            
+        Returns:
+            Path to the saved final model, or None if building failed
+        """
+        try:
+            logger.debug("running _build_final_model ... Building final model with best hyperparameters")
+            
+            # Import here to avoid circular imports
+            from model_builder import ModelBuilder
+            
+            # Create optimized run name
+            optimized_run_name = f"optimized_{self.run_name or self.dataset_name}"
+            logger.debug(f"running _build_final_model ... Using optimized run name: {optimized_run_name}")
+            
+            logger.debug(f"running _build_final_model ... Training with best params: {results.best_params}")
+            
+            # Create ModelConfig from best hyperparameters
+            model_config = ModelConfig()
+            for param_name, param_value in results.best_params.items():
+                if hasattr(model_config, param_name):
+                    setattr(model_config, param_name, param_value)
+                    logger.debug(f"running _build_final_model ... Set {param_name} = {param_value}")
+            
+            # Create ModelBuilder instance with dataset config and model config
+            model_builder = ModelBuilder(
+                self.dataset_config, 
+                model_config, 
+                None,  # trial_number
+                None,  # run_timestamp  
+                self.results_dir,
+                self.config
+            )
+            
+            # Build, train, and evaluate the model
+            model_builder.build_model()
+            
+            # Load data using dataset manager
+            from dataset_manager import DatasetManager
+            dataset_manager = DatasetManager()
+            data = dataset_manager.load_dataset(self.dataset_name)
+            
+            model_builder.train(data=data)
+            test_loss, test_accuracy = model_builder.evaluate(data=data)
+            
+            # Save the model
+            model_path = model_builder.save_model(
+                test_accuracy=test_accuracy,
+                run_name=optimized_run_name
+            )
+            
+            training_result = {
+                'model_builder': model_builder,
+                'model_path': model_path
+            }
+            
+            # Get the model path from the training result
+            if training_result and 'model_builder' in training_result:
+                model_builder = training_result['model_builder']
+                
+                # The model should be saved in the trained_models directory
+                # We need to move it to our optimization results directory
+                saved_model_path = training_result.get('model_path')
+                
+                if saved_model_path and Path(saved_model_path).exists():
+                    # Copy the model to the optimization results optimized_model directory
+                    if not self.results_dir:
+                        logger.error(f"running _build_final_model ... Results directory not set")
+                        return None
+                        
+                    optimized_model_dir = self.results_dir / "optimized_model"
+                    optimized_model_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    final_model_path = optimized_model_dir / Path(saved_model_path).name
+                    
+                    # Copy the model file
+                    import shutil
+                    shutil.copy2(saved_model_path, final_model_path)
+                    
+                    # Copy the metadata file too if it exists
+                    metadata_src = Path(saved_model_path).parent / f"{Path(saved_model_path).stem}_metadata.json"
+                    if metadata_src.exists():
+                        metadata_dst = optimized_model_dir / metadata_src.name
+                        shutil.copy2(metadata_src, metadata_dst)
+                    
+                    logger.debug(f"running _build_final_model ... Final model saved to: {final_model_path}")
+                    return str(final_model_path)
+                else:
+                    logger.error(f"running _build_final_model ... Model training completed but no valid model path found")
+                    return None
+            else:
+                logger.error(f"running _build_final_model ... Model training failed or returned invalid result")
+                return None
+                
+        except Exception as e:
+            logger.error(f"running _build_final_model ... Failed to build final model: {e}")
+            return None
+
 
 # Convenience function for command-line usage with RunPod service support
 def optimize_model(
@@ -1507,7 +2215,7 @@ def optimize_model(
     trials: int = 50,
     run_name: Optional[str] = None,
     activation: Optional[str] = None,
-    progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress]], None]] = None,
+    progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress, UnifiedProgress]], None]] = None,
     # RunPod service parameters (replacing GPU proxy)
     use_runpod_service: bool = False,
     runpod_service_endpoint: Optional[str] = None,
@@ -1589,7 +2297,7 @@ def optimize_model(
     opt_config = OptimizationConfig(
         mode=opt_mode,
         objective=objective,
-        n_trials=trials,
+        trials=trials,
         use_runpod_service=use_runpod_service,
         runpod_service_endpoint=runpod_service_endpoint,
         runpod_service_timeout=runpod_service_timeout,
@@ -1677,7 +2385,7 @@ if __name__ == "__main__":
     
     # Convert parameters
     int_params = [
-        'n_trials', 'n_startup_trials', 'n_warmup_steps', 'random_seed',
+        'trials', 'startup_trials', 'warmup_steps', 'random_seed',
         'max_epochs_per_trial', 'early_stopping_patience', 'min_epochs_per_trial',
         'stability_window', 'health_analysis_sample_size', 'health_monitoring_frequency',
         'runpod_service_timeout', 'concurrent_workers'

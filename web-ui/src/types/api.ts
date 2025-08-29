@@ -1,4 +1,4 @@
-import { OptimizationResults, TrialData } from './optimization'
+import { TrialData } from './optimization'
 
 export interface ApiResponse<T> {
   data: T

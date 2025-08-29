@@ -222,6 +222,38 @@ class TrainingHistoryAnalyzer:
             logger.debug(f"running analyze_and_visualize ... Error traceback: {traceback.format_exc()}")
             return {'error': str(e)}
     
+    def _get_accuracy_keys(self, training_history: Dict[str, List[float]]) -> tuple[str, str]:
+        """
+        Detect the correct accuracy metric keys in training history.
+        
+        Args:
+            training_history: Dictionary containing training metrics
+            
+        Returns:
+            Tuple of (accuracy_key, val_accuracy_key) or (None, None) if not found
+        """
+        # Check for different accuracy metric names
+        accuracy_candidates = ['accuracy', 'categorical_accuracy', 'sparse_categorical_accuracy']
+        val_accuracy_candidates = ['val_accuracy', 'val_categorical_accuracy', 'val_sparse_categorical_accuracy']
+        
+        accuracy_key = None
+        val_accuracy_key = None
+        
+        # Find training accuracy key
+        for key in accuracy_candidates:
+            if key in training_history:
+                accuracy_key = key
+                break
+                
+        # Find validation accuracy key  
+        for key in val_accuracy_candidates:
+            if key in training_history:
+                val_accuracy_key = key
+                break
+        
+        logger.debug(f"running _get_accuracy_keys ... Found accuracy_key: {accuracy_key}, val_accuracy_key: {val_accuracy_key}")
+        return accuracy_key, val_accuracy_key
+    
     def _analyze_training_metrics(self, training_history: Dict[str, List[float]]) -> Dict[str, Any]:
         """
         Analyze training metrics to detect patterns and issues
@@ -234,6 +266,9 @@ class TrainingHistoryAnalyzer:
         """
         logger.debug("running _analyze_training_metrics ... Analyzing training patterns")
         
+        # Get correct metric keys
+        accuracy_key, val_accuracy_key = self._get_accuracy_keys(training_history)
+        
         insights = []
         final_metrics = {}
         overfitting_detected = False
@@ -243,16 +278,16 @@ class TrainingHistoryAnalyzer:
             final_metrics['final_loss'] = training_history['loss'][-1]
             logger.debug(f"running _analyze_training_metrics ... Final training loss: {final_metrics['final_loss']:.4f}")
         
-        if 'accuracy' in training_history:
-            final_metrics['final_accuracy'] = training_history['accuracy'][-1]
+        if accuracy_key and accuracy_key in training_history:
+            final_metrics['final_accuracy'] = training_history[accuracy_key][-1]
             logger.debug(f"running _analyze_training_metrics ... Final training accuracy: {final_metrics['final_accuracy']:.4f}")
         
         if 'val_loss' in training_history:
             final_metrics['final_val_loss'] = training_history['val_loss'][-1]
             logger.debug(f"running _analyze_training_metrics ... Final validation loss: {final_metrics['final_val_loss']:.4f}")
         
-        if 'val_accuracy' in training_history:
-            final_metrics['final_val_accuracy'] = training_history['val_accuracy'][-1]
+        if val_accuracy_key and val_accuracy_key in training_history:
+            final_metrics['final_val_accuracy'] = training_history[val_accuracy_key][-1]
             logger.debug(f"running _analyze_training_metrics ... Final validation accuracy: {final_metrics['final_val_accuracy']:.4f}")
         
         # Analyze training quality
@@ -267,7 +302,7 @@ class TrainingHistoryAnalyzer:
                 insights.append("✅ Training loss showing healthy decrease")
         
         # Check for overfitting
-        if 'val_loss' in training_history and 'val_accuracy' in training_history:
+        if 'val_loss' in training_history and val_accuracy_key and val_accuracy_key in training_history:
             # Calculate gaps
             loss_gap = final_metrics.get('final_loss', 0) - final_metrics.get('final_val_loss', 0)
             acc_gap = final_metrics.get('final_val_accuracy', 0) - final_metrics.get('final_accuracy', 0)
@@ -329,6 +364,9 @@ class TrainingHistoryAnalyzer:
         logger.debug("running _create_visualization ... Creating training history dashboard")
         
         try:
+            # Get correct metric keys
+            accuracy_key, val_accuracy_key = self._get_accuracy_keys(training_history)
+            
             # Prepare data
             epochs = range(1, len(training_history['loss']) + 1)
             
@@ -347,9 +385,10 @@ class TrainingHistoryAnalyzer:
             ax1.grid(True, alpha=0.3)
             
             # 2. Accuracy curves
-            ax2.plot(epochs, training_history['accuracy'], 'b-', label='Training Accuracy', linewidth=2)
-            if 'val_accuracy' in training_history:
-                ax2.plot(epochs, training_history['val_accuracy'], 'r-', label='Validation Accuracy', linewidth=2)
+            if accuracy_key and accuracy_key in training_history:
+                ax2.plot(epochs, training_history[accuracy_key], 'b-', label='Training Accuracy', linewidth=2)
+            if val_accuracy_key and val_accuracy_key in training_history:
+                ax2.plot(epochs, training_history[val_accuracy_key], 'r-', label='Validation Accuracy', linewidth=2)
             ax2.set_title('Model Accuracy Over Time', fontweight='bold')
             ax2.set_xlabel('Epoch')
             ax2.set_ylabel('Accuracy')
@@ -373,9 +412,9 @@ class TrainingHistoryAnalyzer:
                 ax3.set_title('Learning Rate (N/A)', fontweight='bold')
             
             # 4. Overfitting analysis
-            if 'val_loss' in training_history and 'val_accuracy' in training_history:
+            if 'val_loss' in training_history and val_accuracy_key and val_accuracy_key in training_history and accuracy_key and accuracy_key in training_history:
                 train_val_loss_gap = [train - val for train, val in zip(training_history['loss'], training_history['val_loss'])]
-                train_val_acc_gap = [val - train for train, val in zip(training_history['accuracy'], training_history['val_accuracy'])]
+                train_val_acc_gap = [val - train for train, val in zip(training_history[accuracy_key], training_history[val_accuracy_key])]
                 
                 ax4.plot(epochs, train_val_loss_gap, 'r-', label='Loss Gap (Train-Val)', linewidth=2)
                 ax4_twin = ax4.twinx()

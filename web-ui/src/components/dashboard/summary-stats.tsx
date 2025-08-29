@@ -8,42 +8,58 @@ import {
   Clock,
   Hash
 } from "lucide-react"
+import React, { useMemo } from "react"
+import { useDashboard } from "./dashboard-provider"
+import { useTrials } from "@/hooks/use-trials"
 
-// Mock summary data - matches your optimization results structure
-const mockSummaryData = {
-  trialsPerformed: 25,
-  bestAccuracy: 0.9247, // 92.47%
-  bestTotalScore: 0.8956, // Health-weighted score in health mode
-  avgDurationPerTrial: 127, // seconds
-  optimizationMode: "health" as "simple" | "health" // or "simple"
-}
+const SummaryStats = React.memo(() => {
+  const { optimizationMode } = useDashboard()
+  const { stats, bestTrial } = useTrials()
+  
+  // Memoized calculations to prevent unnecessary re-renders
+  const formattedStats = useMemo(() => {
+    const bestAccuracy = bestTrial?.performance?.accuracy ?? 0
+    const bestTotalScore = bestTrial?.performance?.total_score ?? 0
+    
 
-export function SummaryStats() {
-  const { 
-    trialsPerformed, 
-    bestAccuracy, 
-    bestTotalScore, 
-    avgDurationPerTrial,
-    optimizationMode
-  } = mockSummaryData
-
-  // Format duration to readable format
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
-  }
+    const formatScore = (score: number) => `${(score * 100).toFixed(1)}%`
+    
+    return {
+      trialsCompleted: stats.completed,
+      bestAccuracy: formatScore(bestAccuracy),
+      bestTotalScore: formatScore(bestTotalScore),
+      avgScore: formatScore(stats.averageScore)
+    }
+  }, [stats, bestTrial])
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-      {/* Trials Performed */}
+      {/* Trials Completed */}
       <Card>
         <CardContent className="p-4">
           <div className="flex items-center space-x-2">
             <Hash className="h-5 w-5 text-blue-500" />
             <div>
-              <p className="text-sm font-medium text-muted-foreground">Trials Performed</p>
-              <p className="text-2xl font-bold">{trialsPerformed}</p>
+              <p className="text-sm font-medium text-muted-foreground">Trials Completed</p>
+              <p className="text-2xl font-bold">{formattedStats.trialsCompleted}</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Best Total Score */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center space-x-2">
+            <Activity className="h-5 w-5 text-purple-500" />
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-sm font-medium text-muted-foreground">Best Total Score</span>
+                <Badge variant="outline" className="text-xs">
+                  {optimizationMode}
+                </Badge>
+              </div>
+              <p className="text-2xl font-bold">{formattedStats.bestTotalScore}</p>
             </div>
           </div>
         </CardContent>
@@ -56,25 +72,7 @@ export function SummaryStats() {
             <Target className="h-5 w-5 text-green-500" />
             <div>
               <p className="text-sm font-medium text-muted-foreground">Best Accuracy</p>
-              <p className="text-2xl font-bold">{(bestAccuracy * 100).toFixed(2)}%</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Best Total Score */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center space-x-2">
-            <Activity className="h-5 w-5 text-purple-500" />
-            <div>
-              <p className="text-sm font-medium text-muted-foreground">
-                Best Total Score
-                <Badge variant="outline" className="ml-1 text-xs">
-                  {optimizationMode}
-                </Badge>
-              </p>
-              <p className="text-2xl font-bold">{(bestTotalScore * 100).toFixed(2)}%</p>
+              <p className="text-2xl font-bold">{formattedStats.bestAccuracy}</p>
             </div>
           </div>
         </CardContent>
@@ -86,15 +84,19 @@ export function SummaryStats() {
           <div className="flex items-center space-x-2">
             <Clock className="h-5 w-5 text-orange-500" />
             <div>
-              <p className="text-sm font-medium text-muted-foreground">Avg. Duration Per Trial</p>
-              <p className="text-2xl font-bold">{formatDuration(avgDurationPerTrial)}</p>
+              <p className="text-sm font-medium text-muted-foreground">Average Score</p>
+              <p className="text-2xl font-bold">{formattedStats.avgScore}</p>
             </div>
           </div>
         </CardContent>
       </Card>
     </div>
   )
-}
+})
+
+SummaryStats.displayName = 'SummaryStats'
+
+export { SummaryStats }
 
 /* 
 IMPLEMENTATION NOTES:

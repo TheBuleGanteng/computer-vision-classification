@@ -24,7 +24,11 @@ from plot_creation.weights_bias import WeightsBiasAnalyzer
 from plot_creation.activation_map import ActivationMapAnalyzer
 
 from dataset_manager import DatasetConfig
-from model_builder import ModelConfig
+from typing import TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from model_builder import ModelConfig
+    from optimizer import OptimizationConfig
 
 
 class PlotGenerator:
@@ -35,16 +39,18 @@ class PlotGenerator:
     visualization reports for model training results.
     """
     
-    def __init__(self, dataset_config: DatasetConfig, model_config: ModelConfig):
+    def __init__(self, dataset_config: DatasetConfig, model_config: 'ModelConfig', optimization_config: Optional['OptimizationConfig'] = None):
         """
         Initialize PlotGenerator with dataset and model configurations
         
         Args:
             dataset_config: Configuration object containing dataset metadata
             model_config: Configuration object containing model parameters
+            optimization_config: Optional optimization configuration containing plot flags
         """
         self.dataset_config = dataset_config
         self.model_config = model_config
+        self.optimization_config = optimization_config
         
         # Detect data type for visualization selection
         self.data_type = self._detect_data_type()
@@ -99,35 +105,39 @@ class PlotGenerator:
             'detailed_predictions': None
         }
         
-        # Generate confusion matrix analysis
-        analysis_results['confusion_matrix'] = self.generate_confusion_matrix(
-            model, data, run_timestamp, plot_dir
-        )
+        # Determine which config to use for plot flags (prefer optimization_config)
+        config_source = self.optimization_config if self.optimization_config else self.model_config
         
-        # Generate training history analysis
-        if training_history:
+        # Generate confusion matrix analysis (if enabled)
+        if getattr(config_source, 'show_confusion_matrix', True):
+            analysis_results['confusion_matrix'] = self.generate_confusion_matrix(
+                model, data, run_timestamp, plot_dir
+            )
+        
+        # Generate training history analysis (if enabled and available)
+        if training_history and getattr(config_source, 'show_training_history', True):
             analysis_results['training_history'] = self.generate_training_history(
                 training_history, model, run_timestamp, plot_dir
             )
         
-        # Generate training animation
-        if training_history:
+        # Generate training animation (if enabled and available)
+        if training_history and getattr(config_source, 'show_training_animation', True):
             analysis_results['training_animation'] = self.generate_training_animation(
                 training_history, model, run_timestamp, plot_dir
             )
         
-        # Generate gradient flow analysis
+        # Generate gradient flow analysis (always enabled for now)
         analysis_results['gradient_flow'] = self.generate_gradient_flow(
             model, data, run_timestamp, plot_dir
         )
         
-        # Generate weights and bias analysis
+        # Generate weights and bias analysis (always enabled for now)
         analysis_results['weights_bias'] = self.generate_weights_bias(
             model, run_timestamp, plot_dir
         )
         
-        # Generate activation maps (CNN only)
-        if self.data_type == "image":
+        # Generate activation maps (if enabled and CNN only)
+        if self.data_type == "image" and getattr(config_source, 'show_activation_maps', True):
             analysis_results['activation_maps'] = self.generate_activation_maps(
                 model, data, run_timestamp, plot_dir
             )
@@ -697,7 +707,6 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
         dataset_name: Name of dataset to test with
     """
     from dataset_manager import DatasetManager
-    from model_builder import ModelConfig
     
     logger.debug(f"running test_plot_generator ... Testing with dataset: {dataset_name}")
     
@@ -705,7 +714,8 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
     dataset_manager = DatasetManager()
     dataset_config = dataset_manager.get_dataset_config(dataset_name)
     
-    # Create model config
+    # Create model config (delayed import to avoid circular dependency)
+    from model_builder import ModelConfig
     model_config = ModelConfig()
     
     # Create plot generator

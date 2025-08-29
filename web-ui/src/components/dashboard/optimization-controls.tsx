@@ -1,10 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectItem } from "@/components/ui/select"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tooltip } from "@/components/ui/tooltip"
+import { apiClient } from "@/lib/api-client"
+import { useDashboard } from "./dashboard-provider"
 import { 
   Play, 
   Square, 
@@ -27,43 +29,274 @@ const DATASETS = [
 
 // Target metric options for optimization
 const TARGET_METRICS = [
-  { value: "health", label: "Accuracy + model health (recommended)" },
-  { value: "simple", label: "Accuracy only" }
+  { value: "Accuracy + model health", label: "Accuracy + model health", mode: "health" },
+  { value: "Accuracy", label: "Accuracy", mode: "simple" }
 ]
 
-// Mock optimization state - in real app this would come from context/state management
-const mockOptimizationState = {
-  isRunning: false,
-  isCompleted: true, // Set to true to show download button enabled
-  selectedDataset: "cifar10",
-  sessionId: "2025-08-20-10:30:15_cifar10_health"
-}
-
 export function OptimizationControls() {
+  const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
+  
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
-  const [isOptimizationRunning, setIsOptimizationRunning] = useState(mockOptimizationState.isRunning)
-  const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(mockOptimizationState.isCompleted)
+  const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
+  const [isModelAvailable, setIsModelAvailable] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
+  const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
-  const handleOptimizationToggle = () => {
-    if (isOptimizationRunning) {
+  // Real-time elapsed time counter
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null
+    
+    if (isOptimizationRunning && optimizationStartTime) {
+      interval = setInterval(() => {
+        const now = Date.now()
+        const elapsedSeconds = Math.floor((now - optimizationStartTime) / 1000)
+        setClientElapsedTime(elapsedSeconds)
+      }, 1000) // Update every second
+    } else {
+      setClientElapsedTime(0)
+    }
+
+    return () => {
+      if (interval) {
+        clearInterval(interval)
+      }
+    }
+  }, [isOptimizationRunning, optimizationStartTime])
+
+  // Sync selectedTargetMetric with shared optimization mode
+  useEffect(() => {
+    if (selectedTargetMetric && selectedTargetMetric !== "") {
+      const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
+      if (targetMetric) {
+        setOptimizationMode(targetMetric.mode as "simple" | "health")
+      }
+    }
+  }, [selectedTargetMetric, setOptimizationMode])
+
+  const handleOptimizationToggle = async () => {
+    if (isOptimizationRunning && currentJobId) {
       // Cancel optimization
-      setIsOptimizationRunning(false)
-      console.log("Cancelling optimization...")
+      try {
+        await apiClient.cancelJob(currentJobId)
+        
+        // Clear polling interval to prevent further updates
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current)
+          pollingIntervalRef.current = null
+        }
+        
+        setIsOptimizationRunning(false)
+        setCurrentJobId(null)
+        setIsModelAvailable(false) // Reset model availability on cancellation
+        setOptimizationStartTime(null) // Clear timer state
+        setClientElapsedTime(0)
+        console.log("Optimization cancelled successfully")
+      } catch (err) {
+        console.error("Failed to cancel optimization:", err)
+        setError(err instanceof Error ? err.message : "Failed to cancel optimization")
+      }
     } else {
       // Start optimization
-      setIsOptimizationRunning(true)
-      setIsOptimizationCompleted(false)
-      console.log(`Starting optimization for dataset: ${selectedDataset}, target metric: ${selectedTargetMetric}`)
-      
-      // Simulate optimization completion after 5 seconds (for demo)
-      setTimeout(() => {
-        setIsOptimizationRunning(false)
-        setIsOptimizationCompleted(true)
-      }, 5000)
+      try {
+        setError(null)
+        
+        const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
+        const mode = targetMetric?.mode as 'simple' | 'health'
+        
+        const request = {
+          // Core parameters
+          dataset_name: selectedDataset,
+          mode: mode
+        }
+        // All other parameters will use API defaults from OptimizationRequest
+
+        console.log(`Starting optimization:`, request)
+        
+        const response = await apiClient.startOptimization(request)
+        
+        setIsOptimizationRunning(true)
+        setIsOptimizationCompleted(false)
+        setIsModelAvailable(false) // Reset model availability for new optimization
+        setCurrentJobId(response.job_id)
+        setOptimizationStartTime(Date.now()) // Record start time for real-time counter
+        
+        console.log(`Optimization started with job ID: ${response.job_id}`)
+        
+        // Start polling for progress updates
+        startProgressPolling(response.job_id)
+        
+      } catch (err) {
+        console.error("Failed to start optimization:", err)
+        const errorMessage = err instanceof Error ? err.message : 
+          (typeof err === 'string' ? err : `Unknown error: ${JSON.stringify(err)}`)
+        setError(errorMessage)
+      }
     }
   }
 
+  const checkModelAvailability = async (jobId: string) => {
+    try {
+      const results = await apiClient.getJobResults(jobId)
+      // Check if the final model has been built and is available for download
+      const hasModelPath = results?.model_result?.model_path
+      setIsModelAvailable(!!hasModelPath)
+      console.log("Model availability check:", hasModelPath ? "Available" : "Not available")
+    } catch (err) {
+      console.error("Failed to check model availability:", err)
+      setIsModelAvailable(false)
+    }
+  }
+
+  const handleDownloadModel = async () => {
+    if (!currentJobId) return
+    
+    try {
+      const downloadUrl = apiClient.getModelDownloadUrl(currentJobId)
+      const defaultFilename = `optimized_model_${currentJobId}.zip`
+      
+      // Try modern File System Access API first (Chrome/Edge)
+      if ('showSaveFilePicker' in window) {
+        try {
+          const fileHandle = await (window as unknown as {showSaveFilePicker: (options: unknown) => Promise<FileSystemFileHandle>}).showSaveFilePicker({
+            suggestedName: defaultFilename,
+            types: [{
+              description: 'ZIP Archive',
+              accept: { 'application/zip': ['.zip'] }
+            }]
+          })
+          
+          // Fetch the file data
+          const response = await fetch(downloadUrl)
+          if (!response.ok) throw new Error(`Download failed: ${response.statusText}`)
+          
+          const blob = await response.blob()
+          const writable = await fileHandle.createWritable()
+          await writable.write(blob)
+          await writable.close()
+          
+          console.log("Model package saved to user-selected location")
+          return
+        } catch (err: unknown) {
+          // User cancelled the save dialog or API not supported
+          if ((err as Error).name === 'AbortError') {
+            console.log("User cancelled save dialog")
+            return
+          }
+          console.log("File System Access API failed, falling back to traditional method")
+        }
+      }
+      
+      // Fallback: Traditional download with "Save As" dialog
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = defaultFilename
+      // Force download dialog by setting these attributes
+      link.style.display = 'none'
+      document.body.appendChild(link)
+      link.click()
+      
+      // Clean up immediately 
+      setTimeout(() => {
+        document.body.removeChild(link)
+      }, 100)
+      
+      console.log("Model package download initiated - save dialog should appear")
+    } catch (err) {
+      console.error("Failed to download model package:", err)
+      setError(err instanceof Error ? err.message : "Failed to download model package")
+    }
+  }
+
+  const startProgressPolling = (jobId: string) => {
+    // Clear any existing polling interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current)
+    }
+    
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await apiClient.getJobStatus(jobId)
+        console.log(`Polling update for job ${jobId}:`, status.progress)
+        
+        // Force state update by creating new object to ensure React re-renders
+        if (status.progress) {
+          setProgress({...status.progress})
+        }
+        
+        if (status.status === 'completed') {
+          setIsOptimizationRunning(false)
+          setIsOptimizationCompleted(true)
+          // Keep currentJobId for 3D visualization access - don't set to null
+          setOptimizationStartTime(null) // Clear timer state
+          
+          // Check if final optimized model is available for download
+          checkModelAvailability(jobId)
+          
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
+          console.log("Optimization completed successfully")
+        } else if (status.status === 'failed' || status.status === 'cancelled') {
+          setIsOptimizationRunning(false)
+          setCurrentJobId(null)
+          setIsModelAvailable(false) // Reset model availability on failure/cancellation
+          setProgress(null) // Reset progress data to clear UI statistics
+          setOptimizationStartTime(null) // Clear timer state
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
+          if (status.error) {
+            setError(status.error)
+          }
+          console.log(`Optimization ${status.status}`)
+        }
+      } catch (err) {
+        console.error("Failed to poll job status:", err)
+        
+        // If job is not found (e.g., server restarted), stop polling and reset state
+        if (err instanceof Error && err.message.includes('not found')) {
+          console.log("Job not found - likely server restarted. Stopping optimization state.")
+          setIsOptimizationRunning(false)
+          setIsOptimizationCompleted(false)
+          setCurrentJobId(null)
+          setIsModelAvailable(false) // Reset model availability on server restart
+          setProgress(null)
+          setOptimizationStartTime(null) // Clear timer state
+          setError("Optimization was interrupted (server restarted). Please start a new optimization.")
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
+        }
+        // Don't clear interval on other polling errors - backend might be temporarily unavailable
+      }
+    }, 2000) // Poll every 2 seconds
+    
+    // Store the interval reference
+    pollingIntervalRef.current = pollInterval
+
+    // Cleanup polling on component unmount or job completion
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+  }
+
+  // Helper function to format elapsed time and choose appropriate time source
+  const formatElapsedTime = () => {
+    // Use real-time client elapsed time when optimization is running, otherwise use server time
+    const timeToUse = isOptimizationRunning ? clientElapsedTime : (progress?.elapsed_time || 0)
+    const minutes = Math.floor(timeToUse / 60)
+    const seconds = Math.round(timeToUse % 60)
+    return `${minutes}m ${seconds}s`
+  }
 
   return (
     <Card>
@@ -164,15 +397,93 @@ export function OptimizationControls() {
                 </>
               )}
             </Button>
+
+            {/* Download Optimized Model Button */}
+            <Button
+              onClick={handleDownloadModel}
+              disabled={!isModelAvailable || !currentJobId}
+              className="min-w-[180px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
+              title={
+                !isModelAvailable 
+                  ? "Model package will be available after optimization completes and final model is built"
+                  : "Download ZIP archive containing .keras model file, hyperparameters metadata, and usage guide"
+              }
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Download Model
+            </Button>
           </div>
         </div>
 
         {/* Status Indicator */}
+        {error && (
+          <div className="mt-4 flex items-center gap-2 text-sm text-red-600 bg-red-50 p-3 rounded-md">
+            <div className="w-2 h-2 bg-red-600 rounded-full" />
+            <span>Error: {error}</span>
+          </div>
+        )}
+        
         {isOptimizationRunning && (
-          <div className="mt-4 flex items-center gap-2 text-sm text-blue-600">
-            <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse" />
-            Optimization in progress for {DATASETS.find(d => d.value === selectedDataset)?.label} 
-            using {TARGET_METRICS.find(m => m.value === selectedTargetMetric)?.label.toLowerCase()}...
+          <div className="mt-4 space-y-2">
+            <div className="flex items-center gap-2 text-sm text-blue-600">
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse" />
+              Optimization in progress for {DATASETS.find(d => d.value === selectedDataset)?.label}{" "} 
+              using {selectedTargetMetric.toLowerCase()}...
+            </div>
+            
+            {progress && (
+              <div className="text-xs text-gray-600 space-y-1">
+                <div>
+                  <span>Progress: </span>
+                </div>
+                <div className="pl-2 space-y-1">
+                  <div>
+                    <span>Trials: </span>
+                    <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20}</span>
+                  </div>
+                  {progress.current_epoch !== undefined && progress.total_epochs !== undefined && (
+                    <div>
+                      <span>Epoch: </span>
+                      <span className="font-medium">{progress.current_epoch}/{progress.total_epochs}</span>
+                      {progress.epoch_progress !== undefined && (
+                        <div className="ml-2 mt-1">
+                          <div className="w-32 bg-gray-200 rounded-full h-1.5">
+                            <div 
+                              className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
+                              style={{width: `${Math.max(0, Math.min(100, (progress.epoch_progress || 0) * 100))}%`}}
+                            ></div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {progress.best_total_score !== null && progress.best_total_score !== undefined && (
+                  <div>
+                    <span>Best total score {selectedTargetMetric === 'Accuracy + model health' ? 'accuracy + model health' : 'accuracy'}: </span>
+                    <span className="font-medium">{(progress.best_total_score * 100).toFixed(1)}%</span>
+                  </div>
+                )}
+                {(isOptimizationRunning || progress?.elapsed_time) && (
+                  <div>
+                    <span>Elapsed time: </span>
+                    <span className="font-medium">{formatElapsedTime()}</span>
+                  </div>
+                )}
+                {progress.status_message && (
+                  <div className="text-xs text-gray-500 italic">
+                    {progress.status_message}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        
+        {isOptimizationCompleted && (
+          <div className="mt-4 flex items-center gap-2 text-sm text-green-600 bg-green-50 p-3 rounded-md">
+            <div className="w-2 h-2 bg-green-600 rounded-full" />
+            <span>Optimization completed successfully! Results are available in the dashboard.</span>
           </div>
         )}
       </CardContent>

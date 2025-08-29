@@ -167,6 +167,38 @@ class TrainingAnimationAnalyzer:
             logger.debug(f"running analyze_and_animate ... Error traceback: {traceback.format_exc()}")
             return {'error': str(e)}
     
+    def _get_accuracy_keys(self, training_history: Dict[str, List[float]]) -> tuple[str, str]:
+        """
+        Detect the correct accuracy metric keys in training history.
+        
+        Args:
+            training_history: Dictionary containing training metrics
+            
+        Returns:
+            Tuple of (accuracy_key, val_accuracy_key) or (None, None) if not found
+        """
+        # Check for different accuracy metric names
+        accuracy_candidates = ['accuracy', 'categorical_accuracy', 'sparse_categorical_accuracy']
+        val_accuracy_candidates = ['val_accuracy', 'val_categorical_accuracy', 'val_sparse_categorical_accuracy']
+        
+        accuracy_key = None
+        val_accuracy_key = None
+        
+        # Find training accuracy key
+        for key in accuracy_candidates:
+            if key in training_history:
+                accuracy_key = key
+                break
+                
+        # Find validation accuracy key  
+        for key in val_accuracy_candidates:
+            if key in training_history:
+                val_accuracy_key = key
+                break
+        
+        logger.debug(f"running _get_accuracy_keys ... Found accuracy_key: {accuracy_key}, val_accuracy_key: {val_accuracy_key}")
+        return accuracy_key, val_accuracy_key
+    
     def _analyze_training_patterns(self, training_history: Dict[str, List[float]]) -> Dict[str, Any]:
         """
         Analyze training patterns to identify interesting moments for animation emphasis
@@ -179,6 +211,9 @@ class TrainingAnimationAnalyzer:
         """
         logger.debug("running _analyze_training_patterns ... Analyzing training patterns for animation highlights")
         
+        # Get correct metric keys
+        accuracy_key, val_accuracy_key = self._get_accuracy_keys(training_history)
+        
         insights = []
         final_metrics = {}
         interesting_epochs = []  # Epochs to highlight in animation
@@ -190,14 +225,14 @@ class TrainingAnimationAnalyzer:
         if 'loss' in training_history:
             final_metrics['final_loss'] = training_history['loss'][-1]
             
-        if 'accuracy' in training_history:
-            final_metrics['final_accuracy'] = training_history['accuracy'][-1]
+        if accuracy_key and accuracy_key in training_history:
+            final_metrics['final_accuracy'] = training_history[accuracy_key][-1]
             
         if 'val_loss' in training_history:
             final_metrics['final_val_loss'] = training_history['val_loss'][-1]
             
-        if 'val_accuracy' in training_history:
-            final_metrics['final_val_accuracy'] = training_history['val_accuracy'][-1]
+        if val_accuracy_key and val_accuracy_key in training_history:
+            final_metrics['final_val_accuracy'] = training_history[val_accuracy_key][-1]
         
         # Find interesting training moments
         if len(losses) >= 3:
@@ -433,6 +468,9 @@ class TrainingAnimationAnalyzer:
         current_epoch_count = epoch_progression[frame]
         current_epochs = epochs[:current_epoch_count]
         
+        # Get correct metric keys
+        accuracy_key, val_accuracy_key = self._get_accuracy_keys(training_history)
+        
         # Plot training loss
         current_train_loss = training_history['loss'][:current_epoch_count]
         line1, = ax1.plot(current_epochs, current_train_loss, 'b-', linewidth=3, label='Training Loss', alpha=0.8)
@@ -444,14 +482,15 @@ class TrainingAnimationAnalyzer:
             ax1.legend()
         
         # Plot training accuracy
-        current_train_acc = training_history['accuracy'][:current_epoch_count]
-        line3, = ax2.plot(current_epochs, current_train_acc, 'b-', linewidth=3, label='Training Accuracy', alpha=0.8)
+        if accuracy_key and accuracy_key in training_history:
+            current_train_acc = training_history[accuracy_key][:current_epoch_count]
+            line3, = ax2.plot(current_epochs, current_train_acc, 'b-', linewidth=3, label='Training Accuracy', alpha=0.8)
         
-        # Plot validation accuracy if available
-        if 'val_accuracy' in training_history:
-            current_val_acc = training_history['val_accuracy'][:current_epoch_count]
-            line4, = ax2.plot(current_epochs, current_val_acc, 'r-', linewidth=3, label='Validation Accuracy', alpha=0.8)
-            ax2.legend()
+            # Plot validation accuracy if available
+            if val_accuracy_key and val_accuracy_key in training_history:
+                current_val_acc = training_history[val_accuracy_key][:current_epoch_count]
+                line4, = ax2.plot(current_epochs, current_val_acc, 'r-', linewidth=3, label='Validation Accuracy', alpha=0.8)
+                ax2.legend()
         
         # Add current epoch indicator
         if current_epoch_count > 0:
@@ -463,13 +502,19 @@ class TrainingAnimationAnalyzer:
             
             # Add current metrics
             current_loss = training_history['loss'][current_epoch_count-1]
-            current_acc = training_history['accuracy'][current_epoch_count-1]
+            metrics_text = f'Loss: {current_loss:.3f}'
             
-            metrics_text = f'Loss: {current_loss:.3f}\nAcc: {current_acc:.3f}'
+            if accuracy_key and accuracy_key in training_history:
+                current_acc = training_history[accuracy_key][current_epoch_count-1]
+                metrics_text += f'\nAcc: {current_acc:.3f}'
+            
             if 'val_loss' in training_history and current_epoch_count <= len(training_history['val_loss']):
                 val_loss = training_history['val_loss'][current_epoch_count-1]
-                val_acc = training_history['val_accuracy'][current_epoch_count-1]
-                metrics_text += f'\nVal Loss: {val_loss:.3f}\nVal Acc: {val_acc:.3f}'
+                metrics_text += f'\nVal Loss: {val_loss:.3f}'
+                
+                if val_accuracy_key and val_accuracy_key in training_history:
+                    val_acc = training_history[val_accuracy_key][current_epoch_count-1]
+                    metrics_text += f'\nVal Acc: {val_acc:.3f}'
             
             ax2.text(0.02, 0.98, metrics_text,
                     transform=ax2.transAxes, fontsize=10, fontweight='bold',

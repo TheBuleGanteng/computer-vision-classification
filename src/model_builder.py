@@ -30,6 +30,9 @@ import datetime
 from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
 from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
 from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
+from plot_creation.training_history import TrainingHistoryAnalyzer
+from plot_creation.weights_bias import WeightsBiasAnalyzer
+from plot_creation.gradient_flow import GradientFlowAnalyzer
 #from gpu_proxy_code import get_gpu_proxy_training_code
 
 from dataclasses import dataclass, field
@@ -45,13 +48,14 @@ import sys
 import tensorflow as tf
 from tensorflow import keras # type: ignore
 import traceback
-from typing import Dict, Any, List, Tuple, Optional, Union
+from typing import Dict, Any, List, Tuple, Optional, Union, TYPE_CHECKING
 from utils.logger import logger, PerformanceLogger, TimedOperation
 
+if TYPE_CHECKING:
+    from optimizer import OptimizationConfig
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Any, List, Tuple, Optional, Union
 
 # Move PaddingOption outside the class to avoid issues
 class PaddingOption(Enum):
@@ -61,7 +65,39 @@ class PaddingOption(Enum):
 @dataclass
 class ModelConfig:
     """
-    Optimized configuration for model architecture with enhanced GPU proxy support
+    Model architecture configuration with dual-purpose default system.
+    
+    This class serves two distinct roles:
+    
+    **1. Hyperparameter Optimization (Primary Use)**
+    During optimization, ModelOptimizer creates an empty ModelConfig() and dynamically 
+    populates it with Optuna-suggested parameters:
+    
+        model_config = ModelConfig()  # Uses defaults initially
+        for key, value in optuna_params.items():
+            if hasattr(model_config, key):
+                setattr(model_config, key, value)  # Overrides defaults
+    
+    **2. Standalone/Testing/Development Usage**
+    When used without optimization, the dataclass defaults provide sensible 
+    fallback values that create working models:
+    
+        model_config = ModelConfig()  # Uses all defaults
+        # Creates a basic CNN: 2 conv layers, 32 filters, 3x3 kernels, no global pooling
+    
+    **Default Override Pattern:**
+    - num_layers_conv: int = 2              → Default used in testing/standalone
+    - kernel_size: Tuple[int, int] = (3, 3) → Overridden by Optuna during optimization
+    - use_global_pooling: bool = False      → Randomly True/False via Optuna trials
+    
+    **Key Design Principles:**
+    - Defaults are conservative and stable (work for most architectures)
+    - All defaults can be overridden by Optuna suggestions
+    - Parameters not suggested by Optuna retain their default values
+    - Supports both CNN and LSTM architectures with appropriate defaults
+    
+    This dual-purpose design enables the same class to serve both optimized 
+    hyperparameter tuning and standalone model development workflows.
     """
     
     # Architecture selection
@@ -202,12 +238,24 @@ class ModelBuilder:
     - Better logging and performance monitoring
     """
     
-    def __init__(self, dataset_config: DatasetConfig, model_config: Optional[ModelConfig] = None) -> None:
+    def __init__(self, dataset_config: DatasetConfig, model_config: Optional[ModelConfig] = None, trial_number: Optional[int] = None, run_timestamp: Optional[str] = None, results_dir: Optional[Path] = None, optimization_config: Optional['OptimizationConfig'] = None) -> None:
         """
         Initialize ModelBuilder with enhanced configuration and GPU proxy setup
+        
+        Args:
+            dataset_config: Configuration for dataset handling
+            model_config: Configuration for model parameters
+            trial_number: Optional trial number for TensorBoard logging
+            run_timestamp: Optional timestamp for namespacing TensorBoard logs
+            results_dir: Optional path to optimization results directory for TensorBoard logs
+            optimization_config: Optional optimization configuration for plot generation flags
         """
         self.dataset_config: DatasetConfig = dataset_config
         self.model_config: ModelConfig = model_config or ModelConfig()
+        self.trial_number: Optional[int] = trial_number
+        self.run_timestamp: Optional[str] = run_timestamp
+        self.results_dir: Optional[Path] = results_dir
+        self.optimization_config: Optional['OptimizationConfig'] = optimization_config
         self.model: Optional[keras.Model] = None
         self.training_history: Optional[keras.callbacks.History] = None
         
@@ -1436,7 +1484,7 @@ class ModelBuilder:
         """
         Optimized local training execution with PROPER multi-GPU implementation
         """
-        logger.debug("running _train_locally_optimized ... Starting optimized local training with proper multi-GPU support")
+        logger.debug("running _train_locally_optimized ... Starting optimized local training")
         
         # Log performance information
         self.perf_logger.log_data_info(
@@ -1598,17 +1646,194 @@ class ModelBuilder:
         if self.training_history is None:
             raise RuntimeError("Training failed - no history returned")
         
+        # Generate training visualization plots after successful training
+        self._generate_training_plots(training_data, validation_data)
+        
         return self.training_history
 
     def _setup_training_callbacks_optimized(self) -> List[keras.callbacks.Callback]:
-        """Setup optimized training callbacks"""
+        """Setup optimized training callbacks including TensorBoard"""
         callbacks_list = []
+        
+        # TensorBoard logging for trial metrics and visualization
+        if self.trial_number is not None:
+            # Use results_dir if provided (optimizer integration), otherwise fall back to project root
+            if self.results_dir:
+                # Place TensorBoard logs inside the optimization results directory
+                log_dir = self.results_dir / "tensorboard_logs" / f"trial_{self.trial_number}"
+            else:
+                # Fallback to project root with namespaced directory structure
+                project_root = Path(__file__).resolve().parent.parent
+                if self.run_timestamp:
+                    # Clean dataset name for directory naming
+                    dataset_name_clean = self.dataset_config.name.replace('-', '_').replace(' ', '_').lower()
+                    run_dir = f"{self.run_timestamp}_{dataset_name_clean}"
+                    log_dir = project_root / f"tensorboard_logs/{run_dir}/trial_{self.trial_number}"
+                else:
+                    # Fallback to old naming if no timestamp provided
+                    log_dir = project_root / f"tensorboard_logs/trial_{self.trial_number}"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Add TensorBoard callback for comprehensive logging
+            tensorboard_callback = keras.callbacks.TensorBoard(
+                log_dir=str(log_dir),
+                histogram_freq=1,  # Log weight histograms every epoch
+                write_graph=True,  # Log model architecture
+                write_images=True,  # Log model weights as images
+                update_freq='epoch',  # Update logs every epoch
+                profile_batch=0,  # Disable profiling for performance
+                embeddings_freq=0  # Disable embeddings logging
+            )
+            callbacks_list.append(tensorboard_callback)
+            
+            # Add custom health metrics callback for TensorBoard integration
+            health_callback = self._create_health_metrics_callback(log_dir)
+            callbacks_list.append(health_callback)
+            
+            logger.debug(f"TensorBoard logging enabled for trial {self.trial_number} at {log_dir}")
         
         # REMOVED: Real-time visualization callbacks setup
         # These would require plot_dir which is no longer maintained by ModelBuilder
         # Real-time callbacks can be added by the orchestrator if needed
         
         return callbacks_list
+
+    def _create_health_metrics_callback(self, log_dir: Path) -> keras.callbacks.Callback:
+        """Create custom callback for logging health metrics to TensorBoard"""
+        
+        class HealthMetricsCallback(keras.callbacks.Callback):
+            def __init__(self, log_dir: Path, health_analyzer):
+                super().__init__()
+                self.log_dir = log_dir
+                self.health_analyzer = health_analyzer
+                self.writer = tf.summary.create_file_writer(str(log_dir / "health_metrics"))
+                
+            def on_epoch_end(self, epoch, logs=None):
+                """Log health metrics to TensorBoard at the end of each epoch"""
+                logs = logs or {}
+                
+                # Extract basic metrics from training logs
+                train_loss = logs.get('loss', 0.0)
+                train_acc = logs.get('accuracy', 0.0)
+                val_loss = logs.get('val_loss', 0.0)
+                val_acc = logs.get('val_accuracy', 0.0)
+                
+                # Log custom health metrics
+                with self.writer.as_default():
+                    # Training stability metrics
+                    tf.summary.scalar('health/training_stability', 
+                                    1.0 - min(abs(train_loss - val_loss), 1.0), step=epoch)
+                    
+                    # Accuracy consistency
+                    tf.summary.scalar('health/accuracy_consistency', 
+                                    1.0 - min(abs(train_acc - val_acc), 1.0), step=epoch)
+                    
+                    # Overfitting indicator (higher is worse)
+                    overfitting_score = max(0.0, (train_acc - val_acc) / max(train_acc, 0.01))
+                    tf.summary.scalar('health/overfitting_risk', overfitting_score, step=epoch)
+                    
+                    # Learning progress (improvement rate)
+                    if epoch > 0:
+                        prev_loss = getattr(self, '_prev_val_loss', val_loss)
+                        improvement = max(0.0, (prev_loss - val_loss) / max(prev_loss, 0.01))
+                        tf.summary.scalar('health/learning_progress', improvement, step=epoch)
+                    
+                    self._prev_val_loss = val_loss
+                    self.writer.flush()
+        
+        return HealthMetricsCallback(log_dir, self.health_analyzer)
+
+    def _generate_training_plots(self, training_data: Tuple[np.ndarray, np.ndarray], validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None) -> None:
+        """
+        Generate comprehensive training visualization plots after training completion
+        
+        Uses PlotGenerator to create all available plot types based on optimization flags:
+        - Training history: Loss/accuracy curves with overfitting detection
+        - Activation maps: CNN layer activations and filter visualizations (image data only)
+        - Confusion matrix: Classification accuracy and error analysis
+        - Training animation: Animated training progress visualization
+        - Weights & biases: Parameter health and distribution analysis
+        - Gradient flow: Dead neuron detection and gradient health
+        
+        Args:
+            training_data: Tuple of (X_train, y_train) data
+            validation_data: Optional tuple of (X_val, y_val) data
+        """
+        if not self.model or not self.training_history:
+            logger.warning("running _generate_training_plots ... No model or training history available, skipping plot generation")
+            return
+            
+        try:
+            # Determine plot output directory
+            if self.results_dir:
+                # Use results directory if provided (optimizer integration)
+                plot_dir = self.results_dir / "plots" / f"trial_{self.trial_number or 0}"
+            else:
+                # Fallback to project root structure
+                project_root = Path(__file__).resolve().parent.parent
+                if self.run_timestamp:
+                    dataset_name_clean = self.dataset_config.name.replace('-', '_').replace(' ', '_').lower()
+                    run_dir = f"{self.run_timestamp}_{dataset_name_clean}"
+                    plot_dir = project_root / f"plots/{run_dir}/trial_{self.trial_number or 0}"
+                else:
+                    plot_dir = project_root / f"plots/trial_{self.trial_number or 0}"
+            
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"running _generate_training_plots ... Created plot directory: {plot_dir}")
+            
+            # Prepare test data for comprehensive plot generation
+            if validation_data is not None:
+                test_data = {'x_test': validation_data[0], 'y_test': validation_data[1]}
+                test_loss, test_accuracy = self.model.evaluate(validation_data[0], validation_data[1], verbose=0)
+            else:
+                # Use a sample from training data as test data
+                sample_size = min(1000, len(training_data[0]))
+                test_data = {'x_test': training_data[0][:sample_size], 'y_test': training_data[1][:sample_size]}
+                test_loss, test_accuracy = self.model.evaluate(test_data['x_test'], test_data['y_test'], verbose=0)
+            
+            # Use comprehensive PlotGenerator (delayed import to avoid circular dependency)
+            from plot_generator import PlotGenerator
+            
+            # Create optimization config with plot flags (if not available, all plots enabled by default)
+            optimization_config = None
+            if hasattr(self, 'optimization_config'):
+                optimization_config = self.optimization_config
+            
+            plot_generator = PlotGenerator(
+                dataset_config=self.dataset_config,
+                model_config=self.model_config,
+                optimization_config=optimization_config
+            )
+            
+            logger.debug("running _generate_training_plots ... Generating comprehensive plots using PlotGenerator...")
+            analysis_results = plot_generator.generate_comprehensive_plots(
+                model=self.model,
+                training_history=self.training_history,
+                data=test_data,
+                test_loss=test_loss,
+                test_accuracy=test_accuracy,
+                run_timestamp=self.run_timestamp or datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
+                plot_dir=plot_dir,
+                log_detailed_predictions=True,
+                max_predictions_to_show=20
+            )
+            
+            # Log which plot types were generated
+            generated_plots = []
+            for plot_type, result in analysis_results.items():
+                if result and not result.get('error'):
+                    generated_plots.append(plot_type)
+            
+            if generated_plots:
+                logger.info(f"running _generate_training_plots ... Generated plots: {', '.join(generated_plots)}")
+            else:
+                logger.warning("running _generate_training_plots ... No plots were generated successfully")
+            
+            logger.info(f"running _generate_training_plots ... Successfully generated training plots in: {plot_dir}")
+            
+        except Exception as e:
+            logger.error(f"running _generate_training_plots ... Failed to generate plots: {str(e)}")
+            logger.debug(f"running _generate_training_plots ... Plot generation traceback: {traceback.format_exc()}")
 
     def evaluate(
         self, 
@@ -1731,9 +1956,13 @@ class ModelBuilder:
             # Use run_name as base for consistency
             filename = f"{run_name}_{accuracy_str}_model.keras"
         else:
+            # Create the run_name based on the timestamp + dataset used + optimization mode
+            run_name = f"{run_timestamp}_{dataset_name_clean}_{accuracy_str}"
+            
             # Fallback to timestamp-based naming
-            filename = f"{run_timestamp}_{dataset_name_clean}_{accuracy_str}_model.keras"
+            filename = f"{run_name}_model.keras"
         
+        logger.debug(f"running _generate_optimized_filename ... run_name is: {run_name}")
         logger.debug(f"running _generate_optimized_filename ... generated filename: {filename}")
         return filename
     
@@ -2069,8 +2298,8 @@ def _handle_model_loading_refactored(
     if not model_file.exists():
         raise FileNotFoundError(f"Model file not found: {load_model_path}")
     
-    # Create ModelBuilder
-    builder = ModelBuilder(dataset_config)
+    # Create ModelBuilder with timestamp for TensorBoard logging
+    builder = ModelBuilder(dataset_config, None, None, run_timestamp)
     
     with TimedOperation("model loading", "refactored_model_builder"):
         builder.model = keras.models.load_model(load_model_path)
@@ -2130,8 +2359,8 @@ def _handle_model_training_refactored(
             else:
                 logger.warning(f"running _handle_model_training_refactored ... Unknown config parameter: {key}")
     
-    # Create ModelBuilder
-    builder = ModelBuilder(dataset_config, model_config)
+    # Create ModelBuilder with timestamp for TensorBoard logging
+    builder = ModelBuilder(dataset_config, model_config, None, run_timestamp)
     
     # Training pipeline without plot generation
     with TimedOperation("refactored model training pipeline", "refactored_model_builder"):
