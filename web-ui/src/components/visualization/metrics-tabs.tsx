@@ -104,6 +104,12 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
       label: 'Activation Summary',
       icon: <Brain className="w-4 h-4" />,
       description: 'Activation pattern summary and analysis'
+    },
+    {
+      id: 'activation_progression',
+      label: 'Activation Progression',
+      icon: <TrendingUp className="w-4 h-4" />,
+      description: 'Layer-by-layer activation progression analysis'
     }
   ];
 

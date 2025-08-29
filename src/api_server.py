@@ -2828,7 +2828,8 @@ Job ID: {job_id}
                 "dead_neuron_analysis": ["*dead_neuron*"],
                 "gradient_distributions": ["gradient_distributions*"],
                 "training_progress": ["training_progress*"],
-                "activation_maps": ["activation_maps*", "activation_comparison*", "activation_progression*"],
+                "activation_maps": ["activation_maps*", "activation_comparison*"],
+                "activation_progression": ["activation_progression*"],
                 "activation_summary": ["activation_summary*"],
                 "confusion_matrix": ["confusion_matrix*"],
                 "training_animation": ["training_animation*"]
@@ -2909,7 +2910,8 @@ Job ID: {job_id}
                 "dead_neuron_analysis": ["*dead_neuron*"],
                 "gradient_distributions": ["gradient_distributions*"],
                 "training_progress": ["training_progress*"],
-                "activation_maps": ["activation_maps*", "activation_comparison*", "activation_progression*"],
+                "activation_maps": ["activation_maps*", "activation_comparison*"],
+                "activation_progression": ["activation_progression*"],
                 "activation_summary": ["activation_summary*"],
                 "confusion_matrix": ["confusion_matrix*"],
                 "training_animation": ["training_animation*"]
