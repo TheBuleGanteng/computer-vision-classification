@@ -5,11 +5,35 @@ import React, { useEffect, useRef, useImperativeHandle } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
-import elk from 'cytoscape-elk';
 
-// Register layouts
+// Register Dagre layout (always available)
 cytoscape.use(dagre);
-cytoscape.use(elk);
+
+// Dynamically load and register ELK with error handling
+let elkAvailable = false;
+let elkLoadPromise: Promise<boolean> | null = null;
+
+const loadELK = async (): Promise<boolean> => {
+  if (elkLoadPromise) {
+    return elkLoadPromise;
+  }
+  
+  elkLoadPromise = (async () => {
+    try {
+      const elk = await import('cytoscape-elk');
+      cytoscape.use(elk.default || elk);
+      elkAvailable = true;
+      console.log('ELK layout loaded successfully');
+      return true;
+    } catch (error) {
+      console.warn('ELK layout failed to load, using Dagre fallback:', error);
+      elkAvailable = false;
+      return false;
+    }
+  })();
+  
+  return elkLoadPromise;
+};
 
 interface LayerData {
   id: string;
@@ -498,8 +522,8 @@ export const ModelGraph = React.forwardRef<
     }
   }, [nodeCount, hasMultipleDense, optimalLayout, architectureData?.nodes]);
 
-  // Choose layout configuration based on model complexity
-  const layout = optimalLayout.useMultiRow ? {
+  // Choose layout configuration based on model complexity and ELK availability
+  const layout = (optimalLayout.useMultiRow && elkAvailable) ? {
     name: 'elk',
     elk: {
       'algorithm': 'layered',
@@ -575,6 +599,19 @@ export const ModelGraph = React.forwardRef<
       container.style.cursor = 'default';
     }
   };
+
+  // Load ELK dynamically when component mounts (if needed for multi-row layouts)
+  useEffect(() => {
+    if (optimalLayout.useMultiRow && !elkAvailable) {
+      loadELK().then((loaded) => {
+        if (loaded && cyRef.current && architectureData) {
+          // Trigger layout refresh if ELK just became available
+          const event = new CustomEvent('elk-loaded');
+          window.dispatchEvent(event);
+        }
+      });
+    }
+  }, [optimalLayout.useMultiRow, architectureData]);
 
   // Cleanup effect for component unmounting
   useEffect(() => {
