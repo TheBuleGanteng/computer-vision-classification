@@ -1,10 +1,12 @@
 "use client"
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useMemo, Suspense } from 'react';
 import { Activity, Zap, Brain, Target, Skull, TrendingUp, LineChart, Network, Download, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import TensorBoardPanel from './tensorboard-panel';
-import ModelGraph from './model-graph';
+
+// Lazy load the heavy ModelGraph component to prevent blocking renders
+const ModelGraph = React.lazy(() => import('./model-graph'));
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import FullscreenPopup from './fullscreen-popup';
@@ -46,6 +48,21 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   const [activeTab, setActiveTab] = useState<string>('model_architecture');
   const [showArchitecturePopup, setShowArchitecturePopup] = useState(false);
   const tabModelGraphRef = useRef<{ exportToPNG: () => Promise<Blob | null> } | null>(null);
+  const lastRenderTime = useRef<number>(0);
+  
+  // Throttle heavy renders to prevent setTimeout violations
+  const shouldRender = useMemo(() => {
+    const now = Date.now();
+    const timeSinceLastRender = now - lastRenderTime.current;
+    const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+    const minRenderInterval = isMobile ? 500 : 250; // Throttle more aggressively on mobile
+    
+    if (timeSinceLastRender >= minRenderInterval) {
+      lastRenderTime.current = now;
+      return true;
+    }
+    return false;
+  }, [jobId, trialId, activeTab]);
   
   // Download function for Model Architecture tab using Save As dialog
   const downloadArchitecturePNG = useCallback(async () => {
@@ -221,19 +238,22 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   return (
     <div className={`h-full flex flex-col ${className}`}>
       {/* Tab Headers */}
-      <div className="flex flex-wrap justify-center gap-0 bg-gray-800 border-b border-gray-600 pt-2 px-0">
+      <div className="flex flex-wrap justify-start sm:justify-center gap-1 sm:gap-0 bg-gray-800 border-b border-gray-600 pt-2 px-2 sm:px-0 overflow-x-visible scrollbar-hide">
         {tabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-1 px-2 py-1 text-xs font-medium transition-all duration-200 whitespace-nowrap relative
+            className={`flex items-center gap-1 px-2 sm:px-3 py-1 text-xs font-medium transition-all duration-200 relative
               ${activeTab === tab.id
                 ? 'text-blue-300 bg-gray-900 border-t-2 border-l border-r border-blue-400 border-b-0 rounded-t-md -mb-px z-10'
                 : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50 border border-gray-500 rounded-t-md'
               }`}
           >
             {tab.icon}
-            <span>{tab.label}</span>
+            <span className="hidden sm:inline">{tab.label}</span>
+            <span className="sm:hidden text-xs truncate max-w-16" title={tab.label}>
+              {tab.label.split(' ')[0]}
+            </span>
           </button>
         ))}
       </div>
@@ -299,12 +319,27 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
                   </div>
                 ) : (
                   <div className="h-full w-full group relative">
-                    <ModelGraph
-                      architectureData={architectureData}
-                      className="h-full"
-                      showLegend={false}
-                      ref={tabModelGraphRef}
-                    />
+                    {shouldRender ? (
+                      <Suspense fallback={
+                        <div className="h-full w-full flex items-center justify-center bg-gray-50">
+                          <div className="text-center">
+                            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                            <div className="text-gray-400 text-sm">Loading model...</div>
+                          </div>
+                        </div>
+                      }>
+                        <ModelGraph
+                          architectureData={architectureData}
+                          className="h-full"
+                          showLegend={false}
+                          ref={tabModelGraphRef}
+                        />
+                      </Suspense>
+                    ) : (
+                      <div className="h-full w-full flex items-center justify-center bg-gray-50">
+                        <div className="text-gray-400 text-sm">Rendering...</div>
+                      </div>
+                    )}
                     {/* Expand icon in top-right corner */}
                     <button
                       onClick={(e) => {
@@ -347,11 +382,26 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
         <div className="h-[80vh] p-4">
           {architectureData ? (
             <div className="h-full w-full group relative">
-              <ModelGraph
-                architectureData={architectureData}
-                className="h-full"
-                showLegend={false}
-              />
+              {shouldRender ? (
+                <Suspense fallback={
+                  <div className="h-full w-full flex items-center justify-center bg-gray-50">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                      <div className="text-gray-400">Loading architecture...</div>
+                    </div>
+                  </div>
+                }>
+                  <ModelGraph
+                    architectureData={architectureData}
+                    className="h-full"
+                    showLegend={false}
+                  />
+                </Suspense>
+              ) : (
+                <div className="h-full w-full flex items-center justify-center bg-gray-50">
+                  <div className="text-gray-400">Rendering architecture...</div>
+                </div>
+              )}
               {/* Minimize icon in top-right corner */}
               <button
                 onClick={(e) => {

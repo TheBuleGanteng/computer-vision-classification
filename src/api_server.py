@@ -1373,6 +1373,11 @@ class OptimizationAPI:
             """Get status and progress of an optimization job"""
             return await self._get_job_status(job_id)
         
+        @self.app.get("/jobs/{job_id}/comprehensive")
+        async def get_comprehensive_status(job_id: str):
+            """Get comprehensive status combining job progress, trials, and elapsed time"""
+            return await self._get_comprehensive_status(job_id)
+        
         @self.app.get("/jobs")
         async def list_jobs():
             """List all optimization jobs"""
@@ -1645,6 +1650,62 @@ class OptimizationAPI:
                             f"Failed to enhance job status with optimization results: {e}")
         
         return job_status
+    
+    async def _get_comprehensive_status(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get comprehensive status combining job progress, trials, and elapsed time
+        
+        This unified endpoint eliminates the need for multiple polling requests
+        by combining data from job status, trial history, and elapsed time calculation.
+        
+        Args:
+            job_id: Unique job identifier
+            
+        Returns:
+            Dictionary containing:
+            - job_status: Current job status and progress
+            - trials: Complete trial history
+            - elapsed_seconds: Server-calculated elapsed time
+            - is_complete: Boolean indicating if optimization finished
+            
+        Raises:
+            HTTPException: If job not found
+        """
+        if job_id not in self.jobs:
+            logger.error(f"running OptimizationAPI._get_comprehensive_status ... Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        job = self.jobs[job_id]
+        
+        # Get job status (reuse existing method logic)
+        job_status = job.get_status()
+        
+        # Calculate elapsed time on server side
+        elapsed_seconds = 0
+        if job.started_at:
+            start_time = datetime.fromisoformat(job.started_at.replace('Z', '+00:00'))
+            elapsed_seconds = int((datetime.now() - start_time).total_seconds())
+        
+        # Get trial history (reuse existing method logic)
+        trial_history = []
+        if hasattr(job, 'optimizer') and job.optimizer:
+            trial_history = job.get_trial_history()
+        
+        # Determine completion status
+        is_complete = job_status.status in ['completed', 'failed', 'cancelled']
+        
+        return {
+            "job_id": job_id,
+            "job_status": job_status.dict(),
+            "trials": trial_history,
+            "elapsed_seconds": elapsed_seconds,
+            "is_complete": is_complete,
+            "total_trials": len(trial_history),
+            "timestamp": datetime.now().isoformat()
+        }
     
     async def _list_jobs(self) -> Dict[str, Any]:
         """

@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Tooltip } from "@/components/ui/tooltip"
 import { apiClient } from "@/lib/api-client"
 import { useDashboard } from "./dashboard-provider"
+import { useComprehensiveStatus } from "@/hooks/use-comprehensive-status"
 import { 
   Play, 
   Square, 
@@ -35,36 +36,47 @@ const TARGET_METRICS = [
 
 export function OptimizationControls() {
   const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
+  const { jobStatus, elapsedSeconds } = useComprehensiveStatus()
+  
+  // Sync comprehensive status data with dashboard context
+  useEffect(() => {
+    if (jobStatus?.progress) {
+      setProgress({ ...jobStatus.progress })
+    }
+  }, [jobStatus?.progress, setProgress])
+
+  // Monitor job status changes for completion/failure
+  useEffect(() => {
+    if (!jobStatus) return
+
+    if (jobStatus.status === 'completed') {
+      setIsOptimizationRunning(false)
+      setIsOptimizationCompleted(true)
+      // Keep currentJobId for 3D visualization access
+      
+      // Check if final optimized model is available for download
+      if (currentJobId) {
+        checkModelAvailability(currentJobId)
+      }
+      console.log("Optimization completed successfully")
+    } else if (jobStatus.status === 'failed' || jobStatus.status === 'cancelled') {
+      setIsOptimizationRunning(false)
+      setCurrentJobId(null)
+      setIsModelAvailable(false)
+      setProgress(null)
+      if (jobStatus.error) {
+        setError(jobStatus.error)
+      }
+      console.log(`Optimization ${jobStatus.status}`)
+    }
+  }, [jobStatus?.status, jobStatus?.error, currentJobId])
   
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
   const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
   const [isModelAvailable, setIsModelAvailable] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
-  const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
-
-  // Real-time elapsed time counter
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null
-    
-    if (isOptimizationRunning && optimizationStartTime) {
-      interval = setInterval(() => {
-        const now = Date.now()
-        const elapsedSeconds = Math.floor((now - optimizationStartTime) / 1000)
-        setClientElapsedTime(elapsedSeconds)
-      }, 1000) // Update every second
-    } else {
-      setClientElapsedTime(0)
-    }
-
-    return () => {
-      if (interval) {
-        clearInterval(interval)
-      }
-    }
-  }, [isOptimizationRunning, optimizationStartTime])
 
   // Sync selectedTargetMetric with shared optimization mode
   useEffect(() => {
@@ -91,8 +103,6 @@ export function OptimizationControls() {
         setIsOptimizationRunning(false)
         setCurrentJobId(null)
         setIsModelAvailable(false) // Reset model availability on cancellation
-        setOptimizationStartTime(null) // Clear timer state
-        setClientElapsedTime(0)
         console.log("Optimization cancelled successfully")
       } catch (err) {
         console.error("Failed to cancel optimization:", err)
@@ -121,12 +131,11 @@ export function OptimizationControls() {
         setIsOptimizationCompleted(false)
         setIsModelAvailable(false) // Reset model availability for new optimization
         setCurrentJobId(response.job_id)
-        setOptimizationStartTime(Date.now()) // Record start time for real-time counter
         
         console.log(`Optimization started with job ID: ${response.job_id}`)
         
         // Start polling for progress updates
-        startProgressPolling(response.job_id)
+        startProgressPolling()
         
       } catch (err) {
         console.error("Failed to start optimization:", err)
@@ -198,10 +207,17 @@ export function OptimizationControls() {
       document.body.appendChild(link)
       link.click()
       
-      // Clean up immediately 
-      setTimeout(() => {
-        document.body.removeChild(link)
-      }, 100)
+      // Clean up immediately using non-blocking approach
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(() => {
+          document.body.removeChild(link)
+        }, { timeout: 150 })
+      } else {
+        // Fallback for older browsers
+        setTimeout(() => {
+          document.body.removeChild(link)
+        }, 100)
+      }
       
       console.log("Model package download initiated - save dialog should appear")
     } catch (err) {
@@ -210,89 +226,19 @@ export function OptimizationControls() {
     }
   }
 
-  const startProgressPolling = (jobId: string) => {
+  const startProgressPolling = () => {
     // Clear any existing polling interval
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current)
     }
     
-    const pollInterval = setInterval(async () => {
-      try {
-        const status = await apiClient.getJobStatus(jobId)
-        console.log(`Polling update for job ${jobId}:`, status.progress)
-        
-        // Force state update by creating new object to ensure React re-renders
-        if (status.progress) {
-          setProgress({...status.progress})
-        }
-        
-        if (status.status === 'completed') {
-          setIsOptimizationRunning(false)
-          setIsOptimizationCompleted(true)
-          // Keep currentJobId for 3D visualization access - don't set to null
-          setOptimizationStartTime(null) // Clear timer state
-          
-          // Check if final optimized model is available for download
-          checkModelAvailability(jobId)
-          
-          if (pollingIntervalRef.current) {
-            clearInterval(pollingIntervalRef.current)
-            pollingIntervalRef.current = null
-          }
-          console.log("Optimization completed successfully")
-        } else if (status.status === 'failed' || status.status === 'cancelled') {
-          setIsOptimizationRunning(false)
-          setCurrentJobId(null)
-          setIsModelAvailable(false) // Reset model availability on failure/cancellation
-          setProgress(null) // Reset progress data to clear UI statistics
-          setOptimizationStartTime(null) // Clear timer state
-          if (pollingIntervalRef.current) {
-            clearInterval(pollingIntervalRef.current)
-            pollingIntervalRef.current = null
-          }
-          if (status.error) {
-            setError(status.error)
-          }
-          console.log(`Optimization ${status.status}`)
-        }
-      } catch (err) {
-        console.error("Failed to poll job status:", err)
-        
-        // If job is not found (e.g., server restarted), stop polling and reset state
-        if (err instanceof Error && err.message.includes('not found')) {
-          console.log("Job not found - likely server restarted. Stopping optimization state.")
-          setIsOptimizationRunning(false)
-          setIsOptimizationCompleted(false)
-          setCurrentJobId(null)
-          setIsModelAvailable(false) // Reset model availability on server restart
-          setProgress(null)
-          setOptimizationStartTime(null) // Clear timer state
-          setError("Optimization was interrupted (server restarted). Please start a new optimization.")
-          if (pollingIntervalRef.current) {
-            clearInterval(pollingIntervalRef.current)
-            pollingIntervalRef.current = null
-          }
-        }
-        // Don't clear interval on other polling errors - backend might be temporarily unavailable
-      }
-    }, 2000) // Poll every 2 seconds
-    
-    // Store the interval reference
-    pollingIntervalRef.current = pollInterval
-
-    // Cleanup polling on component unmount or job completion
-    return () => {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current)
-        pollingIntervalRef.current = null
-      }
-    }
+    // No longer need separate polling - comprehensive status hook handles this
+    return () => {}  // Cleanup not needed since useComprehensiveStatus handles polling
   }
 
-  // Helper function to format elapsed time and choose appropriate time source
+  // Helper function to format elapsed time from unified status
   const formatElapsedTime = () => {
-    // Use real-time client elapsed time when optimization is running, otherwise use server time
-    const timeToUse = isOptimizationRunning ? clientElapsedTime : (progress?.elapsed_time || 0)
+    const timeToUse = elapsedSeconds || (progress?.elapsed_time || 0)
     const minutes = Math.floor(timeToUse / 60)
     const seconds = Math.round(timeToUse % 60)
     return `${minutes}m ${seconds}s`
@@ -301,11 +247,11 @@ export function OptimizationControls() {
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="flex flex-col sm:flex-row items-center gap-4">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
           {/* Dataset Selection */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 w-full sm:w-auto">
             <Database className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-            <div className="w-auto min-w-[280px]">
+            <div className="w-full sm:w-auto sm:min-w-[280px]">
               <Select
                 value={selectedDataset}
                 onValueChange={setSelectedDataset}
@@ -322,9 +268,9 @@ export function OptimizationControls() {
           </div>
 
           {/* Target Metric Selection */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 w-full sm:w-auto">
             <Target className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-            <div className="w-auto min-w-[240px]">
+            <div className="w-full sm:w-auto sm:min-w-[240px]">
               <Select
                 value={selectedTargetMetric}
                 onValueChange={setSelectedTargetMetric}
@@ -374,12 +320,12 @@ export function OptimizationControls() {
           </div>
 
           {/* Control Buttons */}
-          <div className="flex items-center gap-3 flex-shrink-0">
+          <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto sm:flex-shrink-0">
             {/* Start/Cancel Optimization Toggle */}
             <Button
               onClick={handleOptimizationToggle}
               disabled={!selectedDataset || selectedDataset === "" || !selectedTargetMetric || selectedTargetMetric === ""}
-              className={`min-w-[140px] ${
+              className={`w-full sm:w-auto sm:min-w-[140px] ${
                 isOptimizationRunning 
                   ? "bg-red-600 hover:bg-red-700 text-white" 
                   : "bg-green-600 hover:bg-green-700 text-white"
@@ -402,7 +348,7 @@ export function OptimizationControls() {
             <Button
               onClick={handleDownloadModel}
               disabled={!isModelAvailable || !currentJobId}
-              className="min-w-[180px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
+              className="w-full sm:w-auto sm:min-w-[180px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
               title={
                 !isModelAvailable 
                   ? "Model package will be available after optimization completes and final model is built"

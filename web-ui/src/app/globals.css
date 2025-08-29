@@ -19,8 +19,92 @@
   }
 }
 
+/* Mobile-optimized utilities */
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Ensure all containers stay within viewport */
+* {
+  min-width: 0;
+}
+
+/* Prevent horizontal overflow on mobile */
+html, body {
+  overflow-x: hidden;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Cytoscape animation optimizations for mobile performance */
+@layer utilities {
+  /* Hardware-accelerated animations */
+  .cytoscape-animation-optimized {
+    transform: translateZ(0);
+    will-change: transform;
+  }
+  
+  /* Reduce animation intensity on smaller screens */
+  @media (max-width: 768px) {
+    .cytoscape-animation-optimized {
+      animation-duration: 0.8s !important;
+      animation-timing-function: ease-out;
+    }
+  }
+  
+  /* Mobile-optimized pulse animation for processing nodes */
+  @keyframes pulse-mobile {
+    0% { opacity: 0.8; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.05); }
+    100% { opacity: 0.8; transform: scale(1); }
+  }
+  
+  @media (max-width: 768px) {
+    .processing-node {
+      animation: pulse-mobile 1.2s ease-in-out infinite;
+    }
+  }
+  
+  /* Flowing data animation with reduced intensity on mobile */
+  @keyframes flow-data {
+    0% { stroke-dashoffset: 10; opacity: 0.6; }
+    50% { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: -10; opacity: 0.6; }
+  }
+  
+  @keyframes flow-errors {
+    0% { stroke-dashoffset: -10; opacity: 0.6; }
+    50% { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: 10; opacity: 0.6; }
+  }
+  
+  .flowing-data {
+    animation: flow-data 1s linear infinite;
+    stroke-dasharray: 5;
+  }
+  
+  .flowing-errors {
+    animation: flow-errors 1s linear infinite;
+    stroke-dasharray: 5;
+  }
+  
+  /* Reduce animation complexity on mobile */
+  @media (max-width: 768px) {
+    .flowing-data,
+    .flowing-errors {
+      animation-duration: 1.5s;
+      animation-timing-function: ease-in-out;
+    }
+  }
 }

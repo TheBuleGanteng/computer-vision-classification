@@ -4,6 +4,7 @@ import "./globals.css";
 import { Navigation } from "@/components/navigation";
 import { QueryProvider } from "@/providers/query-client-provider";
 import { Toaster } from "sonner";
+import { PerformanceMonitorInit } from "@/components/performance-monitor-init";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,6 +32,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen bg-background font-sans`}
       >
         <QueryProvider>
+          <PerformanceMonitorInit />
           <div className="min-h-screen flex flex-col">
             <Navigation />
             <main className="flex-1">

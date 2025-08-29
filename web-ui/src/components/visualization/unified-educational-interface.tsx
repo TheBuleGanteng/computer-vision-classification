@@ -26,9 +26,9 @@ const UnifiedEducationalInterface: React.FC<UnifiedEducationalInterfaceProps> = 
 
 
   return (
-    <div className={`min-h-[600px] flex flex-col bg-gray-900 ${className}`}>
+    <div className={`min-h-[300px] sm:min-h-[400px] lg:min-h-[600px] flex flex-col bg-gray-900 ${className}`}>
       {/* Header */}
-      <div className="flex items-center justify-between p-4 bg-gray-800 border-b border-gray-700">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between p-3 sm:p-4 bg-gray-800 border-b border-gray-700 gap-2 sm:gap-0">
         <div>
           <h2 className="text-lg font-semibold text-white">Training Metrics & Diagnostics</h2>
           <p className="text-sm text-gray-400">

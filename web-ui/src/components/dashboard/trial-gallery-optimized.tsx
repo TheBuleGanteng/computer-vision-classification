@@ -27,6 +27,12 @@ const EducationalVisualizationContainer = React.memo(({
   jobId: string | null; 
   selectedTrial: TrialProgress | null;
 }) => {
+  // Memoize stable props to prevent unnecessary re-renders
+  const stableTrialId = useMemo(() => 
+    selectedTrial?.trial_number?.toString() || selectedTrial?.trial_id, 
+    [selectedTrial?.trial_number, selectedTrial?.trial_id]
+  )
+
   if (!jobId || !selectedTrial) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground">
@@ -42,7 +48,7 @@ const EducationalVisualizationContainer = React.memo(({
     <div className="w-full h-full min-h-[600px]">
       <UnifiedEducationalInterface 
         jobId={jobId} 
-        trialId={selectedTrial.trial_number?.toString() || selectedTrial.trial_id}
+        trialId={stableTrialId}
         className="h-full"
       />
     </div>
@@ -55,6 +61,7 @@ const TrialGallery = React.memo(() => {
   const { currentJobId } = useDashboard()
   const [selectedTrial, setSelectedTrial] = useState<TrialProgress | null>(null)
   const { trials, bestTrial, isLoading, error } = useTrials()
+
 
   // Memoized helper functions to prevent unnecessary re-calculations
   const formatDuration = useMemo(() => (seconds: number | null | undefined) => {
