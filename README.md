@@ -396,17 +396,33 @@ class ModelOptimizer:
 - ✅ Add the "use_flattening: <true/false>" field following the "use_global_pooling: <true/false>" field in the "best_hyperparameters.yaml" file created at the end of each optimization.
 - ✅ Compare the fields listed in "best_hyperparameters.yaml" to those listed in the "Architecture layers" and "Performance & Health" sections of the UI and add any missing params to those sections of the UI.
 - ✅ Add activation_progression (already being created and saved to disk in the same directory as the other plots) to the plots available for view and for download in the "Training Metrics & Diagnostics" section of the UI. This will involve adding an additional tab (titled "Activation Progression") to the tabs already present. 
-- 🔄 Enable saving of each model archatecture visualization to disk as a .png, including the model legend. This image should be saved to disk alongside the other plots generated. I think the best way to do this is to add that functionality to plot_generator.py and in a new file located at src/plot_creation/model_archatecture.py 
-- 🔄 Add an additional tab to the "Training Metrics & Diagnostics" section called "Model Archatecture" that, when clicked, displays the same model archatecture visualization currently provided in the "Model Architecture" section. This should include all elements of that model archatecture visualization, including the anmimation capabilities and legend. Additionally, clicking download while that tab is activated will download the .png version of that model archatecture (the same as done for other plots).
-- 🔄 Eliminate the "Model Architecture" section of the UI, since the model archatecture is visible via that tab within the "Training Metrics & Diagnostics" section of the UI.
+- ✅ Enable download each model archatecture visualization to disk as a .png
+- ✅ Add an additional tab to the "Training Metrics & Diagnostics" section called "Model Archatecture" that, when clicked, displays the same model archatecture visualization currently provided in the "Model Architecture" section, including the legend, animate button, and download button, effectively duplicating the model visualization contained in the "Model Architecture" section of the UI.
+- ✅ Eliminate the "Model Architecture" section of the UI, since the model archatecture is visible via that tab within the "Training Metrics & Diagnostics" section of the UI.
+- 🔄 The "Download" button for the plots should use the "Save as" mechanism that propmpts the user to decide where to save the downloaded file, as opposed to the current behavior of automatically saving to the dowloads folder.
+- 🔄 Remove persistant "Unable to add filesystem: <illegal path>" error in the JS console
 - 🔄 The status bar in the UI that shows the progression of each epoch should also show the progression of the final model creation after the last trial is completed, so as to better communicate to the user what is going on and the progress toward completion of the process.
 - 🔄 Vastly improved responsiveness of the UI, so as to render better on mobile.
 
 
 ---
 
+### **Phase 2: Testing UI with runpod proxy GPU enabled** 🔧
+**Status**: Not started
 
-### **Phase 2: Logging Consolidation & System Polish** 🔧
+**Objectives:**
+- Ensure existing functionality also works when use of runpod proxy GPU is enabled. This functionality is already in place, but has not yet been tested in conjunction with the UI.
+- Understand if use of the runpod proxy GPU speeds up the complete optimization (Optuna traials + plot generation + final model build) and if so, by how much
+- Explore and implement any additional means of more fully leveraging the runpod proxy GPU to further accelerate an optimization (for example, via plot generation or any other activities currently done via CPU)
+
+**Key Deliverables:**
+- UI feature (checkbox) that allows the toggling on/off of runpod proxy GPU resources
+- Thorough testing with runpod proxy GPU enabled, so as to ensure smooth operation
+- Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled)
+
+---
+
+### **Phase 3: Logging Consolidation & System Polish** 🔧
 **Status**: Not started
 
 **Objectives:**
@@ -424,7 +440,7 @@ class ModelOptimizer:
 ---
 
 
-### **Phase 3: Deployment & Container Integration** 🚀
+### **Phase 4: Deployment & Container Integration** 🚀
 **Status**: Production readiness
 
 **Objectives:**
@@ -441,7 +457,7 @@ class ModelOptimizer:
 
 ---
 
-### **Phase 4: Website Integration** 🌐
+### **Phase 5: Website Integration** 🌐
 **Status**: Not started
 
 **Objectives:**
@@ -482,30 +498,3 @@ const elkLayout = {
   }
 };
 ```
-
----
-
-### **Phase 5: Website Integration** 🌐
-**Status**: Not started
-
-**Objectives:**
-- Integration with personal portfolio (mattmcdonnell.net)
-- Integration with company website (kebayorantechnologies.com)
-- Showcase optimization capabilities and results
-- Professional presentation of project achievements
-
-**Key Deliverables:**
-- Portfolio integration with live demo capabilities
-- Case study documentation with performance results
-- Professional presentation materials
-- SEO optimization and analytics integration
-
-### **Phase 6: Size-by-side comparison of simple mode (test accuracy only) vs. health-aware modes to illustrate the benefits of considering model health when selecting model archatecture** 🌐
-
-**Status**: Not started
-
-**Objectives:**
-- Improve educational value by illustrating the differences in model accuracy in health and why optimizing for test accuracy only may lead to subpar model performance in practive. 
-
-**Key Deliverables:**
-- A new tab that compares the accuracy of models built using hyperparameters that maximize accuracy only vs. models that also consider model health.

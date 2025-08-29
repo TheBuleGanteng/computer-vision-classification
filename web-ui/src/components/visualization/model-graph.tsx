@@ -1,6 +1,7 @@
 "use client"
 
-import React, { useEffect, useRef } from 'react';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import React, { useEffect, useRef, useImperativeHandle } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
@@ -36,17 +37,157 @@ interface CytoscapeData {
   };
 }
 
+interface LayerTypeDefinition {
+  color: string;
+  shape: 'rounded-full' | 'rounded' | 'rounded-lg';
+  label: string;
+  order: number;
+}
+
+const LAYER_TYPE_DEFINITIONS: Record<string, LayerTypeDefinition> = {
+  'input': {
+    color: 'bg-green-600', // Matches #059669 from model-graph.tsx
+    shape: 'rounded-full',
+    label: 'Input',
+    order: 1
+  },
+  'conv2d': {
+    color: 'bg-blue-500', // Matches #3B82F6 from model-graph.tsx
+    shape: 'rounded',
+    label: 'Conv2D',
+    order: 2
+  },
+  'conv': {
+    color: 'bg-blue-500', // Matches #3B82F6 from model-graph.tsx
+    shape: 'rounded',
+    label: 'Conv2D',
+    order: 2
+  },
+  'pooling': {
+    color: 'bg-cyan-500', // Changed from emerald to cyan for better distinction from input
+    shape: 'rounded-full',
+    label: 'Pooling',
+    order: 3
+  },
+  'maxpooling2d': {
+    color: 'bg-cyan-500',
+    shape: 'rounded-full',
+    label: 'Pooling',
+    order: 3
+  },
+  'lstm': {
+    color: 'bg-purple-500', // Matches #8B5CF6 from model-graph.tsx
+    shape: 'rounded-lg',
+    label: 'LSTM',
+    order: 4
+  },
+  'dense': {
+    color: 'bg-orange-500', // Matches #F97316 from model-graph.tsx
+    shape: 'rounded',
+    label: 'Dense',
+    order: 5
+  },
+  'linear': {
+    color: 'bg-orange-500', // Same as dense
+    shape: 'rounded',
+    label: 'Dense',
+    order: 5
+  },
+  'dropout': {
+    color: 'bg-yellow-500', // Matches #EAB308 from model-graph.tsx
+    shape: 'rounded',
+    label: 'Dropout',
+    order: 6
+  },
+  'output': {
+    color: 'bg-red-500', // Matches #EF4444 from model-graph.tsx
+    shape: 'rounded-full',
+    label: 'Dense / output',
+    order: 7
+  }
+};
+
+const DEFAULT_LAYER_TYPE: LayerTypeDefinition = {
+  color: 'bg-gray-400',
+  shape: 'rounded',
+  label: 'Unknown',
+  order: 99
+};
+
+// Function to generate dynamic legend based on actual layers present
+const generateDynamicLegend = (architectureData: CytoscapeData | null): LayerTypeDefinition[] => {
+  if (!architectureData?.nodes || architectureData.nodes.length === 0) {
+    return [];
+  }
+  
+  // Extract unique layer types from the architecture data
+  const presentTypes = new Set<string>();
+  architectureData.nodes.forEach(node => {
+    const layerType = node.data.type?.toLowerCase() || 'unknown';
+    presentTypes.add(layerType);
+    
+    // Special case: check for output layer by ID (since it has type='dense' but id='output')
+    if (node.data.id === 'output') {
+      presentTypes.add('output');
+    }
+  });
+  
+  // Map to legend definitions
+  const legendItems: LayerTypeDefinition[] = [];
+  presentTypes.forEach(type => {
+    const definition = LAYER_TYPE_DEFINITIONS[type] || {
+      ...DEFAULT_LAYER_TYPE,
+      label: type.charAt(0).toUpperCase() + type.slice(1)
+    };
+    legendItems.push(definition);
+  });
+  
+  // Sort by flow order (input → conv → pool → lstm → dense → dropout → output)
+  // then alphabetically by label for consistency
+  return legendItems.sort((a, b) => {
+    if (a.order !== b.order) return a.order - b.order;
+    return a.label.localeCompare(b.label);
+  });
+};
+
+// Legend Component
+const ModelLegend: React.FC<{ architectureData: CytoscapeData | null }> = React.memo(({ architectureData }) => {
+  const legendItems = generateDynamicLegend(architectureData);
+  
+  if (legendItems.length === 0) {
+    return null;
+  }
+  
+  return (
+    <div className="absolute bottom-4 right-4 z-10 bg-gray-800 bg-opacity-90 rounded-lg p-3 max-w-xs">
+      <div className="text-xs text-gray-300 mb-2 font-semibold">Legend</div>
+      <div className="text-xs text-gray-400 mb-2">Layer Types</div>
+      <div className="flex flex-col gap-1.5 text-xs">
+        {legendItems.map((item) => (
+          <div key={item.label} className="flex items-center gap-2">
+            <div className={`w-3 h-3 ${item.color} ${item.shape} flex-shrink-0`}></div>
+            <span className="text-gray-300">{item.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
+ModelLegend.displayName = 'ModelLegend';
+
 interface ModelGraphProps {
   architectureData: CytoscapeData;
   onNodeClick?: (nodeData: LayerData) => void;
   className?: string;
+  onPngExportRequest?: () => Promise<Blob | null>;
+  showLegend?: boolean;
 }
 
-export const ModelGraph: React.FC<ModelGraphProps> = ({
-  architectureData,
-  onNodeClick,
-  className = ""
-}) => {
+export const ModelGraph = React.forwardRef<
+  { exportToPNG: () => Promise<Blob | null> },
+  ModelGraphProps
+>(({ architectureData, onNodeClick, className = "", onPngExportRequest, showLegend = false }, ref) => {
   const cyRef = useRef<cytoscape.Core | null>(null);
 
   // Cytoscape.js stylesheet for educational neural network visualization
@@ -665,6 +806,69 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
     };
   }, []);
 
+  // PNG Export function
+  const exportToPNG = React.useCallback(async (): Promise<Blob | null> => {
+    if (!cyRef.current) {
+      console.warn('Cytoscape instance not available for PNG export');
+      return null;
+    }
+
+    try {
+      // Ensure animations are stopped and cleaned up for clean export
+      const wasAnimating = isAnimatingRef.current;
+      if (wasAnimating) {
+        isAnimatingRef.current = false;
+        setIsAnimating(false);
+        resetAnimations();
+      }
+
+      // Wait a moment for animations to clear
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Generate PNG with high quality settings
+      const pngBlob = cyRef.current.png({
+        output: 'blob',
+        bg: '#111827', // Match the UI dark background
+        full: true, // Export full graph
+        scale: 3, // High resolution (3x)
+        maxWidth: 2400, // Max width for very large graphs
+        maxHeight: 1600, // Max height
+      });
+
+      // Resume animation if it was running
+      if (wasAnimating) {
+        setIsAnimating(true);
+        isAnimatingRef.current = true;
+        runSingleAnimationCycle();
+      }
+
+      console.log('PNG export successful');
+      return pngBlob;
+    } catch (error) {
+      console.error('PNG export failed:', error);
+      return null;
+    }
+  }, [setIsAnimating]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Expose export function to parent via ref and callback
+  React.useImperativeHandle(ref, () => ({
+    exportToPNG
+  }), [exportToPNG]);
+  
+  React.useEffect(() => {
+    if (onPngExportRequest) {
+      // Store the export function reference so parent can call it
+      (window as unknown as Record<string, unknown>).exportArchitecturePNG = exportToPNG;
+    }
+    
+    return () => {
+      const windowObj = window as unknown as Record<string, unknown>;
+      if (windowObj.exportArchitecturePNG) {
+        delete windowObj.exportArchitecturePNG;
+      }
+    };
+  }, [exportToPNG, onPngExportRequest]);
+
 
   if (!architectureData?.nodes || architectureData.nodes.length === 0) {
     return (
@@ -744,9 +948,13 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         className="bg-gray-900 rounded-lg"
       />
 
+      {/* Legend */}
+      {showLegend && <ModelLegend architectureData={architectureData} />}
       
     </div>
   );
-};
+});
+
+ModelGraph.displayName = 'ModelGraph';
 
 export default ModelGraph;

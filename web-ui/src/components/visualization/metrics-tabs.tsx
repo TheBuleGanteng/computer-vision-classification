@@ -1,9 +1,13 @@
 "use client"
 
-import React, { useState } from 'react';
-import { Activity, Zap, Brain, Target, Skull, TrendingUp, LineChart } from 'lucide-react';
+import React, { useState, useCallback, useRef } from 'react';
+import { Activity, Zap, Brain, Target, Skull, TrendingUp, LineChart, Network, Download, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import TensorBoardPanel from './tensorboard-panel';
+import ModelGraph from './model-graph';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import FullscreenPopup from './fullscreen-popup';
 
 // Use the same API base URL as the main api client
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -39,7 +43,33 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   className = "",
   onExpandClick
 }) => {
-  const [activeTab, setActiveTab] = useState<string>('training_progress');
+  const [activeTab, setActiveTab] = useState<string>('model_architecture');
+  const [showArchitecturePopup, setShowArchitecturePopup] = useState(false);
+  const tabModelGraphRef = useRef<{ exportToPNG: () => Promise<Blob | null> } | null>(null);
+  
+  // Download function for Model Architecture tab
+  const downloadArchitecturePNG = useCallback(async () => {
+    try {
+      if (!tabModelGraphRef.current?.exportToPNG) {
+        console.error('Tab ModelGraph export function not available');
+        return;
+      }
+      const pngBlob = await tabModelGraphRef.current.exportToPNG();
+      if (pngBlob) {
+        const url = URL.createObjectURL(pngBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `model_architecture_${jobId}_${trialId || 'latest'}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        console.log('Architecture PNG downloaded successfully');
+      }
+    } catch (error) {
+      console.error('Failed to download architecture PNG:', error);
+    }
+  }, [jobId, trialId]);
 
   // Optimized TensorBoard logs fetching with React Query
   const { isLoading: loading } = useQuery({
@@ -56,7 +86,37 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
     refetchInterval: false, // Don't auto-refetch
   });
 
+  // Architecture data fetching for Model Architecture tab - using same endpoint as main section
+  const { data: architectureResponse, isLoading: architectureLoading } = useQuery({
+    queryKey: ['cytoscape-architecture-tab', jobId, trialId],
+    queryFn: async () => {
+      if (!jobId) return null;
+      
+      const url = trialId 
+        ? `${API_BASE_URL}/jobs/${jobId}/cytoscape/architecture?trial_id=${trialId}`
+        : `${API_BASE_URL}/jobs/${jobId}/cytoscape/architecture`;
+      
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn('Architecture data not available:', response.status);
+        return null;
+      }
+      return response.json();
+    },
+    enabled: !!jobId && activeTab === 'model_architecture',
+    staleTime: 60000, // 1 minute
+    refetchInterval: false,
+  });
+  
+  const architectureData = architectureResponse?.cytoscape_data;
+
   const tabs = [
+    {
+      id: 'model_architecture',
+      label: 'Model Architecture',
+      icon: <Network className="w-4 h-4" />,
+      description: 'Interactive neural network structure visualization'
+    },
     {
       id: 'training_progress',
       label: 'Training Progress',
@@ -114,7 +174,7 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   ];
 
 
-  if (loading) {
+  if (loading || (activeTab === 'model_architecture' && architectureLoading)) {
     return (
       <div className={`flex items-center justify-center h-96 ${className}`}>
         <div className="text-center">
@@ -147,20 +207,142 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
 
       {/* Tab Content */}
       <div className="flex-1">
-        {tabs.map((tab) => (
-          activeTab === tab.id && (
-            <div key={tab.id} className="h-full">
-              <TensorBoardPanel 
-                jobId={jobId} 
-                trialId={trialId} 
-                height={500}
-                onExpandClick={onExpandClick}
-                defaultPlotType={tab.id}
-              />
-            </div>
-          )
-        ))}
+        {activeTab === 'model_architecture' ? (
+          <div className="h-full">
+            <Card className="h-full bg-gray-900 border-gray-700">
+              <CardHeader className="pb-0">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h3 className="text-base font-semibold flex items-center gap-1">
+                      <Network className="w-4 h-4" />
+                      Model Architecture
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      {architectureData?.metadata ? (
+                        `${architectureData.metadata.architecture_type} Architecture - ${architectureData.metadata.total_parameters.toLocaleString()} parameters`
+                      ) : (
+                        'Interactive neural network structure visualization'
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-1 w-24">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        // Open TensorBoard - same logic as other tabs
+                        const tbUrl = process.env.NEXT_PUBLIC_TENSORBOARD_URL || `http://localhost:6006`;
+                        window.open(tbUrl, '_blank');
+                      }}
+                      className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
+                      title="Open TensorBoard interface"
+                    >
+                      <ExternalLink className="w-2 h-2" />
+                      TensorBoard
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={downloadArchitecturePNG}
+                      className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
+                      disabled={!architectureData}
+                      title="Download architecture as PNG"
+                    >
+                      <Download className="w-2 h-2" />
+                      Download
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-0 h-[450px]">
+                {!architectureData ? (
+                  <div className="flex items-center justify-center h-full text-center">
+                    <div>
+                      <div className="text-gray-400 text-lg mb-2">No Architecture Data</div>
+                      <div className="text-gray-500 text-sm">
+                        Architecture visualization will appear when trial data is available
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-full w-full group relative">
+                    <ModelGraph
+                      architectureData={architectureData}
+                      className="h-full"
+                      showLegend={false}
+                      ref={tabModelGraphRef}
+                    />
+                    {/* Expand icon in top-right corner */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowArchitecturePopup(true);
+                      }}
+                      className="absolute top-2 right-2 p-2 bg-black/50 hover:bg-black/70 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-10"
+                      title="Expand visualization"
+                    >
+                      <Maximize2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          tabs.filter(tab => tab.id !== 'model_architecture').map((tab) => (
+            activeTab === tab.id && (
+              <div key={tab.id} className="h-full">
+                <TensorBoardPanel 
+                  jobId={jobId} 
+                  trialId={trialId} 
+                  height={500}
+                  onExpandClick={onExpandClick}
+                  defaultPlotType={tab.id}
+                />
+              </div>
+            )
+          ))
+        )}
       </div>
+
+      {/* Architecture Fullscreen Popup */}
+      <FullscreenPopup
+        isOpen={showArchitecturePopup}
+        onClose={() => setShowArchitecturePopup(false)}
+        title="Model Architecture - Full View"
+      >
+        <div className="h-[80vh] p-4">
+          {architectureData ? (
+            <div className="h-full w-full group relative">
+              <ModelGraph
+                architectureData={architectureData}
+                className="h-full"
+                showLegend={false}
+              />
+              {/* Minimize icon in top-right corner */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowArchitecturePopup(false);
+                }}
+                className="absolute top-2 right-2 p-2 bg-black/50 hover:bg-black/70 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-20"
+                title="Minimize architecture"
+              >
+                <Minimize2 className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-full text-center">
+              <div>
+                <div className="text-gray-400 text-lg mb-2">No Architecture Data</div>
+                <div className="text-gray-500 text-sm">
+                  Architecture visualization will appear when trial data is available
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </FullscreenPopup>
     </div>
   );
 });
