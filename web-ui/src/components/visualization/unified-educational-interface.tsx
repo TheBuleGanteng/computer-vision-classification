@@ -156,6 +156,11 @@ const generateDynamicLegend = (architectureData: CytoscapeData | null): LayerTyp
   architectureData.nodes.forEach(node => {
     const layerType = node.data.type?.toLowerCase() || 'unknown';
     presentTypes.add(layerType);
+    
+    // Special case: check for output layer by ID (since it has type='dense' but id='output')
+    if (node.data.id === 'output') {
+      presentTypes.add('output');
+    }
   });
   
   // Map to legend definitions

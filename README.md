@@ -55,11 +55,9 @@ computer-vision-classification/
 
 ---
 
-## II. Configuration Flow Architecture 🏗️
-
 ### **Understanding Configuration Data Flow**
 
-This project uses a dual-path configuration architecture to support both API-driven (UI) and programmatic usage patterns:
+This project uses a dual-path configuration architecture with a sophisticated hyperparameter management system:
 
 #### **Path 1: API-Driven Flow (Web UI)**
 ```
@@ -82,7 +80,7 @@ OptimizationConfig (optimizer.py)
   • System-controlled defaults
   • Enum types for internal use
        ↓
-ModelOptimizer → ModelBuilder → Training Pipeline
+ModelOptimizer → HyperparameterSelector → Optuna → ModelConfig → ModelBuilder
 ```
 
 #### **Path 2: Programmatic Flow (Direct Usage)**
@@ -95,7 +93,35 @@ OptimizationConfig (optimizer.py)
   • Fail-fast validation
   • System-controlled defaults
        ↓
-ModelOptimizer → ModelBuilder → Training Pipeline
+ModelOptimizer → HyperparameterSelector → Optuna → ModelConfig → ModelBuilder
+```
+
+#### **Path 3: Hyperparameter Configuration Flow**
+```
+HyperparameterSelector.suggest_hyperparameters()
+  • Uses Optuna to suggest architecture parameters
+  • Randomly selects: use_global_pooling, kernel_size, num_layers_conv, etc.
+       ↓
+ModelOptimizer._train_locally_for_trial()
+  • Creates empty ModelConfig()
+  • Dynamically populates with Optuna-suggested parameters
+  • Uses ModelConfig defaults for non-suggested parameters
+       ↓
+ModelBuilder(model_config)
+  • Receives fully-configured ModelConfig
+  • Uses all parameters for model construction
+```
+
+#### **ModelConfig Default vs Override Pattern**
+```
+Scenario 1: Hyperparameter Optimization (Normal Flow)
+ModelConfig() defaults → Overridden by Optuna suggestions → Used by ModelBuilder
+
+Scenario 2: Testing/Development/Standalone
+ModelConfig() defaults → Used directly by ModelBuilder → No optimization
+
+Scenario 3: Fallback/Error Recovery  
+ModelConfig() defaults → Used when Optuna fails → Safe fallback values
 ```
 
 ### **Key Architecture Principles**
@@ -103,12 +129,16 @@ ModelOptimizer → ModelBuilder → Training Pipeline
 **Variable Ownership:**
 - **OptimizationRequest**: Owns user-controlled defaults (trials=50, batch_size=32, etc.)
 - **OptimizationConfig**: Owns system-controlled defaults (timeout_hours=None, health_monitoring_frequency=1, etc.)
+- **ModelConfig**: Owns model architecture defaults (num_layers_conv=2, kernel_size=(3,3), use_global_pooling=False, etc.)
+- **HyperparameterSelector**: Manages Optuna parameter suggestion and fallback logic
 
 **Data Flow Rules:**
 1. **API Path**: User → OptimizationRequest → create_optimization_config() → OptimizationConfig
 2. **Programmatic Path**: Developer → OptimizationConfig directly
-3. **No Conflicting Defaults**: Each variable has defaults in only ONE class
-4. **Fail-Fast**: OptimizationConfig validates all required values immediately
+3. **Hyperparameter Path**: HyperparameterSelector → Optuna suggestions → ModelConfig population → ModelBuilder
+4. **No Conflicting Defaults**: Each variable has defaults in only ONE class
+5. **Fail-Fast**: OptimizationConfig validates all required values immediately
+6. **Smart Defaults**: ModelConfig provides sensible defaults that work when Optuna is bypassed
 
 **Benefits:**
 - ✅ **Clear Separation**: API concerns vs business logic
@@ -119,7 +149,7 @@ ModelOptimizer → ModelBuilder → Training Pipeline
 
 ---
 
-## III. Key Functionality and Features
+## II. Key Functionality and Features
 
 ### Core Optimization Features
 - ✅ **Multi-modal Dataset Support**: MNIST, CIFAR-10/100, Fashion-MNIST, GTSRB, IMDB, Reuters
@@ -173,7 +203,7 @@ ModelOptimizer → ModelBuilder → Training Pipeline
 
 ---
 
-## IV. Completed Implementation
+## III. Completed Implementation
 
 ### Data Structures and Core Systems
 
@@ -355,18 +385,23 @@ class ModelOptimizer:
 
 ---
 
-## VI. Detailed Implementation Roadmap
+## IV. Detailed Implementation Roadmap
 
 ### **Phase 1: Miscellanious UI improvements** 🔧
-**Status**: Not started
+**Status**: Underway
 
 **Key Deliverables:**
-- Enable saving of each model archatecture to disk as a .png, including the model legend
-- Add activation_progression (already being created and saved to disk in the same directory as the other plots) to the plots available for view and for download in the "Training Metrics & Diagnostics" section of the UI. This will involve adding an additional tab (titled "Activation Progression") to the tabs already present. 
-- Add "output" and "flattening layer" as items in the model archatecture visualization if the archatecture indeed contains those items. 
-- Enable download of model archatecture .png using a button identical to that used for the model plots
-- The status bar in the UI that shows the progression of each epoch should also show the progression of the final model creation after the last trial is completed, so as to better communicate to the user what is going on and the progress toward completion of the process.
-- Vastly improved responsiveness of the UI, so as to work better on mobile.
+- ✅ Show both forward pass and backward pass in the model archatecture visualization animation.
+- ✅ Add "output" as an item shown in the model archatecture visualization. Additionally, show "flattening layer" as an item in the model archatcture visualization if flattening is indeed used in that model. Be sure to preserve the correct tensor labels for each edge in the graph.
+- ✅ Add the "use_flattening: <true/false>" field following the "use_global_pooling: <true/false>" field in the "best_hyperparameters.yaml" file created at the end of each optimization.
+- ✅ Compare the fields listed in "best_hyperparameters.yaml" to those listed in the "Architecture layers" and "Performance & Health" sections of the UI and add any missing params to those sections of the UI.
+- 🔄 Add activation_progression (already being created and saved to disk in the same directory as the other plots) to the plots available for view and for download in the "Training Metrics & Diagnostics" section of the UI. This will involve adding an additional tab (titled "Activation Progression") to the tabs already present. 
+- 🔄 Enable saving of each model archatecture visualization to disk as a .png, including the model legend. This image should be saved to the 
+- 🔄 For each trial, create a visualization of the model archatecture and save that to disk as a .png in the same directory used for the model plots (e.g. optimization_results/<run name>/trial_<trial number>/)
+- 🔄 Add an additional tab to the "Training Metrics & Diagnostics" section called "Model Archatecture" that, when clicked, displays the same model archatecture visualization currently provided in the "Model Architecture" section. This should include all elements of that model archatecture visualization, including the anmimation capabilities and legend.
+
+- 🔄 The status bar in the UI that shows the progression of each epoch should also show the progression of the final model creation after the last trial is completed, so as to better communicate to the user what is going on and the progress toward completion of the process.
+- 🔄 Vastly improved responsiveness of the UI, so as to render better on mobile.
 
 
 ---

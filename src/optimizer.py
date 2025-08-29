@@ -1573,9 +1573,21 @@ class ModelOptimizer:
             trial_start_time = time.time()
             
             # Create ModelConfig from suggested parameters
+            # 
+            # This implements the core of the dual-purpose ModelConfig system:
+            # 1. Start with ModelConfig() containing sensible defaults 
+            # 2. Override defaults with Optuna-suggested parameters
+            # 3. Parameters not suggested by Optuna retain their default values
+            # 4. Result is a fully-configured ModelConfig ready for ModelBuilder
+            #
+            # Example flow:
+            # - ModelConfig.use_global_pooling = False (default)
+            # - params = {'use_global_pooling': True, 'kernel_size': (5,5), ...} (from Optuna)
+            # - After setattr loop: ModelConfig.use_global_pooling = True (overridden)
+            #                      ModelConfig.activation = 'relu' (default retained)
             model_config = ModelConfig()
             
-            # Apply all suggested parameters
+            # Apply all suggested parameters, overriding defaults
             for key, value in params.items():
                 if hasattr(model_config, key):
                     setattr(model_config, key, value)
@@ -2064,6 +2076,10 @@ class ModelOptimizer:
             if self.activation_override:
                 best_params['activation'] = self.activation_override
                 logger.debug(f"running _save_results ... Applied activation override to best_params: '{self.activation_override}'")
+            
+            # Add use_flattening field as inverse of use_global_pooling
+            if 'use_global_pooling' in best_params:
+                best_params['use_flattening'] = not best_params['use_global_pooling']
             
             # Save best hyperparameters as YAML
             yaml_file = self.results_dir / "optimized_model" / "best_hyperparameters.yaml"

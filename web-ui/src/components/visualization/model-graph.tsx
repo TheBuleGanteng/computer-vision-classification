@@ -142,6 +142,20 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         'font-size': '10px'
       }
     },
+    // Flatten layers
+    {
+      selector: 'node[type="flatten"]',
+      style: {
+        'background-color': '#8B5CF6', // Purple for flatten layers
+        'shape': 'rectangle',
+        'width': 55,
+        'height': 35,
+        'label': 'data(label)',
+        'text-valign': 'center',
+        'color': 'white',
+        'font-size': '10px'
+      }
+    },
     // Dropout layers
     {
       selector: 'node[type="dropout"]',
@@ -170,9 +184,9 @@ export const ModelGraph: React.FC<ModelGraphProps> = ({
         'font-size': '9px'
       }
     },
-    // Output layer
+    // Output layer (identified by ID, not type since it's still a dense layer)
     {
-      selector: 'node[type="output"]',
+      selector: 'node[id="output"]',
       style: {
         'background-color': '#DC2626',
         'shape': 'ellipse',

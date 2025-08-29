@@ -11,7 +11,7 @@ parameter calculations, spatial positioning, and performance-based styling.
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 from utils.logger import logger
 
 @dataclass
@@ -211,7 +211,7 @@ class ModelVisualizer:
             flattened_size = filters_per_layer * spatial_size * spatial_size
             pooling_layer = LayerVisualization(
                 layer_id='flatten',
-                layer_type='pooling',
+                layer_type='flatten',
                 position_z=z_position,
                 width=min(flattened_size * self.scale_factor * 0.1, 6.0),
                 height=0.6,
@@ -253,7 +253,7 @@ class ModelVisualizer:
             
             dense_layer = LayerVisualization(
                 layer_id=f'dense_{i+1}' if not is_output else 'output',
-                layer_type='dense',
+                layer_type='dense',  # Keep all dense layers as 'dense' type
                 position_z=z_position,
                 width=layer_width,
                 height=layer_height,
@@ -360,7 +360,7 @@ class ModelVisualizer:
             
             dense_layer = LayerVisualization(
                 layer_id=f'dense_{i+1}' if not is_output else 'output',
-                layer_type='dense',
+                layer_type='dense',  # Keep all dense layers as 'dense' type
                 position_z=z_position,
                 width=min(current_units * self.scale_factor, 6.0),
                 height=1.2 if not is_output else 1.0,
@@ -531,9 +531,15 @@ class ModelVisualizer:
                 return f"Conv2D\n{layer.filters}@{layer.kernel_size[0]}×{layer.kernel_size[1]}"
             return "Conv2D"
         elif layer.layer_type == 'dense':
-            if layer.units:
-                return f"Dense\n{layer.units} units"
-            return "Dense"
+            # Check if this is the output layer by ID
+            if layer.layer_id == 'output':
+                if layer.units:
+                    return f"Output\n{layer.units} classes"
+                return "Output"
+            else:
+                if layer.units:
+                    return f"Dense\n{layer.units} units"
+                return "Dense"
         elif 'pool' in layer.layer_type.lower():
             return "Pooling"
         elif layer.layer_type == 'lstm':
@@ -542,7 +548,7 @@ class ModelVisualizer:
             return "LSTM"
         elif layer.layer_type == 'dropout':
             return "Dropout"
-        elif layer.layer_id == 'flatten':
+        elif layer.layer_type == 'flatten' or layer.layer_id == 'flatten':
             return "Flatten"
         else:
             return layer.layer_type.title()
@@ -584,8 +590,21 @@ class ModelVisualizer:
             else:
                 return f"16×16×{filters} → 8×8×{filters}"
         
-        # Conv/Pool to Dense
-        elif (prev_layer.layer_type.startswith('conv') or 'pool' in prev_layer.layer_type) and current_layer.layer_type == 'dense':
+        # Conv/Pool to Flatten
+        elif (prev_layer.layer_type.startswith('conv') or 'pool' in prev_layer.layer_type) and current_layer.layer_type == 'flatten':
+            filters = getattr(prev_layer, 'filters', None) or 32
+            # Estimate the spatial dimensions based on previous operations
+            spatial_dim = 7  # Common after pooling operations
+            flattened_size = spatial_dim * spatial_dim * filters
+            return f"{spatial_dim}×{spatial_dim}×{filters} → ({flattened_size},)"
+        
+        # Flatten to Dense
+        elif prev_layer.layer_type == 'flatten' and current_layer.layer_type == 'dense':
+            flattened_size = int(prev_layer.width / self.scale_factor) if hasattr(prev_layer, 'width') and prev_layer.width > 1 else 512
+            return f"({flattened_size},) → {current_layer.units or 128}"
+        
+        # Conv/Pool/Flatten to Dense
+        elif (prev_layer.layer_type.startswith('conv') or 'pool' in prev_layer.layer_type or prev_layer.layer_type == 'flatten') and (current_layer.layer_type == 'dense' or current_layer.layer_type == 'output'):
             if prev_layer.layer_id == 'flatten':
                 flattened = int(prev_layer.width / self.scale_factor) if prev_layer.width > 1 else 512
                 return f"{flattened} → {current_layer.units or 128}"
@@ -628,7 +647,7 @@ class ModelVisualizer:
         # Default
         return f"{prev_layer.layer_type} → {current_layer.layer_type}"
 
-    def get_performance_color_scheme(self, performance_score: float, health_score: Optional[float] = None) -> Dict[str, str]:
+    def get_performance_color_scheme(self, performance_score: float, health_score: Optional[float] = None) -> Dict[str, Union[str, float]]:
         """
         Get color scheme based on performance and health scores
         

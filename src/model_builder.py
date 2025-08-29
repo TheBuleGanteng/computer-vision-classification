@@ -48,13 +48,14 @@ import sys
 import tensorflow as tf
 from tensorflow import keras # type: ignore
 import traceback
-from typing import Dict, Any, List, Tuple, Optional, Union
+from typing import Dict, Any, List, Tuple, Optional, Union, TYPE_CHECKING
 from utils.logger import logger, PerformanceLogger, TimedOperation
 
+if TYPE_CHECKING:
+    from optimizer import OptimizationConfig
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Any, List, Tuple, Optional, Union
 
 # Move PaddingOption outside the class to avoid issues
 class PaddingOption(Enum):
@@ -64,7 +65,39 @@ class PaddingOption(Enum):
 @dataclass
 class ModelConfig:
     """
-    Optimized configuration for model architecture with enhanced GPU proxy support
+    Model architecture configuration with dual-purpose default system.
+    
+    This class serves two distinct roles:
+    
+    **1. Hyperparameter Optimization (Primary Use)**
+    During optimization, ModelOptimizer creates an empty ModelConfig() and dynamically 
+    populates it with Optuna-suggested parameters:
+    
+        model_config = ModelConfig()  # Uses defaults initially
+        for key, value in optuna_params.items():
+            if hasattr(model_config, key):
+                setattr(model_config, key, value)  # Overrides defaults
+    
+    **2. Standalone/Testing/Development Usage**
+    When used without optimization, the dataclass defaults provide sensible 
+    fallback values that create working models:
+    
+        model_config = ModelConfig()  # Uses all defaults
+        # Creates a basic CNN: 2 conv layers, 32 filters, 3x3 kernels, no global pooling
+    
+    **Default Override Pattern:**
+    - num_layers_conv: int = 2              → Default used in testing/standalone
+    - kernel_size: Tuple[int, int] = (3, 3) → Overridden by Optuna during optimization
+    - use_global_pooling: bool = False      → Randomly True/False via Optuna trials
+    
+    **Key Design Principles:**
+    - Defaults are conservative and stable (work for most architectures)
+    - All defaults can be overridden by Optuna suggestions
+    - Parameters not suggested by Optuna retain their default values
+    - Supports both CNN and LSTM architectures with appropriate defaults
+    
+    This dual-purpose design enables the same class to serve both optimized 
+    hyperparameter tuning and standalone model development workflows.
     """
     
     # Architecture selection

@@ -240,6 +240,22 @@ const BestArchitectureView = React.memo(() => {
                     <span className="font-medium">{bestTrial.architecture.activation}</span>
                   </div>
                 )}
+                {bestTrial.hyperparameters?.kernel_size !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Kernel Size:</span>
+                    <span className="font-medium">
+                      {Array.isArray(bestTrial.hyperparameters.kernel_size) 
+                        ? (bestTrial.hyperparameters.kernel_size as (string | number)[]).join('×') 
+                        : String(bestTrial.hyperparameters.kernel_size)}
+                    </span>
+                  </div>
+                )}
+                {bestTrial.hyperparameters?.kernel_initializer !== undefined && typeof bestTrial.hyperparameters.kernel_initializer === 'string' && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Kernel Init:</span>
+                    <span className="font-medium">{bestTrial.hyperparameters.kernel_initializer}</span>
+                  </div>
+                )}
               </div>
               
               <div className="space-y-2">
@@ -259,6 +275,24 @@ const BestArchitectureView = React.memo(() => {
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Batch Norm:</span>
                     <span className="font-medium">{bestTrial.architecture.batch_normalization ? 'Yes' : 'No'}</span>
+                  </div>
+                )}
+                {bestTrial.architecture?.use_global_pooling !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Flattening:</span>
+                    <span className="font-medium">{bestTrial.architecture.use_global_pooling ? 'No' : 'Yes'}</span>
+                  </div>
+                )}
+                {bestTrial.hyperparameters?.epochs !== undefined && typeof bestTrial.hyperparameters.epochs === 'number' && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Epochs:</span>
+                    <span className="font-medium">{bestTrial.hyperparameters.epochs}</span>
+                  </div>
+                )}
+                {bestTrial.hyperparameters?.optimizer !== undefined && typeof bestTrial.hyperparameters.optimizer === 'string' && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Optimizer:</span>
+                    <span className="font-medium">{bestTrial.hyperparameters.optimizer}</span>
                   </div>
                 )}
               </div>
@@ -299,6 +333,18 @@ const BestArchitectureView = React.memo(() => {
                 <div className="p-2 bg-muted/50 rounded">
                   <div className="font-medium text-muted-foreground">Param Efficiency</div>
                   <div className="text-sm font-semibold">{(bestTrial.health_metrics.parameter_efficiency * 100).toFixed(1)}%</div>
+                </div>
+              )}
+              {bestTrial.hyperparameters?.learning_rate !== undefined && typeof bestTrial.hyperparameters.learning_rate === 'number' && (
+                <div className="p-2 bg-muted/50 rounded">
+                  <div className="font-medium text-muted-foreground">Learning Rate</div>
+                  <div className="text-sm font-semibold">{bestTrial.hyperparameters.learning_rate}</div>
+                </div>
+              )}
+              {bestTrial.hyperparameters?.first_hidden_layer_dropout !== undefined && typeof bestTrial.hyperparameters.first_hidden_layer_dropout === 'number' && (
+                <div className="p-2 bg-muted/50 rounded">
+                  <div className="font-medium text-muted-foreground">Dropout Rate</div>
+                  <div className="text-sm font-semibold">{(bestTrial.hyperparameters.first_hidden_layer_dropout * 100).toFixed(1)}%</div>
                 </div>
               )}
             </div>
