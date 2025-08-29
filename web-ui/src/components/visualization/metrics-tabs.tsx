@@ -47,7 +47,7 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   const [showArchitecturePopup, setShowArchitecturePopup] = useState(false);
   const tabModelGraphRef = useRef<{ exportToPNG: () => Promise<Blob | null> } | null>(null);
   
-  // Download function for Model Architecture tab
+  // Download function for Model Architecture tab using Save As dialog
   const downloadArchitecturePNG = useCallback(async () => {
     try {
       if (!tabModelGraphRef.current?.exportToPNG) {
@@ -55,17 +55,50 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
         return;
       }
       const pngBlob = await tabModelGraphRef.current.exportToPNG();
-      if (pngBlob) {
-        const url = URL.createObjectURL(pngBlob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `model_architecture_${jobId}_${trialId || 'latest'}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-        console.log('Architecture PNG downloaded successfully');
+      if (!pngBlob) {
+        console.error('Failed to generate PNG blob');
+        return;
       }
+
+      const defaultFilename = `model_architecture_${jobId}_${trialId || 'latest'}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
+
+      // Use File System Access API for modern browsers with Save As dialog
+      if ('showSaveFilePicker' in window) {
+        try {
+          const fileHandle = await (window as unknown as { showSaveFilePicker: (options: {
+            suggestedName: string;
+            types: Array<{ description: string; accept: Record<string, string[]> }>;
+          }) => Promise<{ createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }> }).showSaveFilePicker({
+            suggestedName: defaultFilename,
+            types: [{
+              description: 'PNG images',
+              accept: { 'image/png': ['.png'] },
+            }],
+          });
+          const writable = await fileHandle.createWritable();
+          await writable.write(pngBlob);
+          await writable.close();
+          console.log('Architecture PNG saved successfully');
+          return;
+        } catch (saveError: unknown) {
+          if ((saveError as Error).name === 'AbortError') {
+            console.log('Save dialog was cancelled by user');
+            return;
+          }
+          console.warn('Save As dialog failed, falling back to download:', saveError);
+        }
+      }
+
+      // Fallback for browsers that don't support File System Access API
+      const url = URL.createObjectURL(pngBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = defaultFilename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      console.log('Architecture PNG downloaded successfully (fallback method)');
     } catch (error) {
       console.error('Failed to download architecture PNG:', error);
     }

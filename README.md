@@ -399,7 +399,7 @@ class ModelOptimizer:
 - ✅ Enable download each model archatecture visualization to disk as a .png
 - ✅ Add an additional tab to the "Training Metrics & Diagnostics" section called "Model Archatecture" that, when clicked, displays the same model archatecture visualization currently provided in the "Model Architecture" section, including the legend, animate button, and download button, effectively duplicating the model visualization contained in the "Model Architecture" section of the UI.
 - ✅ Eliminate the "Model Architecture" section of the UI, since the model archatecture is visible via that tab within the "Training Metrics & Diagnostics" section of the UI.
-- 🔄 The "Download" button for the plots should use the "Save as" mechanism that propmpts the user to decide where to save the downloaded file, as opposed to the current behavior of automatically saving to the dowloads folder.
+- ✅ The "Download" button for the plots should use the "Save as" mechanism that propmpts the user to decide where to save the downloaded file, as opposed to the current behavior of automatically saving to the dowloads folder.
 - 🔄 Remove persistant "Unable to add filesystem: <illegal path>" error in the JS console
 - 🔄 The status bar in the UI that shows the progression of each epoch should also show the progression of the final model creation after the last trial is completed, so as to better communicate to the user what is going on and the progress toward completion of the process.
 - 🔄 Vastly improved responsiveness of the UI, so as to render better on mobile.

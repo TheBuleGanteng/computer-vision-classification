@@ -252,9 +252,64 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => {
-                    const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
-                    window.open(fullUrl, '_blank');
+                  onClick={async () => {
+                    try {
+                      const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
+                      
+                      // Fetch the plot image as blob
+                      const response = await fetch(fullUrl);
+                      if (!response.ok) {
+                        console.error('Failed to fetch plot image:', response.status);
+                        window.open(fullUrl, '_blank'); // Fallback to open in new tab
+                        return;
+                      }
+                      const plotBlob = await response.blob();
+                      
+                      const defaultFilename = currentPlot.filename || `${getPlotDisplayName(currentPlot.plot_type).replace(/\s+/g, '_').toLowerCase()}_${jobId}_${trialId || 'latest'}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
+
+                      // Use File System Access API for modern browsers with Save As dialog
+                      if ('showSaveFilePicker' in window) {
+                        try {
+                          const fileHandle = await (window as unknown as { showSaveFilePicker: (options: {
+                            suggestedName: string;
+                            types: Array<{ description: string; accept: Record<string, string[]> }>;
+                          }) => Promise<{ createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }> }).showSaveFilePicker({
+                            suggestedName: defaultFilename,
+                            types: [{
+                              description: 'PNG images',
+                              accept: { 'image/png': ['.png'] },
+                            }],
+                          });
+                          const writable = await fileHandle.createWritable();
+                          await writable.write(plotBlob);
+                          await writable.close();
+                          console.log('Plot saved successfully');
+                          return;
+                        } catch (saveError: unknown) {
+                          if ((saveError as Error).name === 'AbortError') {
+                            console.log('Save dialog was cancelled by user');
+                            return;
+                          }
+                          console.warn('Save As dialog failed, falling back to download:', saveError);
+                        }
+                      }
+
+                      // Fallback for browsers that don't support File System Access API
+                      const url = URL.createObjectURL(plotBlob);
+                      const link = document.createElement('a');
+                      link.href = url;
+                      link.download = defaultFilename;
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      URL.revokeObjectURL(url);
+                      console.log('Plot downloaded successfully (fallback method)');
+                    } catch (error) {
+                      console.error('Failed to download plot:', error);
+                      // Final fallback - open in new tab
+                      const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
+                      window.open(fullUrl, '_blank');
+                    }
                   }}
                   className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
                 >
