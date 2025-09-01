@@ -36,14 +36,25 @@ const TARGET_METRICS = [
 
 export function OptimizationControls() {
   const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
-  const { jobStatus, elapsedSeconds } = useComprehensiveStatus()
+  const { jobStatus, elapsedSeconds, trials } = useComprehensiveStatus()
   
   // Sync comprehensive status data with dashboard context
   useEffect(() => {
     if (jobStatus?.progress) {
-      setProgress({ ...jobStatus.progress })
+      // Create enhanced progress object with proper typing
+      const enhancedProgress: any = { ...jobStatus.progress }
+      
+      // Extract plot_generation from the current running trial
+      if (trials && trials.length > 0) {
+        const runningTrial = trials.find(trial => trial.status === 'running')
+        if (runningTrial && (runningTrial as any).plot_generation) {
+          enhancedProgress.plot_generation = (runningTrial as any).plot_generation
+        }
+      }
+      
+      setProgress(enhancedProgress)
     }
-  }, [jobStatus?.progress, setProgress])
+  }, [jobStatus?.progress, trials, setProgress])
 
   // Monitor job status changes for completion/failure
   useEffect(() => {
@@ -401,6 +412,21 @@ export function OptimizationControls() {
                           </div>
                         </div>
                       )}
+                    </div>
+                  )}
+                  {progress.plot_generation && progress.plot_generation.status === 'generating' && (
+                    <div>
+                      <span>Plots: </span>
+                      <span className="font-medium">{progress.plot_generation.current_plot}</span>
+                      <span className="ml-1 text-gray-500">({progress.plot_generation.completed_plots}/{progress.plot_generation.total_plots})</span>
+                      <div className="ml-2 mt-1">
+                        <div className="w-32 bg-gray-200 rounded-full h-1.5">
+                          <div 
+                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
+                            style={{width: `${Math.max(0, Math.min(100, (progress.plot_generation.plot_progress || 0) * 100))}%`}}
+                          ></div>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>

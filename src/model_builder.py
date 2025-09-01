@@ -48,7 +48,7 @@ import sys
 import tensorflow as tf
 from tensorflow import keras # type: ignore
 import traceback
-from typing import Dict, Any, List, Tuple, Optional, Union, TYPE_CHECKING
+from typing import Dict, Any, List, Tuple, Optional, Union, TYPE_CHECKING, Callable
 from utils.logger import logger, PerformanceLogger, TimedOperation
 
 if TYPE_CHECKING:
@@ -664,7 +664,8 @@ class ModelBuilder:
         self, 
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
-        use_multi_gpu: bool = False
+        use_multi_gpu: bool = False,
+        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None
     ) -> keras.callbacks.History:
         """
         Enhanced training with optimized GPU proxy execution
@@ -679,7 +680,7 @@ class ModelBuilder:
         
         # Execute local training
         logger.debug("running train ... Using local training execution")
-        return self._train_locally_optimized(data, validation_split, use_multi_gpu)
+        return self._train_locally_optimized(data, validation_split, use_multi_gpu, plot_progress_callback)
     
     
     def _should_use_gpu_proxy(self) -> bool:
@@ -1479,7 +1480,8 @@ class ModelBuilder:
         self, 
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
-        use_multi_gpu: bool = False
+        use_multi_gpu: bool = False,
+        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None
     ) -> keras.callbacks.History:
         """
         Optimized local training execution with PROPER multi-GPU implementation
@@ -1647,7 +1649,7 @@ class ModelBuilder:
             raise RuntimeError("Training failed - no history returned")
         
         # Generate training visualization plots after successful training
-        self._generate_training_plots(training_data, validation_data)
+        self._generate_training_plots(training_data, validation_data, plot_progress_callback)
         
         return self.training_history
 
@@ -1743,7 +1745,7 @@ class ModelBuilder:
         
         return HealthMetricsCallback(log_dir, self.health_analyzer)
 
-    def _generate_training_plots(self, training_data: Tuple[np.ndarray, np.ndarray], validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None) -> None:
+    def _generate_training_plots(self, training_data: Tuple[np.ndarray, np.ndarray], validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None, plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None) -> None:
         """
         Generate comprehensive training visualization plots after training completion
         
@@ -1815,7 +1817,8 @@ class ModelBuilder:
                 run_timestamp=self.run_timestamp or datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
                 plot_dir=plot_dir,
                 log_detailed_predictions=True,
-                max_predictions_to_show=20
+                max_predictions_to_show=20,
+                progress_callback=plot_progress_callback
             )
             
             # Log which plot types were generated

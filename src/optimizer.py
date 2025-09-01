@@ -99,6 +99,9 @@ class TrialProgress:
     # Pruning Information
     pruning_info: Optional[Dict[str, Any]] = None
     
+    # Plot Generation Progress
+    plot_generation: Optional[Dict[str, Any]] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API serialization"""
         return {
@@ -118,7 +121,8 @@ class TrialProgress:
             'training_stability': self.training_stability,
             'performance': self.performance,
             'training_history': self.training_history,
-            'pruning_info': self.pruning_info
+            'pruning_info': self.pruning_info,
+            'plot_generation': self.plot_generation
         }
 
 
@@ -1674,14 +1678,46 @@ class ModelOptimizer:
                 return callbacks_list
             model_builder._setup_training_callbacks_optimized = enhanced_setup_callbacks
             
+            # Create plot progress callback
+            def plot_progress_callback(current_plot_name: str, completed_plots: int, total_plots: int, overall_progress: float):
+                """Update trial progress with plot generation status"""
+                plot_generation_data = {
+                    "status": "generating",
+                    "current_plot": current_plot_name,
+                    "completed_plots": completed_plots,
+                    "total_plots": total_plots,
+                    "plot_progress": overall_progress
+                }
+                
+                # Update current trial progress with plot generation status
+                if self._current_trial_progress:
+                    self._current_trial_progress.plot_generation = plot_generation_data
+                
+                logger.debug(f"running plot_progress_callback ... Trial {trial.number}: Plot progress - {current_plot_name} ({completed_plots}/{total_plots}, {overall_progress*100:.1f}%)")
+
             # Train the model
             history = model_builder.train(
                 data=training_data,
-                validation_split=self.config.validation_split
+                validation_split=self.config.validation_split,
+                plot_progress_callback=plot_progress_callback
             )
             
             # Calculate training time
             training_time_minutes = (time.time() - trial_start_time) / 60
+            
+            # Mark plot generation as completed
+            if self._current_trial_progress:
+                self._current_trial_progress.plot_generation = {
+                    "status": "completed",
+                    "current_plot": "All plots complete",
+                    "completed_plots": self._current_trial_progress.plot_generation.get("total_plots", 0) if self._current_trial_progress.plot_generation else 0,
+                    "total_plots": self._current_trial_progress.plot_generation.get("total_plots", 0) if self._current_trial_progress.plot_generation else 0,
+                    "plot_progress": 1.0
+                }
+                
+                # Update the trial progress in the history to include the completed plot generation
+                logger.debug(f"running _train_locally_for_trial ... Updating trial {trial.number} in history with completed plot generation")
+                self._thread_safe_progress_callback(self._current_trial_progress)
 
             # Get comprehensive metrics using HealthAnalyzer
             comprehensive_metrics = model_builder.health_analyzer.calculate_comprehensive_health(
