@@ -1,7 +1,6 @@
 "use client"
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
@@ -214,11 +213,24 @@ export const ModelGraph = React.forwardRef<
 >(({ architectureData, onNodeClick, className = "", onPngExportRequest, showLegend = false }, ref) => {
   const cyRef = useRef<cytoscape.Core | null>(null);
   
+  // Type definitions for experimental web APIs
+  interface SchedulerPostTaskOptions {
+    priority: 'background' | 'user-visible' | 'user-blocking'
+    delay?: number
+  }
+  
+  interface WindowWithScheduler extends Window {
+    scheduler?: {
+      postTask: (callback: () => void, options: SchedulerPostTaskOptions) => void
+    }
+  }
+
   // Non-blocking scheduler to prevent React setTimeout violations
-  const scheduleNonUrgent = (callback: () => void, delay: number = 0) => {
-    if ('scheduler' in window && 'postTask' in (window as any).scheduler) {
+  const scheduleNonUrgent = useCallback((callback: () => void, delay: number = 0) => {
+    const windowWithScheduler = window as WindowWithScheduler
+    if (windowWithScheduler.scheduler?.postTask) {
       // Use modern Scheduler API if available
-      (window as any).scheduler.postTask(callback, { priority: 'background', delay });
+      windowWithScheduler.scheduler.postTask(callback, { priority: 'background', delay });
     } else if ('requestIdleCallback' in window) {
       // Fallback to requestIdleCallback
       requestIdleCallback(callback, { timeout: delay + 50 });
@@ -226,7 +238,7 @@ export const ModelGraph = React.forwardRef<
       // Final fallback to setTimeout (but try to avoid React's main thread)
       setTimeout(callback, Math.max(delay, 0));
     }
-  };
+  }, []);
 
   // Cytoscape.js stylesheet for educational neural network visualization
   const cytoscapeStylesheet = [
@@ -676,7 +688,7 @@ export const ModelGraph = React.forwardRef<
         resizeObserver.disconnect();
       };
     }
-  }, [architectureData]);
+  }, [architectureData, scheduleNonUrgent]);
 
   // Toggle-based looping animation system with viewport optimization
   const [isAnimating, setIsAnimating] = React.useState(false);

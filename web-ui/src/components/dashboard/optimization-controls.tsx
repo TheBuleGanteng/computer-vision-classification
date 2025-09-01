@@ -12,10 +12,10 @@ import {
   Play, 
   Square, 
   Download,
-  Database,
-  Target,
   Info
 } from "lucide-react"
+import { TrialProgress } from "@/types/optimization"
+import { ProgressData } from "./dashboard-provider"
 
 // Supported datasets from your optimization system
 const DATASETS = [
@@ -35,26 +35,28 @@ const TARGET_METRICS = [
 ]
 
 export function OptimizationControls() {
-  const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
+  const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setHealthWeight, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
   const { jobStatus, elapsedSeconds, trials } = useComprehensiveStatus()
   
   // Sync comprehensive status data with dashboard context
   useEffect(() => {
     if (jobStatus?.progress) {
       // Create enhanced progress object with proper typing
-      const enhancedProgress: any = { ...jobStatus.progress }
+      const enhancedProgress = { ...jobStatus.progress } as ProgressData
       
       // Extract plot_generation from the current running trial
       if (trials && trials.length > 0) {
         const runningTrial = trials.find(trial => trial.status === 'running')
-        if (runningTrial && (runningTrial as any).plot_generation) {
-          enhancedProgress.plot_generation = (runningTrial as any).plot_generation
+        const runningTrialWithType = runningTrial as TrialProgress | undefined
+        if (runningTrialWithType?.plot_generation) {
+          enhancedProgress.plot_generation = runningTrialWithType.plot_generation
         }
       }
       
       // Final model building progress comes from job_status.progress directly (not from trials)
-      if (jobStatus.progress && (jobStatus.progress as any).final_model_building) {
-        enhancedProgress.final_model_building = (jobStatus.progress as any).final_model_building
+      const progressWithExtensions = jobStatus.progress as Record<string, unknown>
+      if (progressWithExtensions.final_model_building) {
+        enhancedProgress.final_model_building = progressWithExtensions.final_model_building as ProgressData['final_model_building']
       }
       
       setProgress(enhancedProgress)
@@ -85,7 +87,7 @@ export function OptimizationControls() {
       }
       console.log(`Optimization ${jobStatus.status}`)
     }
-  }, [jobStatus?.status, jobStatus?.error, currentJobId])
+  }, [jobStatus?.status, jobStatus?.error, jobStatus, currentJobId, setIsOptimizationRunning, setCurrentJobId, setProgress])
   
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
@@ -99,10 +101,13 @@ export function OptimizationControls() {
     if (selectedTargetMetric && selectedTargetMetric !== "") {
       const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
       if (targetMetric) {
-        setOptimizationMode(targetMetric.mode as "simple" | "health")
+        const mode = targetMetric.mode as "simple" | "health"
+        const healthWeight = mode === 'health' ? 0.3 : 0.0
+        setOptimizationMode(mode)
+        setHealthWeight(healthWeight)
       }
     }
-  }, [selectedTargetMetric, setOptimizationMode])
+  }, [selectedTargetMetric, setOptimizationMode, setHealthWeight])
 
   const handleOptimizationToggle = async () => {
     if (isOptimizationRunning && currentJobId) {
@@ -131,12 +136,17 @@ export function OptimizationControls() {
         
         const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
         const mode = targetMetric?.mode as 'simple' | 'health'
+        const healthWeight = mode === 'health' ? 0.3 : 0.0 // Use API default
         
         const request = {
           // Core parameters
           dataset_name: selectedDataset,
-          mode: mode
+          mode: mode,
+          health_weight: healthWeight
         }
+        
+        // Update dashboard context with the health weight
+        setHealthWeight(healthWeight)
         // All other parameters will use API defaults from OptimizationRequest
 
         console.log(`Starting optimization:`, request)
@@ -266,7 +276,27 @@ export function OptimizationControls() {
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
           {/* Dataset Selection */}
           <div className="flex items-center gap-3 w-full sm:w-auto">
-            <Database className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+            <Tooltip
+              content={
+                <div className="space-y-3">
+                  <p className="font-bold">Dataset Information</p>
+                  <p>To learn more about each dataset, see the links below:</p>
+                  <ul className="space-y-1 text-sm">
+                    <li>• <strong><a href="https://keras.io/api/datasets/mnist/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">MNIST</a>:</strong> Handwritten digits 0-9</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/cifar10/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">CIFAR-10</a>:</strong> Color images</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/cifar100/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">CIFAR-100</a>:</strong> Color images</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/fashion_mnist/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">Fashion-MNIST</a>:</strong> Greyscale images</li>
+                    <li>• <strong><a href="https://www.kaggle.com/datasets/meowmeowmeowmeowmeow/gtsrb-german-traffic-sign" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">GTSRB</a>:</strong> Color images</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/imdb/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">IMDB</a>:</strong> Text-based classification</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/reuters/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">Reuters</a>:</strong> Text-based classification</li>
+                  </ul>
+                </div>
+              }
+            >
+              <div className="flex items-center justify-center w-5 h-5 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition-colors">
+                <Info className="h-3 w-3" />
+              </div>
+            </Tooltip>
             <div className="w-full sm:w-auto sm:min-w-[280px]">
               <Select
                 value={selectedDataset}
@@ -285,25 +315,10 @@ export function OptimizationControls() {
 
           {/* Target Metric Selection */}
           <div className="flex items-center gap-3 w-full sm:w-auto">
-            <Target className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-            <div className="w-full sm:w-auto sm:min-w-[240px]">
-              <Select
-                value={selectedTargetMetric}
-                onValueChange={setSelectedTargetMetric}
-                placeholder="Select target metric"
-                disabled={isOptimizationRunning}
-              >
-                {TARGET_METRICS.map((metric) => (
-                  <SelectItem key={metric.value} value={metric.value}>
-                    {metric.label}
-                  </SelectItem>
-                ))}
-              </Select>
-            </div>
             <Tooltip
               content={
                 <div className="space-y-2">
-                  <p className="font-medium">Model health vs accuracy</p>
+                  <p className="font-bold">Model health vs. accuracy</p>
                   <p>
                     <strong>Accuracy only:</strong> Optimizes solely for prediction correctness on test data.
                   </p>
@@ -333,6 +348,20 @@ export function OptimizationControls() {
                 <Info className="h-3 w-3" />
               </div>
             </Tooltip>
+            <div className="w-full sm:w-auto sm:min-w-[240px]">
+              <Select
+                value={selectedTargetMetric}
+                onValueChange={setSelectedTargetMetric}
+                placeholder="Select target metric"
+                disabled={isOptimizationRunning}
+              >
+                {TARGET_METRICS.map((metric) => (
+                  <SelectItem key={metric.value} value={metric.value}>
+                    {metric.label}
+                  </SelectItem>
+                ))}
+              </Select>
+            </div>
           </div>
 
           {/* Control Buttons */}

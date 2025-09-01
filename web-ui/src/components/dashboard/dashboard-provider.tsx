@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, ReactNode } from 'react'
 
-interface ProgressData {
+export interface ProgressData {
   trials_performed?: number
   best_accuracy?: number
   best_total_score?: number
@@ -33,10 +33,12 @@ interface ProgressData {
 interface DashboardContextType {
   progress: ProgressData | null
   optimizationMode: "simple" | "health"
+  healthWeight: number
   isOptimizationRunning: boolean
   currentJobId: string | null
   setProgress: (progress: ProgressData | null) => void
   setOptimizationMode: (mode: "simple" | "health") => void
+  setHealthWeight: (weight: number) => void
   setIsOptimizationRunning: (running: boolean) => void
   setCurrentJobId: (jobId: string | null) => void
 }
@@ -45,7 +47,8 @@ const DashboardContext = createContext<DashboardContextType | undefined>(undefin
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [progress, setProgress] = useState<ProgressData | null>(null)
-  const [optimizationMode, setOptimizationMode] = useState<"simple" | "health">("simple")
+  const [optimizationMode, setOptimizationMode] = useState<"simple" | "health">("health")
+  const [healthWeight, setHealthWeight] = useState<number>(0.3) // Default from API
   const [isOptimizationRunning, setIsOptimizationRunning] = useState(false)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
 
@@ -53,10 +56,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     <DashboardContext.Provider value={{
       progress,
       optimizationMode,
+      healthWeight,
       isOptimizationRunning,
       currentJobId,
       setProgress,
       setOptimizationMode,
+      setHealthWeight,
       setIsOptimizationRunning,
       setCurrentJobId
     }}>

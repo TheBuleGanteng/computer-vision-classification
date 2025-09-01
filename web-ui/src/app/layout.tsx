@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Navigation } from "@/components/navigation";
+import { Footer } from "@/components/footer";
 import { QueryProvider } from "@/providers/query-client-provider";
 import { Toaster } from "sonner";
 import { PerformanceMonitorInit } from "@/components/performance-monitor-init";
@@ -17,8 +18,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Neural Architecture Explorer",
+  title: "Onegin:Neural Architecture Explorer",
   description: "Interactive 3D visualization of neural network architectures from hyperparameter optimization",
+  icons: {
+    icon: "/logo_keytech_favicon.ico",
+    shortcut: "/logo_keytech_favicon.ico",
+    apple: "/logo_keytech_favicon.ico",
+  },
 };
 
 export default function RootLayout({
@@ -38,6 +44,7 @@ export default function RootLayout({
             <main className="flex-1">
               {children}
             </main>
+            <Footer />
           </div>
           <Toaster richColors position="top-right" />
         </QueryProvider>

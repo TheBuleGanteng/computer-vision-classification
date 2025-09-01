@@ -251,7 +251,7 @@ class OptimizationRequest(BaseModel):
     dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'mnist', 'imdb')")
     
     # Commonly modified user-controlled variables with defaults HERE
-    mode: str = Field("simple", pattern="^(simple|health)$", description="Optimization mode")
+    mode: str = Field("health", pattern="^(simple|health)$", description="Optimization mode")
     optimize_for: str = Field("val_accuracy", description="Optimization objective")
     trials: int = Field(2, ge=1, le=500, description="Number of optimization trials")
     max_epochs_per_trial: int = Field(6, ge=1, le=100, description="Maximum epochs per trial")

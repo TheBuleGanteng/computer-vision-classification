@@ -62,7 +62,7 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
       return true;
     }
     return false;
-  }, [jobId, trialId, activeTab]);
+  }, []); // Dependencies removed as computation doesn't depend on these values
   
   // Download function for Model Architecture tab using Save As dialog
   const downloadArchitecturePNG = useCallback(async () => {
