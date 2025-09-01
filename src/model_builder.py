@@ -665,7 +665,8 @@ class ModelBuilder:
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
         use_multi_gpu: bool = False,
-        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None
+        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None,
+        epoch_progress_callback: Optional[Callable[[int, float], None]] = None
     ) -> keras.callbacks.History:
         """
         Enhanced training with optimized GPU proxy execution
@@ -680,7 +681,7 @@ class ModelBuilder:
         
         # Execute local training
         logger.debug("running train ... Using local training execution")
-        return self._train_locally_optimized(data, validation_split, use_multi_gpu, plot_progress_callback)
+        return self._train_locally_optimized(data, validation_split, use_multi_gpu, plot_progress_callback, epoch_progress_callback)
     
     
     def _should_use_gpu_proxy(self) -> bool:
@@ -1481,7 +1482,8 @@ class ModelBuilder:
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
         use_multi_gpu: bool = False,
-        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None
+        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None,
+        epoch_progress_callback: Optional[Callable[[int, float], None]] = None
     ) -> keras.callbacks.History:
         """
         Optimized local training execution with PROPER multi-GPU implementation
@@ -1498,6 +1500,35 @@ class ModelBuilder:
         
         # Enhanced callback setup
         callbacks_list = self._setup_training_callbacks_optimized()
+        
+        # Add epoch progress callback if provided (for final model building)
+        if epoch_progress_callback:
+            from keras.callbacks import Callback
+            
+            class FinalModelEpochCallback(Callback):
+                def __init__(self, progress_callback):
+                    super().__init__()
+                    self.progress_callback = progress_callback
+                    self.current_epoch = 0
+                    self.total_epochs = 0
+                    
+                def on_train_begin(self, logs=None):
+                    self.total_epochs = self.params.get('epochs', 0)
+                    
+                def on_epoch_begin(self, epoch, logs=None):
+                    self.current_epoch = epoch + 1  # Convert to 1-based
+                    self.progress_callback(self.current_epoch, 0.0)  # Start of epoch
+                    
+                def on_batch_end(self, batch, logs=None):
+                    if hasattr(self, 'params') and self.params:
+                        total_batches = self.params.get('steps', 1)
+                        batch_progress = (batch + 1) / total_batches
+                        self.progress_callback(self.current_epoch, batch_progress)
+                        
+                def on_epoch_end(self, epoch, logs=None):
+                    self.progress_callback(self.current_epoch, 1.0)  # End of epoch
+            
+            callbacks_list.append(FinalModelEpochCallback(epoch_progress_callback))
         
         # Check multi-GPU availability and model requirements
         available_gpus = tf.config.list_physical_devices('GPU')

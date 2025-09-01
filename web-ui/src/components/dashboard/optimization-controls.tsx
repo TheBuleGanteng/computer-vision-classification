@@ -52,6 +52,11 @@ export function OptimizationControls() {
         }
       }
       
+      // Final model building progress comes from job_status.progress directly (not from trials)
+      if (jobStatus.progress && (jobStatus.progress as any).final_model_building) {
+        enhancedProgress.final_model_building = (jobStatus.progress as any).final_model_building
+      }
+      
       setProgress(enhancedProgress)
     }
   }, [jobStatus?.progress, trials, setProgress])
@@ -424,6 +429,23 @@ export function OptimizationControls() {
                           <div 
                             className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
                             style={{width: `${Math.max(0, Math.min(100, (progress.plot_generation.plot_progress || 0) * 100))}%`}}
+                          ></div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {progress.final_model_building && progress.final_model_building.status === 'building' && (
+                    <div>
+                      <span>Final Model: </span>
+                      <span className="font-medium">{progress.final_model_building.current_step}</span>
+                      {progress.final_model_building.detailed_info && (
+                        <span className="ml-1 text-gray-500">({progress.final_model_building.detailed_info})</span>
+                      )}
+                      <div className="ml-2 mt-1">
+                        <div className="w-32 bg-gray-200 rounded-full h-1.5">
+                          <div 
+                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
+                            style={{width: `${Math.max(0, Math.min(100, (progress.final_model_building.progress || 0) * 100))}%`}}
                           ></div>
                         </div>
                       </div>

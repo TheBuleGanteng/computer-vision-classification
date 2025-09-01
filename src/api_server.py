@@ -572,6 +572,10 @@ class OptimizationJob:
             if unified_progress.epoch_progress is not None:
                 progress_update["epoch_progress"] = unified_progress.epoch_progress
             
+            # Include final model building progress
+            if unified_progress.final_model_building is not None:
+                progress_update["final_model_building"] = unified_progress.final_model_building
+            
             self.progress = progress_update
             
             # 🔍 UNIFIED PROGRESS DEBUG: Log all data being sent to UI
@@ -584,6 +588,10 @@ class OptimizationJob:
             logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')}")
             logger.info(f"    - Total Epochs: {progress_update.get('total_epochs', 'None')}")
             logger.info(f"    - Epoch Progress: {progress_update.get('epoch_progress', 'None')}")
+            logger.info(f"  🏗️ Final Model Building:")
+            logger.info(f"    - Status: {progress_update.get('final_model_building', {}).get('status', 'None')}")
+            logger.info(f"    - Current Step: {progress_update.get('final_model_building', {}).get('current_step', 'None')}")
+            logger.info(f"    - Progress: {progress_update.get('final_model_building', {}).get('progress', 'None')}")
             logger.info(f"  📊 Complete Progress Object: {progress_update}")
             
             # Log best score information

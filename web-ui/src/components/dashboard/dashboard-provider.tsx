@@ -22,6 +22,12 @@ interface ProgressData {
     total_plots: number
     plot_progress: number
   }
+  final_model_building?: {
+    status: 'building' | 'completed' | 'failed'
+    current_step: string
+    progress: number
+    detailed_info?: string
+  }
 }
 
 interface DashboardContextType {

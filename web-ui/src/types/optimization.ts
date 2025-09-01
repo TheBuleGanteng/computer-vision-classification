@@ -202,6 +202,14 @@ export interface TrialProgress {
     total_plots: number
     plot_progress: number
   }
+  
+  // Final Model Building Progress
+  final_model_building?: {
+    status: 'building' | 'completed' | 'failed'
+    current_step: string
+    progress: number
+    detailed_info?: string
+  }
 }
 
 // Trial data from CSV

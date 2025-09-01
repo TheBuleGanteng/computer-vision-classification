@@ -102,6 +102,9 @@ class TrialProgress:
     # Plot Generation Progress
     plot_generation: Optional[Dict[str, Any]] = None
     
+    # Final Model Building Progress
+    final_model_building: Optional[Dict[str, Any]] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API serialization"""
         return {
@@ -122,7 +125,8 @@ class TrialProgress:
             'performance': self.performance,
             'training_history': self.training_history,
             'pruning_info': self.pruning_info,
-            'plot_generation': self.plot_generation
+            'plot_generation': self.plot_generation,
+            'final_model_building': self.final_model_building
         }
 
 
@@ -650,6 +654,9 @@ class UnifiedProgress:
     current_trial_id: Optional[str] = None
     current_trial_status: Optional[str] = None
     
+    # Final model building progress
+    final_model_building: Optional[Dict[str, Any]] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API serialization"""
         return {
@@ -664,7 +671,8 @@ class UnifiedProgress:
             'total_epochs': self.total_epochs,
             'epoch_progress': self.epoch_progress,
             'current_trial_id': self.current_trial_id,
-            'current_trial_status': self.current_trial_status
+            'current_trial_status': self.current_trial_status,
+            'final_model_building': self.final_model_building
         }
 
 
@@ -1171,6 +1179,57 @@ class ModelOptimizer:
                     # Don't re-raise to avoid disrupting trial execution
             else:
                 logger.debug(f"running _thread_safe_progress_callback ... no user progress callback configured")
+    
+    def _report_final_model_progress(self, step_name: str, overall_progress: float, detailed_info: str = None) -> None:
+        """
+        Report progress during final model building phase
+        
+        Args:
+            step_name: Current step being performed (e.g., "Training epoch 3/5")
+            overall_progress: Overall progress (0.0 to 1.0)
+            detailed_info: Optional detailed information for the step
+        """
+        if not self.progress_callback:
+            return
+            
+        try:
+            logger.debug(f"running _report_final_model_progress ... {step_name} progress: {overall_progress:.1%}")
+            logger.debug(f"running _report_final_model_progress ... progress callback available: {self.progress_callback is not None}")
+            
+            # Create progress data structure
+            final_model_data = {
+                "status": "building" if overall_progress < 1.0 else "completed",
+                "current_step": step_name,
+                "progress": overall_progress,
+                "detailed_info": detailed_info
+            }
+            
+            # Create a unified progress update with final model building info
+            # Get current aggregated progress
+            best_trial_number, best_trial_value = self.get_best_trial_info()
+            self._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
+            
+            # During final model building, there's no current trial, so use the last completed trial
+            last_trial_progress = None
+            if self._trial_progress_history:
+                last_trial_progress = self._trial_progress_history[-1]
+            
+            aggregated_progress = self._progress_aggregator.aggregate_progress(
+                current_trial=last_trial_progress,
+                all_trial_statuses=self._trial_statuses
+            )
+            
+            # Create unified progress with final model building info
+            unified_progress = self._create_unified_progress(aggregated_progress, last_trial_progress)
+            
+            # Add final model building progress to unified progress
+            unified_progress.final_model_building = final_model_data
+            
+            logger.debug(f"running _report_final_model_progress ... calling progress callback with final model progress")
+            self.progress_callback(unified_progress)
+            
+        except Exception as e:
+            logger.error(f"running _report_final_model_progress ... error reporting progress: {e}")
     
     
     
@@ -2152,6 +2211,9 @@ class ModelOptimizer:
         try:
             logger.debug("running _build_final_model ... Building final model with best hyperparameters")
             
+            # Report progress: Starting final model building
+            self._report_final_model_progress("Initializing", 0.0)
+            
             # Import here to avoid circular imports
             from model_builder import ModelBuilder
             
@@ -2168,6 +2230,9 @@ class ModelOptimizer:
                     setattr(model_config, param_name, param_value)
                     logger.debug(f"running _build_final_model ... Set {param_name} = {param_value}")
             
+            # Report progress: Creating model builder
+            self._report_final_model_progress("Creating model", 0.05)
+            
             # Create ModelBuilder instance with dataset config and model config
             model_builder = ModelBuilder(
                 self.dataset_config, 
@@ -2181,13 +2246,57 @@ class ModelOptimizer:
             # Build, train, and evaluate the model
             model_builder.build_model()
             
+            # Report progress: Loading data
+            self._report_final_model_progress("Loading data", 0.10)
+            
             # Load data using dataset manager
             from dataset_manager import DatasetManager
             dataset_manager = DatasetManager()
             data = dataset_manager.load_dataset(self.dataset_name)
             
-            model_builder.train(data=data)
+            # Get number of epochs from model config for progress tracking
+            total_epochs = getattr(model_config, 'epochs', 5)
+            
+            # Create callbacks for epoch and plot progress tracking
+            def epoch_progress_callback(current_epoch: int, epoch_progress: float):
+                # Training takes 15% to 75% of total progress (60% total)
+                # Each epoch gets equal portion of that 60%
+                epoch_contribution = 0.60 / total_epochs
+                base_progress = 0.15 + ((current_epoch - 1) * epoch_contribution)
+                current_epoch_progress = base_progress + (epoch_progress * epoch_contribution)
+                
+                step_name = f"Training epoch {current_epoch}/{total_epochs}"
+                if epoch_progress < 1.0:
+                    detailed_info = f"{epoch_progress:.1%} complete"
+                else:
+                    detailed_info = "completed"
+                    
+                self._report_final_model_progress(step_name, current_epoch_progress, detailed_info)
+            
+            def plot_progress_callback(current_plot_name: str, completed_plots: int, total_plots: int, plot_progress: float):
+                # Plot generation takes 75% to 90% of total progress (15% total)
+                base_progress = 0.75
+                plot_contribution = 0.15 * plot_progress
+                total_progress = base_progress + plot_contribution
+                
+                step_name = f"Generating plots ({completed_plots}/{total_plots})"
+                detailed_info = current_plot_name
+                
+                self._report_final_model_progress(step_name, total_progress, detailed_info)
+            
+            # Report progress: Starting training
+            self._report_final_model_progress(f"Training epoch 1/{total_epochs}", 0.15, "starting")
+            
+            # Train with progress callbacks
+            model_builder.train(
+                data=data,
+                plot_progress_callback=plot_progress_callback,
+                epoch_progress_callback=epoch_progress_callback
+            )
             test_loss, test_accuracy = model_builder.evaluate(data=data)
+            
+            # Report progress: Saving model
+            self._report_final_model_progress("Saving model", 0.90)
             
             # Save the model
             model_path = model_builder.save_model(
@@ -2230,6 +2339,10 @@ class ModelOptimizer:
                         shutil.copy2(metadata_src, metadata_dst)
                     
                     logger.debug(f"running _build_final_model ... Final model saved to: {final_model_path}")
+                    
+                    # Report progress: Complete
+                    self._report_final_model_progress("Completed", 1.0)
+                    
                     return str(final_model_path)
                 else:
                     logger.error(f"running _build_final_model ... Model training completed but no valid model path found")
