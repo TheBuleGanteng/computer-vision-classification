@@ -423,7 +423,6 @@ class ModelOptimizer:
 - ✅ Currently, the "Onegin: A Neural Archatecture Explorer" text in the navbar is aligned to the left side of the screen without any left padding or margin. Add left padding so that the "Onegin: A Neural Archatecture Explorer" is horizonally aligned with the borders for the elements below it, such as the box that contains the drop-downs for dataset and accuracy/health.
 - ✅ Use the Keytech logo in the navbar and as the favicon
 - ✅ Implement a footer with the following elements: (a) Link to personal page, KeyTech page, MIT license page, and GitHub repo
-- 🔄 Implement a color theme throught the UI
 
 
 ---
@@ -437,9 +436,11 @@ class ModelOptimizer:
 - Explore and implement any additional means of more fully leveraging the runpod proxy GPU to further accelerate an optimization (for example, via plot generation or any other activities currently done via CPU)
 
 **Key Deliverables:**
+- ✅ Fix bug that occurs when multiple trials are running simultaniously and the first trial completed is considered trial_1 and the second trial completed is trial_0.  This does not make sense for the user. Instead, the first trial completed should be trial_0, the second trial completed should be trial_1, etc.
+- Ensure use of multiple GPUs as determined by concurrent_workers in in OptimizationConfig in optimizer.py
+- Migrate final model training to GPU. Currently, this still happens on local CPU, even when the trials are done on the runpod proxy GPU. This will include getting the correct status updates for that final model build from the runpod proxy GPU, similar to what is done with the trials.
+- Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled). Clicking the cancel run button in the UI should cancel the process and clear the runpod jobs, regardless of whether the optuna hyperparameter exploration process is underway or the final model building is underway. 
 - UI feature (checkbox) that allows the toggling on/off of runpod proxy GPU resources
-- Thorough testing with runpod proxy GPU enabled, so as to ensure smooth operation
-- Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled)
 
 ---
 

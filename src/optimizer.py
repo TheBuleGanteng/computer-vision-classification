@@ -415,7 +415,7 @@ class OptimizationResult:
     
     def summary(self) -> str:
         """Generate human-readable summary"""
-        objective_name = self.optimization_config.objective.value if self.optimization_config else "unknown"
+        optimize_for = self.optimization_config.objective.value if self.optimization_config else "unknown"
         mode_name = self.optimization_mode
         
         # Add health summary if available
@@ -432,7 +432,7 @@ class OptimizationResult:
 Optimization Summary for {self.dataset_name}:
 ===========================================
 Optimization Mode: {mode_name}
-Best {objective_name}: {self.best_total_score:.4f}
+Best {optimize_for}: {self.best_total_score:.4f}
 Successful trials: {self.successful_trials}/{self.total_trials}
 Optimization time: {self.optimization_time_hours:.2f} hours{health_summary}
 
@@ -468,7 +468,7 @@ class ConcurrentProgressAggregator:
     def __init__(self, total_trials: int):
         self.total_trials = total_trials
     
-    def aggregate_progress(self, current_trial: TrialProgress, all_trial_statuses: Dict[int, str]) -> 'AggregatedProgress':
+    def aggregate_progress(self, current_trial: Optional[TrialProgress], all_trial_statuses: Dict[int, str]) -> 'AggregatedProgress':
         """
         Aggregate progress from multiple concurrent trials
         
@@ -654,6 +654,9 @@ class UnifiedProgress:
     current_trial_id: Optional[str] = None
     current_trial_status: Optional[str] = None
     
+    # Status message for UI display
+    status_message: Optional[str] = None
+    
     # Final model building progress
     final_model_building: Optional[Dict[str, Any]] = None
     
@@ -672,6 +675,7 @@ class UnifiedProgress:
             'epoch_progress': self.epoch_progress,
             'current_trial_id': self.current_trial_id,
             'current_trial_status': self.current_trial_status,
+            'status_message': self.status_message,
             'final_model_building': self.final_model_building
         }
 
@@ -907,20 +911,28 @@ class ModelOptimizer:
         # Use the provided trial_progress or the stored current trial progress
         current_trial = trial_progress or self._current_trial_progress
         
-        # Get epoch information from the most recent running trial
+        # Get epoch information - different logic for GPU vs CPU mode
         current_epoch = None
         total_epochs = None
         epoch_progress = None
         
-        # Find the most recent epoch info from any running trial
-        if self._current_epoch_info:
-            for trial_num in aggregated_progress.running_trials:
-                if trial_num in self._current_epoch_info:
-                    epoch_info = self._current_epoch_info[trial_num]
-                    current_epoch = epoch_info.get('current_epoch')
-                    total_epochs = epoch_info.get('total_epochs')
-                    epoch_progress = epoch_info.get('epoch_progress')
-                    break  # Use the first running trial's epoch info
+        if self.config.use_runpod_service:
+            # GPU mode: Calculate aggregate epoch progress across all trials
+            total_epochs_across_trials, completed_epochs = self._calculate_aggregate_epoch_progress()
+            if total_epochs_across_trials > 0:
+                current_epoch = completed_epochs
+                total_epochs = total_epochs_across_trials
+                epoch_progress = completed_epochs / total_epochs_across_trials if total_epochs_across_trials > 0 else 0
+        else:
+            # CPU mode: Use per-trial epoch information (existing behavior)
+            if self._current_epoch_info:
+                for trial_num in aggregated_progress.running_trials:
+                    if trial_num in self._current_epoch_info:
+                        epoch_info = self._current_epoch_info[trial_num]
+                        current_epoch = epoch_info.get('current_epoch')
+                        total_epochs = epoch_info.get('total_epochs')
+                        epoch_progress = epoch_info.get('epoch_progress')
+                        break  # Use the first running trial's epoch info
         
         current_trial_id = getattr(current_trial, 'trial_id', None) if current_trial else None
         current_trial_status = getattr(current_trial, 'status', None) if current_trial else None
@@ -950,8 +962,86 @@ class ModelOptimizer:
             total_epochs=total_epochs,
             epoch_progress=epoch_progress,
             current_trial_id=current_trial_id,
-            current_trial_status=current_trial_status
+            current_trial_status=current_trial_status,
+            status_message=self._get_current_status_message(aggregated_progress, current_epoch)  # Preserve GPU init or use default
         )
+
+    def _get_current_status_message(self, aggregated_progress: 'AggregatedProgress', current_epoch: Optional[int]) -> Optional[str]:
+        """Determine the appropriate status message, preserving GPU initialization when needed"""
+        # If using RunPod service and no trials have actually started training yet, 
+        # preserve the "Initializing GPU" message
+        if (self.config.use_runpod_service and 
+            len(aggregated_progress.completed_trials) == 0 and
+            (current_epoch is None or current_epoch < 1)):
+            
+            return "Initializing GPU resources..."
+        
+        return None  # Use default status message
+
+    def _calculate_aggregate_epoch_progress(self) -> Tuple[int, int]:
+        """Calculate total epochs across all trials and completed epochs for GPU mode"""
+        # Only return epoch information if actual training has started
+        # (i.e., we have real epoch info from at least one trial)
+        if not self._current_epoch_info:
+            return 0, 0
+        
+        # Check if any trial has started actual training (epoch > 0)
+        any_training_started = False
+        for trial_id, epoch_info in self._current_epoch_info.items():
+            if epoch_info.get('current_epoch', 0) > 0:
+                any_training_started = True
+                break
+        
+        if not any_training_started:
+            return 0, 0
+        
+        total_epochs_all_trials = 0
+        completed_epochs = 0
+        
+        # Calculate total epochs across all trials that have started or will start
+        for trial_id in range(self.config.trials):
+            trial_epochs = 0
+            
+            # First check if we have current epoch info for this trial
+            if self._current_epoch_info and trial_id in self._current_epoch_info:
+                epoch_info = self._current_epoch_info[trial_id]
+                trial_epochs = epoch_info.get('total_epochs', 0)
+            
+            # Only use configured epochs if we have started training (not as initial fallback)
+            if trial_epochs == 0 and any_training_started:
+                trial_epochs = self.config.max_epochs_per_trial
+                
+            total_epochs_all_trials += trial_epochs
+        
+        # Calculate progress as total progress across all trials
+        total_progress = 0.0
+        
+        # First, handle completed trials (100% progress each)
+        completed_trial_ids = set()
+        if self._trial_progress_history:
+            for trial in self._trial_progress_history:
+                if trial.status == "completed":
+                    trial_id = getattr(trial, 'trial_number', None)
+                    if trial_id is not None:
+                        completed_trial_ids.add(trial_id)
+                        total_progress += 1.0  # 100% progress for completed trial
+        
+        # Then, handle currently running trials
+        for trial_id, epoch_info in self._current_epoch_info.items():
+            if trial_id not in completed_trial_ids:  # Don't double-count completed trials
+                current_epoch = epoch_info.get('current_epoch', 0)
+                total_trial_epochs = epoch_info.get('total_epochs', self.config.max_epochs_per_trial)
+                epoch_progress = epoch_info.get('epoch_progress', 0.0)
+                
+                if current_epoch > 0 and total_trial_epochs > 0:
+                    # Calculate progress for this trial: (completed_epochs + current_epoch_progress) / total_epochs
+                    trial_progress = ((current_epoch - 1) + epoch_progress) / total_trial_epochs
+                    total_progress += trial_progress
+        
+        # Convert total progress back to "completed epochs" for display
+        completed_epochs = int(total_progress * total_epochs_all_trials / self.config.trials)
+        
+        return total_epochs_all_trials, completed_epochs
 
     def get_best_trial_info(self) -> Tuple[Optional[int], Optional[float]]:
         """Thread-safe method to get best trial info"""
@@ -1180,7 +1270,7 @@ class ModelOptimizer:
             else:
                 logger.debug(f"running _thread_safe_progress_callback ... no user progress callback configured")
     
-    def _report_final_model_progress(self, step_name: str, overall_progress: float, detailed_info: str = None) -> None:
+    def _report_final_model_progress(self, step_name: str, overall_progress: float, detailed_info: Optional[str] = None) -> None:
         """
         Report progress during final model building phase
         
@@ -1359,6 +1449,45 @@ class ModelOptimizer:
         
         return False
     
+    def _wait_for_previous_trial_head_start(self, current_trial_number: int) -> None:
+        """
+        Wait for the previous trial to complete a head start number of epochs
+        to ensure trials complete in order (trial_0, trial_1, trial_2, etc.)
+        
+        Args:
+            current_trial_number: The number of the current trial
+        """
+        previous_trial_number = current_trial_number - 1
+        head_start_epochs = 2  # Number of epochs the previous trial should complete first
+        
+        logger.debug(f"Staggered start: Trial {current_trial_number} waiting for trial {previous_trial_number} to complete {head_start_epochs} epochs")
+        
+        # Wait up to 10 minutes for the previous trial to get its head start
+        max_wait_time = 600  # 10 minutes
+        check_interval = 5   # Check every 5 seconds
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait_time:
+            with self._progress_lock:
+                # Look for the previous trial's progress in current epoch info
+                previous_trial_info = self._current_epoch_info.get(previous_trial_number)
+                if previous_trial_info:
+                    current_epoch = previous_trial_info.get('current_epoch', 0)
+                    if current_epoch >= head_start_epochs:
+                        logger.debug(f"Staggered start: Trial {previous_trial_number} has completed {current_epoch} epochs, starting trial {current_trial_number}")
+                        return
+                
+                # Also check if previous trial has completed (no longer needs head start)
+                previous_trial_status = self._trial_statuses.get(previous_trial_number)
+                if previous_trial_status in ['completed', 'failed', 'pruned']:
+                    logger.debug(f"Staggered start: Trial {previous_trial_number} has finished ({previous_trial_status}), starting trial {current_trial_number}")
+                    return
+            
+            time.sleep(check_interval)
+        
+        # If we've waited too long, proceed anyway
+        logger.warning(f"Staggered start: Timeout waiting for trial {previous_trial_number} head start, proceeding with trial {current_trial_number}")
+    
     def _train_via_runpod_service(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
         logger.debug(f"running _train_via_runpod_service ... Starting RunPod service training for trial {trial.number}")
         logger.debug(f"running _train_via_runpod_service ... Using JSON API approach (tiny payloads) instead of code injection")
@@ -1374,7 +1503,7 @@ class ModelOptimizer:
                 "input": {
                     "command": "start_training",
                     "trial_id": f"trial_{trial.number}",
-                    "dataset": self.dataset_name,
+                    "dataset_name": self.dataset_name,
                     "hyperparameters": params,
                     "config": {
                         "validation_split": self.config.validation_split,
@@ -1393,6 +1522,10 @@ class ModelOptimizer:
             logger.debug(f"running _train_via_runpod_service ... 🔄 PAYLOAD SIZE: {payload_size} bytes")
             logger.debug(f"running _train_via_runpod_service ... DEBUG PAYLOAD: {json.dumps(request_payload, indent=2)}")
 
+            # Implement staggered start mechanism for proper trial completion order
+            if trial.number > 0:
+                self._wait_for_previous_trial_head_start(trial.number)
+
             # --- per-trial HTTP session (safer under n_jobs > 1) ---
             with requests.Session() as sess:
                 sess.headers.update({
@@ -1407,12 +1540,27 @@ class ModelOptimizer:
                 response = sess.post(submit_url, json=request_payload, timeout=self.config.runpod_service_timeout)
                 response.raise_for_status()
                 result = response.json()
+                
+                # Log the initial submission response
+                logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Status Code: {response.status_code}")
+                logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Keys: {list(result.keys())}")
+                logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Full response: {json.dumps(result, indent=2)}")
+                
                 job_id = result.get('id')
                 if not job_id:
                     raise RuntimeError("No job ID returned from RunPod service")
 
                 logger.debug(f"running _train_via_runpod_service ... Job submitted with ID: {job_id}")
                 logger.debug(f"running _train_via_runpod_service ... Polling for completion...")
+
+                # Report initial trial progress to UI (no epoch estimates)
+                initial_progress = TrialProgress(
+                    trial_id=f"trial_{trial.number}",
+                    trial_number=trial.number,
+                    status="running",
+                    started_at=datetime.now().isoformat()
+                )
+                self._thread_safe_progress_callback(initial_progress)
 
                 # Poll
                 max_poll_time = self.config.runpod_service_timeout
@@ -1426,29 +1574,91 @@ class ModelOptimizer:
                     status_data = status_response.json()
                     job_status = status_data.get('status', 'UNKNOWN')
                     logger.debug(f"running _train_via_runpod_service ... Job {job_id} status: {job_status}")
+                    
+                    # Log what we're getting back from RunPod for debugging
+                    logger.info(f"🔍 RUNPOD POLLING - Trial {trial.number} - Status: {job_status}")
+                    logger.info(f"🔍 RUNPOD POLLING - Status response keys: {list(status_data.keys())}")
+                    logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
+                    
+                    # Check for output data
+                    output_data = status_data.get('output')
+                    if output_data:
+                        logger.info(f"🔍 RUNPOD POLLING - Output data found with keys: {list(output_data.keys())}")
+                        logger.info(f"🔍 RUNPOD POLLING - Full output data: {json.dumps(output_data, indent=2)}")
+                    else:
+                        logger.info(f"🔍 RUNPOD POLLING - No output data available yet")
 
                     if job_status == 'COMPLETED':
+                        logger.info(f"🎉 RUNPOD COMPLETED - Trial {trial.number} job finished!")
+                        
                         output = status_data.get('output', {})
+                        logger.info(f"🔍 RUNPOD COMPLETED - Processing output data: {json.dumps(output, indent=2) if output else 'NO OUTPUT DATA'}")
+                        
                         if not output:
+                            logger.error(f"🚨 RUNPOD COMPLETED - No output returned from completed RunPod job")
+                            logger.error(f"🚨 RUNPOD COMPLETED - Full status_data: {json.dumps(status_data, indent=2)}")
                             raise RuntimeError("No output returned from completed RunPod job")
-                        if not output.get('success', False):
+                        
+                        success_flag = output.get('success', False)
+                        logger.info(f"🔍 RUNPOD COMPLETED - Success flag: {success_flag}")
+                        
+                        if not success_flag:
                             error_msg = output.get('error', 'Unknown error from RunPod service')
+                            logger.error(f"🚨 RUNPOD COMPLETED - Job failed with error: {error_msg}")
                             raise RuntimeError(f"RunPod service training failed: {error_msg}")
 
                         metrics = output.get('metrics', {})
+                        logger.info(f"🔍 RUNPOD COMPLETED - Metrics data: {json.dumps(metrics, indent=2) if metrics else 'NO METRICS'}")
+                        
                         if not metrics:
+                            logger.error(f"🚨 RUNPOD COMPLETED - No metrics returned from RunPod service")
+                            logger.error(f"🚨 RUNPOD COMPLETED - Available output keys: {list(output.keys())}")
                             raise RuntimeError("No metrics returned from RunPod service")
 
                         total_score = self._calculate_total_score_from_service_response(metrics, output, trial)
-                        logger.debug(f"running _train_via_runpod_service ... Trial {trial.number} completed via RunPod service")
-                        logger.debug(f"running _train_via_runpod_service ... Total score: {total_score:.4f}")
+                        logger.info(f"🎯 RUNPOD COMPLETED - Trial {trial.number} completed successfully!")
+                        logger.info(f"🎯 RUNPOD COMPLETED - Total score calculated: {total_score:.4f}")
+                        
+                        # Report completion to UI
+                        completion_progress = TrialProgress(
+                            trial_id=f"trial_{trial.number}",
+                            trial_number=trial.number,
+                            status="completed",
+                            started_at=initial_progress.started_at,
+                            completed_at=datetime.now().isoformat(),
+                            duration_seconds=time.time() - start_time,
+                            performance={
+                                'accuracy': metrics.get('test_accuracy', 0.0),
+                                'test_loss': metrics.get('test_loss', 0.0),
+                                'total_score': total_score
+                            },
+                            health_metrics=output.get('health_metrics', {}),
+                            architecture=output.get('architecture', {}),
+                            hyperparameters=params
+                        )
+                        self._thread_safe_progress_callback(completion_progress)
+                        
                         return total_score
 
                     if job_status == 'FAILED':
                         error_logs = status_data.get('error', 'Job failed without details')
+                        
+                        # Report failure to UI
+                        failure_progress = TrialProgress(
+                            trial_id=f"trial_{trial.number}",
+                            trial_number=trial.number,
+                            status="failed",
+                            started_at=initial_progress.started_at,
+                            completed_at=datetime.now().isoformat(),
+                            duration_seconds=time.time() - start_time
+                        )
+                        self._thread_safe_progress_callback(failure_progress)
+                        
                         raise RuntimeError(f"RunPod job failed: {error_logs}")
 
                     if job_status in ['IN_QUEUE', 'IN_PROGRESS']:
+                        # Report basic progress status during RunPod execution
+                        self._report_runpod_progress(trial, job_status, status_data)
                         time.sleep(poll_interval)
                         continue
 
@@ -1465,7 +1675,151 @@ class ModelOptimizer:
             logger.error("running _train_via_runpod_service ... RunPod service failed and local fallback disabled")
             raise RuntimeError(f"RunPod service training failed for trial {trial.number}: {e}")
 
-    
+    def _report_runpod_progress(self, trial: optuna.Trial, job_status: str, status_data: Dict[str, Any]) -> None:
+        """
+        Report progress updates during RunPod service polling
+        
+        Args:
+            trial: Optuna trial object
+            job_status: Current job status ('IN_QUEUE' or 'IN_PROGRESS')
+            status_data: Full status response from RunPod service
+        """
+        try:
+            # Extract progress updates sent via runpod.serverless.progress_update()
+            output = status_data.get('output', {})
+            
+            # Look for progress updates in various possible locations in the response
+            progress_updates = []
+            
+            # Check if output directly contains progress data (this is where RunPod puts it)
+            if output and any(key in output for key in ['current_epoch', 'total_epochs', 'epoch_progress', 'message']):
+                # Direct progress data in output
+                progress_updates = [output]
+            # Check for progress updates array
+            elif 'progress_updates' in output:
+                progress_updates = output['progress_updates']
+            # Check for streaming output that might contain progress
+            elif 'stream' in output and isinstance(output['stream'], list):
+                progress_updates = output['stream']
+            # Check root level for progress info
+            elif 'progress' in status_data:
+                progress_data = status_data['progress']
+                if isinstance(progress_data, dict):
+                    progress_updates = [progress_data]
+            
+            # Create trial progress object
+            trial_status = "running" if job_status == 'IN_PROGRESS' else "queued"
+            
+            # Extract epoch information from the latest progress update
+            current_epoch = None
+            total_epochs = None
+            epoch_progress = None
+            
+            if progress_updates and isinstance(progress_updates, list) and len(progress_updates) > 0:
+                # Get the most recent progress update
+                latest_update = progress_updates[-1]
+                
+                if isinstance(latest_update, dict):
+                    # Look for epoch information in the progress update
+                    current_epoch = latest_update.get('current_epoch')
+                    total_epochs = latest_update.get('total_epochs') 
+                    epoch_progress = latest_update.get('epoch_progress')
+                    
+                    # Also check if it's a string message that we need to parse
+                    if current_epoch is None and 'message' in latest_update:
+                        message = latest_update['message']
+                        current_epoch, total_epochs, epoch_progress = self._parse_progress_message(message)
+                elif isinstance(latest_update, str):
+                    # If the update is a string message, try to parse epoch info from it
+                    current_epoch, total_epochs, epoch_progress = self._parse_progress_message(latest_update)
+                
+                if current_epoch is not None:
+                    logger.debug(f"running _report_runpod_progress ... Found progress from RunPod: epoch {current_epoch}/{total_epochs}, progress {epoch_progress:.1%}")
+            
+            # Log what we found (or didn't find) for debugging
+            logger.info(f"🔍 PROGRESS EXTRACT - Trial {trial.number} - Extracted progress: epoch {current_epoch}/{total_epochs}, progress {epoch_progress}")
+            logger.info(f"🔍 PROGRESS EXTRACT - Progress updates found: {len(progress_updates) if progress_updates else 0}")
+            if progress_updates:
+                logger.info(f"🔍 PROGRESS EXTRACT - Latest update: {progress_updates[-1]}")
+            else:
+                logger.info(f"🔍 PROGRESS EXTRACT - No progress updates found in any expected location")
+                logger.info(f"🔍 PROGRESS EXTRACT - Full status_data keys: {list(status_data.keys())}")
+                logger.info(f"🔍 PROGRESS EXTRACT - Output keys: {list(output.keys()) if output else 'No output'}")
+                logger.info(f"🔍 PROGRESS EXTRACT - Full status_data: {json.dumps(status_data, indent=2)}")
+            
+            # Create TrialProgress object with available information
+            trial_progress = TrialProgress(
+                trial_id=f"trial_{trial.number}",
+                trial_number=trial.number,
+                status=trial_status,
+                current_epoch=current_epoch,
+                total_epochs=total_epochs,
+                epoch_progress=epoch_progress,
+                started_at=datetime.now().isoformat()
+            )
+            
+            # Update the _current_epoch_info dictionary that _create_unified_progress relies on
+            if current_epoch is not None and total_epochs is not None:
+                self._current_epoch_info[trial.number] = {
+                    'current_epoch': current_epoch,
+                    'total_epochs': total_epochs,
+                    'epoch_progress': epoch_progress
+                }
+                logger.debug(f"running _report_runpod_progress ... Updated epoch info for trial {trial.number}: {current_epoch}/{total_epochs} (progress: {epoch_progress})")
+
+            # Report progress for IN_PROGRESS status to keep UI updated
+            if job_status == 'IN_PROGRESS':
+                logger.debug(f"running _report_runpod_progress ... Reporting progress for trial {trial.number}: {trial_status}")
+                self._thread_safe_progress_callback(trial_progress)
+        
+        except Exception as e:
+            logger.warning(f"running _report_runpod_progress ... Error reporting RunPod progress for trial {trial.number}: {e}")
+
+    def _parse_progress_message(self, message: str) -> tuple:
+        """
+        Parse progress information from RunPod progress update messages
+        
+        Extracts epoch and batch progress from Keras training output like:
+        "Epoch 2/6: 1374/1400 [============================>.] - ETA: 0s"
+        
+        Args:
+            message: Progress message string from RunPod
+            
+        Returns:
+            Tuple of (current_epoch, total_epochs, epoch_progress)
+        """
+        try:
+            import re
+            current_epoch = None
+            total_epochs = None
+            epoch_progress = None
+            
+            # Pattern to match "Epoch X/Y" 
+            epoch_match = re.search(r'Epoch (\d+)/(\d+)', message)
+            if epoch_match:
+                current_epoch = int(epoch_match.group(1))
+                total_epochs = int(epoch_match.group(2))
+            
+            # Pattern to match batch progress "1374/1400 [====...===>.] - ETA: 0s"
+            batch_match = re.search(r'(\d+)/(\d+)\s+\[', message)
+            if batch_match:
+                current_batch = int(batch_match.group(1))
+                total_batches = int(batch_match.group(2))
+                epoch_progress = min(current_batch / total_batches, 1.0)
+            
+            # Alternative: look for percentage in message
+            percent_match = re.search(r'(\d+(?:\.\d+)?)%', message)
+            if percent_match and epoch_progress is None:
+                epoch_progress = float(percent_match.group(1)) / 100.0
+            
+            logger.debug(f"running _parse_progress_message ... Parsed '{message}' -> epoch {current_epoch}/{total_epochs}, progress {epoch_progress}")
+            
+            return current_epoch, total_epochs, epoch_progress
+            
+        except Exception as e:
+            logger.debug(f"running _parse_progress_message ... Failed to parse message '{message}': {e}")
+            return None, None, None
+
     def _calculate_total_score_from_service_response(
         self, 
         metrics: Dict[str, Any], 
@@ -1865,6 +2219,27 @@ class ModelOptimizer:
         
         # Record optimization start time
         self.optimization_start_time = time.time()
+        
+        # Show "Initializing GPU" status for RunPod service before trials begin
+        if self.config.use_runpod_service and self.progress_callback:
+            gpu_init_progress = UnifiedProgress(
+                total_trials=self.config.trials,
+                running_trials=[],
+                completed_trials=[],
+                failed_trials=[],
+                current_best_total_score=None,
+                current_best_accuracy=None,
+                average_duration_per_trial=None,
+                estimated_time_remaining=None,
+                current_epoch=None,
+                total_epochs=None,
+                epoch_progress=None,
+                current_trial_id=None,
+                current_trial_status="initializing",
+                status_message="Initializing GPU resources..."
+            )
+            logger.debug(f"running ModelOptimizer.optimize ... Showing 'Initializing GPU' status")
+            self.progress_callback(gpu_init_progress)
         
         # Decide Optuna parallelism: only >1 when using RunPod service
         proposed_jobs: int = (
@@ -2444,9 +2819,13 @@ def optimize_model(
     
     # Create optimization config
     opt_config = OptimizationConfig(
+        dataset_name=dataset_name,
         mode=opt_mode,
-        objective=objective,
+        optimize_for=optimize_for,
         trials=trials,
+        max_epochs_per_trial=args['max_epochs_per_trial'],
+        min_epochs_per_trial=args['min_epochs_per_trial'],
+        health_weight=args['health_weight'],
         use_runpod_service=use_runpod_service,
         runpod_service_endpoint=runpod_service_endpoint,
         runpod_service_timeout=runpod_service_timeout,
@@ -2519,7 +2898,7 @@ if __name__ == "__main__":
             args[key] = value
     
     # Extract required arguments
-    dataset_name = args.get('dataset', 'cifar10')
+    dataset_name = args.get('dataset_name', 'cifar10')
     mode = args.get('mode', 'simple')
     optimize_for = args.get('optimize_for', 'val_accuracy')
     trials = int(args.get('trials', '50'))
@@ -2635,7 +3014,7 @@ if __name__ == "__main__":
             runpod_service_endpoint=runpod_service_endpoint,
             runpod_service_timeout=runpod_service_timeout,
             runpod_service_fallback_local=runpod_service_fallback_local,
-            **{k: v for k, v in args.items() if k not in ['dataset', 'mode', 'optimize_for', 'trials', 'run_name', 'activation', 'use_runpod_service', 'runpod_service_endpoint', 'runpod_service_timeout', 'runpod_service_fallback_local']}
+            **{k: v for k, v in args.items() if k not in ['dataset_name', 'mode', 'optimize_for', 'trials', 'run_name', 'activation', 'use_runpod_service', 'runpod_service_endpoint', 'runpod_service_timeout', 'runpod_service_fallback_local']}
         )
         
         # Print results
@@ -2671,9 +3050,9 @@ if __name__ == "__main__":
             print(f"1. Check that your RunPod service endpoint is accessible:")
             print(f"   curl {runpod_service_endpoint}")
             print(f"2. Try with local fallback enabled:")
-            print(f"   python optimizer.py dataset={dataset_name} use_runpod_service=true runpod_service_fallback_local=true")
+            print(f"   python optimizer.py dataset_name={dataset_name} use_runpod_service=true runpod_service_fallback_local=true")
             print(f"3. Use local execution only:")
-            print(f"   python optimizer.py dataset={dataset_name} use_runpod_service=false")
+            print(f"   python optimizer.py dataset_name={dataset_name} use_runpod_service=false")
         else:
             print(f"\n❌ Error: {error_msg}")
         

@@ -101,7 +101,7 @@ echo -e "${BLUE}🧪 Testing Docker image locally...${NC}"
 TEST_REQUEST='{
   "command": "start_training",
   "trial_id": "deploy_test_001",
-  "dataset": "mnist",
+  "dataset_name": "mnist",
   "hyperparameters": {
     "learning_rate": 0.001,
     "epochs": 2,
@@ -282,16 +282,7 @@ if command -v runpodctl > /dev/null 2>&1; then
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 echo -e "${YELLOW}⏸️  Deployment paused. Please update RunPod endpoint and re-run script.${NC}"
                 echo -e "${BLUE}💡 Copy this image name: ${REMOTE_IMAGE}${NC}"
-            if [ "$SKIP_CONFIRMATION" = false ]; then
-                read -p "Have you updated the RunPod endpoint with the new image? (y/n): " -n 1 -r
-                echo
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    echo -e "${YELLOW}⏸️  Deployment paused. Please update RunPod endpoint and re-run script.${NC}"
-                    echo -e "${BLUE}💡 Copy this image name: ${REMOTE_IMAGE}${NC}"
-                    exit 0
-                fi
-            else
-                echo -e "${YELLOW}⚠️  Skipping manual confirmation (--skip-confirmation specified).${NC}"
+                # exit 0
             fi
             echo -e "${GREEN}✅ Continuing with testing...${NC}"
             
@@ -382,16 +373,37 @@ sleep 10
 echo -e "${BLUE}🧪 Test 1: Basic optimizer.py integration...${NC}"
 cd ..  # Go to project root
 
-INTEGRATION_TEST_1=$(python src/optimizer.py \
-  dataset=mnist \
+echo -e "${YELLOW}⏳ Running integration test (this may take 5-10 minutes)...${NC}"
+echo "DEBUG: Running from directory: $(pwd)"
+echo "DEBUG: Command: python src/optimizer.py dataset_name=mnist mode=simple optimize_for=val_accuracy trials=1 max_epochs_per_trial=5 min_epochs_per_trial=2 health_weight=0.3 use_runpod_service=true runpod_service_endpoint=https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run run_name=integration_test_basic"
+INTEGRATION_TEST_1=$(timeout 600 python src/optimizer.py \
+  dataset_name=mnist \
   mode=simple \
   optimize_for=val_accuracy \
   trials=1 \
+  max_epochs_per_trial=5 \
+  min_epochs_per_trial=2 \
+  health_weight=0.3 \
   use_runpod_service=true \
   runpod_service_endpoint=https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run \
   run_name=integration_test_basic 2>&1)
 
+OPTIMIZER_EXIT_CODE=$?
+if [ ${OPTIMIZER_EXIT_CODE} -eq 124 ]; then
+    echo -e "${YELLOW}⏰ Integration test timed out after 10 minutes${NC}"
+    INTEGRATION_TEST_1="TIMEOUT: Integration test exceeded 10 minute limit"
+elif [ ${OPTIMIZER_EXIT_CODE} -ne 0 ]; then
+    echo -e "${YELLOW}⚠️  Integration test exited with code: ${OPTIMIZER_EXIT_CODE}${NC}"
+fi
+
 INTEGRATION_SUCCESS_1=false
+
+# 🔍 DEBUG: Show full integration test output for debugging
+echo -e "${YELLOW}🔍 DEBUG: Full integration test output:${NC}"
+echo "=================================================="
+echo "${INTEGRATION_TEST_1}"
+echo "=================================================="
+
 if echo "${INTEGRATION_TEST_1}" | grep -q "Optimization completed successfully" && \
    echo "${INTEGRATION_TEST_1}" | grep -q "runpod_service"; then
     INTEGRATION_SUCCESS_1=true
@@ -400,7 +412,10 @@ if echo "${INTEGRATION_TEST_1}" | grep -q "Optimization completed successfully" 
     echo "${INTEGRATION_TEST_1}" | grep -E "(Best value|Optimization completed|runpod_service)" | tail -3
 else
     echo -e "${RED}❌ Basic integration test failed${NC}"
-    echo -e "${YELLOW}📝 Integration test output:${NC}"
+    echo -e "${YELLOW}📝 Checking what we're missing:${NC}"
+    echo "Looking for 'Optimization completed successfully': $(echo "${INTEGRATION_TEST_1}" | grep -c "Optimization completed successfully")"
+    echo "Looking for 'runpod_service': $(echo "${INTEGRATION_TEST_1}" | grep -c "runpod_service")"
+    echo -e "${YELLOW}📝 Last 10 lines of integration test:${NC}"
     echo "${INTEGRATION_TEST_1}" | tail -10
 fi
 
@@ -408,10 +423,13 @@ fi
 echo ""
 echo -e "${BLUE}🧪 Test 2: Fallback mechanism validation...${NC}"
 FALLBACK_TEST=$(python src/optimizer.py \
-  dataset=mnist \
+  dataset_name=mnist \
   mode=simple \
   optimize_for=val_accuracy \
   trials=1 \
+  max_epochs_per_trial=5 \
+  min_epochs_per_trial=2 \
+  health_weight=0.3 \
   use_runpod_service=true \
   runpod_service_endpoint=https://invalid-endpoint-test.com \
   runpod_service_fallback_local=true \
@@ -435,10 +453,13 @@ echo -e "${BLUE}🧪 Test 3: Local vs RunPod service comparison...${NC}"
 # Run local baseline
 echo -e "${YELLOW}📊 Running local baseline...${NC}"
 LOCAL_BASELINE=$(python src/optimizer.py \
-  dataset=mnist \
+  dataset_name=mnist \
   mode=simple \
   optimize_for=val_accuracy \
   trials=1 \
+  max_epochs_per_trial=5 \
+  min_epochs_per_trial=2 \
+  health_weight=0.3 \
   run_name=integration_test_local_baseline 2>&1)
 
 LOCAL_ACCURACY=""
@@ -459,18 +480,7 @@ if [ "${INTEGRATION_SUCCESS_1}" = "true" ] && [ -n "${LOCAL_ACCURACY}" ]; then
         echo -e "${BLUE}   RunPod accuracy: ${RUNPOD_ACCURACY}${NC}"
         
         # Check if results are within reasonable range (±10%)
-        python3 -c "
-local = float('${LOCAL_ACCURACY}')
-runpod = float('${RUNPOD_ACCURACY}')
-diff_pct = abs(local - runpod) / local * 100
-print(f'   Difference: {diff_pct:.2f}%')
-if diff_pct < 10:
-    print('✅ Results within acceptable range (±10%)')
-    exit(0)
-else:
-    print('⚠️  Results differ significantly')
-    exit(1)
-" && COMPARISON_SUCCESS=true
+        python3 -c "import sys; local=float('${LOCAL_ACCURACY}'); runpod=float('${RUNPOD_ACCURACY}'); diff_pct=abs(local-runpod)/local*100; print(f'Difference: {diff_pct:.2f}%'); sys.exit(0 if diff_pct<10 else 1)" && COMPARISON_SUCCESS=true
     fi
 fi
 
@@ -551,7 +561,7 @@ echo "  -d '${TEST_REQUEST}'"
 echo ""
 echo -e "${BLUE}📝 Example optimizer.py usage with deployed service:${NC}"
 echo "python src/optimizer.py \\"
-echo "  dataset=mnist \\"
+echo "  dataset_name=mnist \\"
 echo "  mode=simple \\"
 echo "  optimize_for=val_accuracy \\"
 echo "  trials=3 \\"

@@ -428,13 +428,15 @@ export function OptimizationControls() {
                   <span>Progress: </span>
                 </div>
                 <div className="pl-2 space-y-1">
-                  <div>
-                    <span>Trials: </span>
-                    <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20}</span>
-                  </div>
                   {progress.current_epoch !== undefined && progress.total_epochs !== undefined && (
                     <div>
-                      <span>Epoch: </span>
+                      <span>Trials: </span>
+                      <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20}</span>
+                    </div>
+                  )}
+                  {progress.current_epoch !== undefined && progress.total_epochs !== undefined && (
+                    <div>
+                      <span>{progress.is_gpu_mode ? 'Trial epochs complete: ' : 'Epoch: '}</span>
                       <span className="font-medium">{progress.current_epoch}/{progress.total_epochs}</span>
                       {progress.epoch_progress !== undefined && (
                         <div className="ml-2 mt-1">

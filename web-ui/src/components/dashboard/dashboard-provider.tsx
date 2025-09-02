@@ -15,6 +15,7 @@ export interface ProgressData {
   total_epochs?: number
   epoch_progress?: number
   status_message?: string
+  is_gpu_mode?: boolean
   plot_generation?: {
     status: 'generating' | 'completed' | 'failed'
     current_plot: string

@@ -44,7 +44,7 @@ def extract_metrics(optimization_result: OptimizationResult) -> Dict[str, Any]:
     try:
         # Extract best trial results from OptimizationResult
         best_params = optimization_result.best_params
-        best_value = optimization_result.best_value
+        best_value = optimization_result.best_total_score
         
         # Extract core metrics from best_trial_health if available
         test_accuracy = 0.0
@@ -70,7 +70,7 @@ def extract_metrics(optimization_result: OptimizationResult) -> Dict[str, Any]:
             'val_accuracy': val_accuracy,
             'val_loss': val_loss,
             'best_value': best_value,
-            'objective_name': optimization_result.optimization_config.objective.value if optimization_result.optimization_config else 'unknown',
+            'optimize_for': optimization_result.optimization_config.objective.value if optimization_result.optimization_config else 'unknown',
             'training_time_seconds': optimization_result.optimization_time_hours * 3600.0  # Convert hours to seconds
         }
         
@@ -111,7 +111,7 @@ def extract_metrics(optimization_result: OptimizationResult) -> Dict[str, Any]:
         return {
             'metrics': {
                 'best_value': 0.0,
-                'objective_name': 'unknown',
+                'optimize_for': 'unknown',
                 'training_time_seconds': 0.0,
                 'test_accuracy': 0.0,
                 'test_loss': 0.0,
@@ -141,7 +141,7 @@ def validate_request(request: Dict[str, Any]) -> tuple[bool, Optional[str]]:
     logger.debug("running validate_request ... validating incoming request structure")
     
     # Required fields
-    required_fields = ['command', 'dataset']
+    required_fields = ['command', 'dataset_name']
     
     for field in required_fields:
         if field not in request:
@@ -155,10 +155,10 @@ def validate_request(request: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         logger.error(f"running validate_request ... request validation failed: {error_msg}")
         return False, error_msg
     
-    # Validate dataset (basic check)
+    # Validate dataset_name (basic check)
     valid_datasets = ['mnist', 'cifar10', 'fashion_mnist']  # Add your supported datasets
-    if request['dataset'] not in valid_datasets:
-        error_msg = f"Unsupported dataset: {request['dataset']}. Supported: {valid_datasets}"
+    if request['dataset_name'] not in valid_datasets:
+        error_msg = f"Unsupported dataset_name: {request['dataset_name']}. Supported: {valid_datasets}"
         logger.error(f"running validate_request ... request validation failed: {error_msg}")
         return False, error_msg
     
@@ -306,13 +306,59 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             model_config.batch_size = 32  # Set default batch size
             logger.debug(f"running start_training ... Set default batch_size: {model_config.batch_size}")
 
-        # Call create_and_train_model with the configured ModelConfig
-        training_result = create_and_train_model(
-            dataset_name=request['dataset'],
-            model_config=model_config,
-            test_size=all_params.get('test_size', 0.2),
-            use_multi_gpu=use_multi_gpu  # Pass multi-GPU flag to create_and_train_model
-        )
+        # Replace the section around lines 230-260 in your start_training function:
+
+        # Get total epochs from model_config for progress reporting
+        total_epochs = model_config.epochs if hasattr(model_config, 'epochs') and model_config.epochs else 10
+        
+        # Create progress callback to send updates to RunPod (if supported)
+        def progress_callback(epoch, epoch_progress):
+            """Send progress updates to RunPod during training"""
+            logger.info(f"🔥 PROGRESS CALLBACK TRIGGERED: Epoch {epoch}, progress {epoch_progress}")
+            try:
+                # Send structured progress update to RunPod
+                progress_data = {
+                    'current_epoch': epoch,
+                    'total_epochs': total_epochs,
+                    'epoch_progress': epoch_progress,
+                    'message': f"Epoch {epoch}/{total_epochs} - {epoch_progress:.1%} complete"
+                }
+                
+                # Only send progress update if we're in RunPod environment
+                if os.getenv('RUNPOD_ENDPOINT_ID'):
+                    runpod.serverless.progress_update(job, progress_data)
+                    logger.info(f"✅ Sent progress update: Epoch {epoch}/{total_epochs}, progress {epoch_progress:.1%}")
+                else:
+                    logger.info(f"🏠 Local progress: Epoch {epoch}/{total_epochs}, progress {epoch_progress:.1%}")
+                
+            except Exception as e:
+                logger.error(f"❌ Error sending progress update: {e}")
+
+        # Call create_and_train_model - check if it supports progress_callback parameter
+        logger.info(f"🚀 CALLING create_and_train_model WITH progress_callback")
+        try:
+            # First, try calling with progress_callback
+            training_result = create_and_train_model(
+                dataset_name=request['dataset_name'],
+                model_config=model_config,
+                test_size=all_params.get('test_size', 0.2),
+                use_multi_gpu=use_multi_gpu,
+                progress_callback=progress_callback
+            )
+            logger.info(f"✅ create_and_train_model completed successfully with progress_callback")
+        except TypeError as e:
+            # If progress_callback parameter is not supported, call without it
+            if "progress_callback" in str(e):
+                logger.debug(f"create_and_train_model doesn't support progress_callback, calling without it")
+                training_result = create_and_train_model(
+                    dataset_name=request['dataset_name'],
+                    model_config=model_config,
+                    test_size=all_params.get('test_size', 0.2),
+                    use_multi_gpu=use_multi_gpu
+                )
+            else:
+                # Re-raise if it's a different TypeError
+                raise
         
         # Extract metrics from training result
         model_builder = training_result['model_builder']
@@ -333,7 +379,7 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 "val_accuracy": test_accuracy,  # Use test_accuracy as proxy
                 "val_loss": test_loss,  # Use test_loss as proxy
                 "best_value": test_accuracy,
-                "objective_name": all_params.get('optimize_for', 'val_accuracy'),
+                "optimize_for": all_params.get('optimize_for', 'val_accuracy'),
                 "training_time_seconds": 0.0  # Not available from create_and_train_model
             },
             "health_metrics": health_metrics or {},
@@ -455,7 +501,7 @@ if __name__ == "__main__":
         class TrainingRequest(BaseModel):
             command: str
             trial_id: str
-            dataset: str
+            dataset_name: str
             hyperparameters: Dict[str, Any]
             config: Dict[str, Any]
         

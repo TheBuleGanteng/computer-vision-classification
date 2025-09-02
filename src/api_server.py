@@ -257,7 +257,7 @@ class OptimizationRequest(BaseModel):
     max_epochs_per_trial: int = Field(6, ge=1, le=100, description="Maximum epochs per trial")
     min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
     health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
-    use_runpod_service: bool = Field(False, description="Use RunPod cloud service")
+    use_runpod_service: bool = Field(True, description="Use RunPod cloud service")
     
     # Legacy compatibility
     config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration overrides")
@@ -533,7 +533,7 @@ class OptimizationJob:
             # Calculate current trial count for UI display
             current_trial = completed_count
             if running_count > 0:
-                current_trial = completed_count + running_count
+                current_trial = completed_count + 1  # Show the next trial being processed
             
             # Calculate elapsed time
             elapsed_time = 0
@@ -561,7 +561,8 @@ class OptimizationJob:
                 "trials_performed": completed_count,
                 "average_duration_per_trial": unified_progress.average_duration_per_trial,
                 "elapsed_time": elapsed_time,
-                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
+                "status_message": unified_progress.status_message or f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed",
+                "is_gpu_mode": getattr(self.optimizer, 'config', None) and getattr(self.optimizer.config, 'use_runpod_service', False)
             }
             
             # Include epoch information directly from unified progress (no more race conditions!)
@@ -643,7 +644,7 @@ class OptimizationJob:
             current_trial = completed_count
             if running_count > 0:
                 # If there are trials running, show the next trial count
-                current_trial = completed_count + running_count
+                current_trial = completed_count + 1  # Show the next trial being processed
             
             # Calculate elapsed time
             elapsed_time = 0
@@ -673,7 +674,8 @@ class OptimizationJob:
                 "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
                 "best_total_score": getattr(aggregated_progress, 'current_best_total_score', None),
                 "elapsed_time": elapsed_time,
-                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed"
+                "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed",
+                "is_gpu_mode": getattr(self.optimizer, 'config', None) and getattr(self.optimizer.config, 'use_runpod_service', False)
             }
             
             # Add epoch information if available
@@ -804,8 +806,13 @@ class OptimizationJob:
                 return
             
             if not self.tensorboard_logs_dir.exists():
-                logger.warning(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard logs directory does not exist: {self.tensorboard_logs_dir}")
-                return
+                logger.info(f"running OptimizationJob._auto_start_tensorboard ... Creating TensorBoard logs directory: {self.tensorboard_logs_dir}")
+                try:
+                    self.tensorboard_logs_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"running OptimizationJob._auto_start_tensorboard ... Successfully created TensorBoard logs directory")
+                except Exception as e:
+                    logger.warning(f"running OptimizationJob._auto_start_tensorboard ... Failed to create TensorBoard logs directory: {e}")
+                    return
             
             # Start TensorBoard server automatically
             logger.info(f"Starting TensorBoard server with logs from: {self.tensorboard_logs_dir}")

@@ -1513,7 +1513,7 @@ class ModelBuilder:
                     self.total_epochs = 0
                     
                 def on_train_begin(self, logs=None):
-                    self.total_epochs = self.params.get('epochs', 0)
+                    self.total_epochs = self.params.get('epochs', 0) if self.params else 0
                     
                 def on_epoch_begin(self, epoch, logs=None):
                     self.current_epoch = epoch + 1  # Convert to 1-based
@@ -2248,6 +2248,7 @@ def create_and_train_model(
     run_name: Optional[str] = None,
     enable_performance_monitoring: bool = True,
     use_multi_gpu: bool = False,
+    progress_callback: Optional[Callable] = None,
     **config_overrides
 ) -> Dict[str, Any]:
     """
@@ -2312,7 +2313,7 @@ def create_and_train_model(
             dataset_config, data, model_config, config_overrides,
             run_timestamp, run_name, 
             architecture_type, dataset_name_clean, enable_performance_monitoring,
-            use_multi_gpu
+            use_multi_gpu, progress_callback
         )
 
 
@@ -2371,7 +2372,8 @@ def _handle_model_training_refactored(
     architecture_type: str,
     dataset_name_clean: str,
     enable_performance_monitoring: bool,
-    use_multi_gpu: bool = False
+    use_multi_gpu: bool = False,
+    progress_callback: Optional[Callable] = None
 ) -> Dict[str, Any]:
     """Model training handler without embedded plot generation"""
     
@@ -2406,7 +2408,7 @@ def _handle_model_training_refactored(
             logger.debug("running _handle_model_training_refactored ... Skipping model building - will be done inside MirroredStrategy scope")
         
         logger.debug("running _handle_model_training_refactored ... Training model...")
-        builder.train(data, use_multi_gpu=use_multi_gpu)
+        builder.train(data, use_multi_gpu=use_multi_gpu, epoch_progress_callback=progress_callback)
         
         logger.debug("running _handle_model_training_refactored ... Evaluating model...")
         test_loss, test_accuracy = builder.evaluate(data=data)
