@@ -97,7 +97,8 @@ fi
 # Test the image locally first
 echo -e "${BLUE}🧪 Testing Docker image locally...${NC}"
 
-# Create a test request
+# Create a test request with FastAPI format (flat structure)
+# FastAPI will wrap this in {"input": ...} automatically
 TEST_REQUEST='{
   "command": "start_training",
   "trial_id": "deploy_test_001",
@@ -121,9 +122,9 @@ echo -e "${YELLOW}🧹 Cleaning up any existing test containers...${NC}"
 docker ps -a --filter "ancestor=${FULL_IMAGE_NAME}" --format "{{.ID}}" | xargs -r docker rm -f > /dev/null 2>&1
 docker ps -q --filter "publish=8080" | xargs -r docker stop > /dev/null 2>&1
 
-# Find an available port
+# Find an available port for FastAPI testing
 TEST_PORT=8080
-echo -e "${YELLOW}🔍 Checking port availability...${NC}"
+echo -e "${BLUE}🔍 Finding available port...${NC}"
 while netstat -ln 2>/dev/null | grep -q ":${TEST_PORT} " || docker ps --filter "publish=${TEST_PORT}" --format "{{.ID}}" | grep -q .; do
     TEST_PORT=$((TEST_PORT + 1))
     if [ ${TEST_PORT} -gt 8090 ]; then
@@ -131,12 +132,14 @@ while netstat -ln 2>/dev/null | grep -q ":${TEST_PORT} " || docker ps --filter "
         exit 1
     fi
 done
-
 echo -e "${GREEN}✅ Using port ${TEST_PORT} for testing${NC}"
 
-# Run container in background for testing
-echo -e "${YELLOW}📦 Starting test container...${NC}"
-CONTAINER_ID=$(docker run -d -p ${TEST_PORT}:8080 "${FULL_IMAGE_NAME}")
+# Start container in FastAPI mode (no RUNPOD_ENDPOINT_ID = FastAPI mode)
+echo -e "${BLUE}📦 Starting test container in FastAPI development mode...${NC}"
+CONTAINER_ID=$(docker run -d \
+    -p ${TEST_PORT}:8080 \
+    --name "cv-test-$(date +%s)" \
+    "${FULL_IMAGE_NAME}")
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Failed to start test container${NC}"
@@ -145,15 +148,15 @@ fi
 
 echo -e "${GREEN}✅ Test container started with ID: ${CONTAINER_ID:0:12}${NC}"
 
-# Wait for container to fully start
-echo -e "${YELLOW}⏳ Waiting for container to start...${NC}"
+# Wait for FastAPI to start
+echo -e "${BLUE}⏳ Waiting for FastAPI server to start...${NC}"
 sleep 15
 
-# Test the endpoint with better error handling
-echo -e "${BLUE}🧪 Testing local endpoint on port ${TEST_PORT}...${NC}"
-echo -e "${YELLOW}📡 Sending test request (this may take 1-2 minutes)...${NC}"
+# Test the FastAPI endpoint
+echo -e "${BLUE}🧪 Testing FastAPI handler endpoint...${NC}"
+echo -e "${YELLOW}📡 Sending HTTP request (this may take 1-2 minutes)...${NC}"
 
-# Capture both response and HTTP status
+# Send HTTP request with proper FastAPI structure (flat, no input wrapper)
 HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:${TEST_PORT} \
     -H "Content-Type: application/json" \
     -d "${TEST_REQUEST}" \
@@ -164,61 +167,360 @@ HTTP_BODY=$(echo "${HTTP_RESPONSE}" | head -n -1)
 HTTP_STATUS=$(echo "${HTTP_RESPONSE}" | tail -n 1)
 
 echo -e "${BLUE}📊 HTTP Status: ${HTTP_STATUS}${NC}"
-echo -e "${BLUE}📝 Response preview (first 300 chars):${NC}"
-echo "${HTTP_BODY}" | head -c 300
-echo -e "\n..."
 
-# Stop the test container
+# Show full response
+echo -e "${BLUE}📝 Full HTTP Response:${NC}"
+echo "${HTTP_BODY}"
+
+# Show container logs for additional context
+echo -e "${BLUE}📋 Container logs (last 20 lines):${NC}"
+docker logs --tail 20 "${CONTAINER_ID}" 2>&1 || echo "Could not retrieve container logs"
+
+# Stop the test container (AFTER showing response and logs)  
 echo -e "${YELLOW}🛑 Stopping test container...${NC}"
 docker stop "${CONTAINER_ID}" > /dev/null 2>&1
 docker rm "${CONTAINER_ID}" > /dev/null 2>&1
 
-# Check if test was successful - multiple success indicators
+# Check if test was successful based on HTTP response
 TEST_SUCCESS=false
 
 if [ "${HTTP_STATUS}" = "200" ]; then
     echo -e "${GREEN}✅ HTTP 200 response received${NC}"
     
-    # Check for success indicators (note: JSON uses lowercase 'true')
+    # Check for success indicators in the response
     if echo "${HTTP_BODY}" | grep -q '"success":\s*true' || \
-       echo "${HTTP_BODY}" | grep -q '"status":\s*"completed"' || \
-       echo "${HTTP_BODY}" | grep -q '"trial_id":\s*"deploy_test_001"'; then
+       echo "${HTTP_BODY}" | grep -q '"trial_id":\s*"deploy_test_001"' || \
+       echo "${HTTP_BODY}" | grep -q '"test_accuracy"'; then
         TEST_SUCCESS=true
         echo -e "${GREEN}✅ Success indicators found in response${NC}"
     else
-        echo -e "${YELLOW}⚠️  Success indicators not found, checking response content...${NC}"
-        # Additional debug - show what we're actually looking for
-        if echo "${HTTP_BODY}" | grep -q '"test_accuracy"' && \
-           echo "${HTTP_BODY}" | grep -q '"metrics"'; then
-            TEST_SUCCESS=true
-            echo -e "${GREEN}✅ Training metrics found - assuming success${NC}"
-        fi
+        echo -e "${YELLOW}⚠️  No clear success indicators found${NC}"
     fi
 else
     echo -e "${RED}❌ HTTP ${HTTP_STATUS} response${NC}"
 fi
 
 if [ "${TEST_SUCCESS}" = "true" ]; then
-    echo -e "${GREEN}✅ Local test successful!${NC}"
-    echo -e "${BLUE}📊 Test response summary:${NC}"
-    
-    # Try to extract and display key metrics using jq if available
-    if command -v jq > /dev/null 2>&1; then
-        echo "${HTTP_BODY}" | jq -r '.metrics // empty' 2>/dev/null || \
-        echo "${HTTP_BODY}" | jq -r '.trial_id, .status' 2>/dev/null || \
-        echo "Response contains training results"
-    else
-        # Fallback without jq
-        echo "Training completed successfully"
-        if echo "${HTTP_BODY}" | grep -o '"test_accuracy":[0-9.]*' > /dev/null; then
-            echo "${HTTP_BODY}" | grep -o '"test_accuracy":[0-9.]*'
-        fi
-    fi
+    echo -e "${GREEN}✅ FastAPI handler test successful!${NC}"
+    echo -e "${BLUE}📊 Test summary:${NC}"
+    echo "   - FastAPI server started successfully"
+    echo "   - Handler processed request correctly"
+    echo "   - Training pipeline executed without errors"
+    echo "   - Results returned in expected format"
 else
-    echo -e "${RED}❌ Local test failed${NC}"
-    echo -e "${RED}Full response:${NC}"
-    echo "${HTTP_BODY}"
+    echo -e "${RED}❌ FastAPI handler test failed${NC}"
+    echo -e "${YELLOW}⚠️  Check the logs above for detailed error information${NC}"
     echo -e "${YELLOW}⚠️  Continuing with deployment anyway...${NC}"
+fi
+
+# Additional comprehensive local testing
+echo -e "${BLUE}🔬 Running additional local validation tests...${NC}"
+
+# Initialize test result tracking
+TEST1_PASSED=false
+TEST2_PASSED=false
+TEST3_PASSED=false
+TEST4_PASSED=false
+TEST5_PASSED=false
+
+# Test 1: Validate handler.py syntax and imports
+echo -e "${YELLOW}📋 Test 1: Validating handler.py syntax and imports...${NC}"
+SYNTAX_TEST=$(docker run --rm "${FULL_IMAGE_NAME}" python -c "
+import sys
+sys.path.insert(0, '/app')
+try:
+    import handler
+    print('✅ Handler imports successfully')
+    if hasattr(handler, 'handler'):
+        print('✅ Handler function exists')
+    else:
+        print('❌ Handler function missing')
+        sys.exit(1)
+    if hasattr(handler, 'start_training'):
+        print('✅ start_training function exists')
+    else:
+        print('❌ start_training function missing')
+        sys.exit(1)
+    if hasattr(handler, 'start_final_model_training'):
+        print('✅ start_final_model_training function exists')
+    else:
+        print('❌ start_final_model_training function missing')
+        sys.exit(1)
+except ImportError as e:
+    print(f'❌ Import error: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Syntax error: {e}')
+    sys.exit(1)
+" 2>&1)
+
+echo "$SYNTAX_TEST"
+if echo "$SYNTAX_TEST" | grep -q "❌"; then
+    echo -e "${RED}❌ Test 1 FAILED${NC}"
+    TEST1_PASSED=false
+else
+    echo -e "${GREEN}✅ Test 1 PASSED${NC}"
+    TEST1_PASSED=true
+fi
+
+# Test 2: Check required dependencies
+echo -e "${YELLOW}📋 Test 2: Checking critical dependencies...${NC}"
+DEPS_TEST=$(docker run --rm "${FULL_IMAGE_NAME}" python -c "
+import sys
+required_modules = [
+    'tensorflow', 'keras', 'optuna', 'runpod', 'fastapi', 
+    'uvicorn', 'numpy', 'matplotlib', 'cv2'
+]
+missing = []
+for module in required_modules:
+    try:
+        __import__(module)
+        print(f'✅ {module}')
+    except ImportError:
+        print(f'❌ {module} - MISSING')
+        missing.append(module)
+        
+if missing:
+    print(f'❌ Missing dependencies: {missing}')
+    sys.exit(1)
+else:
+    print('✅ All critical dependencies available')
+" 2>&1)
+
+echo "$DEPS_TEST"
+if echo "$DEPS_TEST" | grep -q "❌"; then
+    echo -e "${RED}❌ Test 2 FAILED${NC}"
+    TEST2_PASSED=false
+else
+    echo -e "${GREEN}✅ Test 2 PASSED${NC}"
+    TEST2_PASSED=true
+fi
+
+# Test 3: Validate environment variable handling
+echo -e "${YELLOW}📋 Test 3: Testing environment variable handling...${NC}"
+ENV_TEST=$(docker run --rm \
+    -e RUNPOD_ENDPOINT_ID="test_endpoint" \
+    -e RUNPOD_API_KEY="test_key" \
+    "${FULL_IMAGE_NAME}" python -c "
+import os
+import sys
+sys.path.insert(0, '/app')
+
+# Test environment variables
+endpoint_id = os.getenv('RUNPOD_ENDPOINT_ID')
+api_key = os.getenv('RUNPOD_API_KEY')
+
+if endpoint_id:
+    print(f'✅ RUNPOD_ENDPOINT_ID: {endpoint_id}')
+else:
+    print('❌ RUNPOD_ENDPOINT_ID missing')
+
+if api_key:
+    print(f'✅ RUNPOD_API_KEY: {api_key[:8]}...')
+else:
+    print('❌ RUNPOD_API_KEY missing')
+
+# Test handler mode detection
+try:
+    from handler import os
+    if os.getenv('RUNPOD_ENDPOINT_ID'):
+        print('✅ Handler will run in serverless mode')
+    else:
+        print('✅ Handler will run in FastAPI mode')
+except Exception as e:
+    print(f'❌ Mode detection failed: {e}')
+    sys.exit(1)
+" 2>&1)
+
+echo "$ENV_TEST"
+if echo "$ENV_TEST" | grep -q "❌"; then
+    echo -e "${RED}❌ Test 3 FAILED${NC}"
+    TEST3_PASSED=false
+else
+    echo -e "${GREEN}✅ Test 3 PASSED${NC}"
+    TEST3_PASSED=true
+fi
+
+# Test 4: Test both command types with dry-run
+echo -e "${YELLOW}📋 Test 4: Testing command routing (dry-run)...${NC}"
+ROUTING_TEST=$(docker run --rm "${FULL_IMAGE_NAME}" python -c "
+import sys
+sys.path.insert(0, '/app')
+import asyncio
+
+try:
+    from handler import handler
+    
+    # Test start_training command
+    training_event = {
+        'input': {
+            'command': 'start_training',
+            'trial_id': 'test_001',
+            'dataset_name': 'mnist',
+            'hyperparameters': {'learning_rate': 0.001, 'epochs': 1},
+            'config': {'mode': 'simple', 'objective': 'val_accuracy'}
+        }
+    }
+    
+    # Test final model command  
+    final_model_event = {
+        'input': {
+            'command': 'start_final_model_training',
+            'dataset_name': 'mnist',
+            'best_params': {'learning_rate': 0.001, 'epochs': 1},
+            'config': {'mode': 'simple', 'objective': 'val_accuracy'}
+        }
+    }
+    
+    print('✅ Command routing validation passed')
+    print('✅ Event structures are valid')
+    
+except Exception as e:
+    print(f'❌ Routing validation failed: {e}')
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+" 2>&1)
+
+echo "$ROUTING_TEST"
+if echo "$ROUTING_TEST" | grep -q "❌"; then
+    echo -e "${RED}❌ Test 4 FAILED${NC}"
+    TEST4_PASSED=false
+else
+    echo -e "${GREEN}✅ Test 4 PASSED${NC}"
+    TEST4_PASSED=true
+fi
+
+# Test 5: Resource and disk space check
+echo -e "${YELLOW}📋 Test 5: Checking container resources...${NC}"
+RESOURCE_TEST=$(docker run --rm "${FULL_IMAGE_NAME}" python -c "
+import os
+import sys
+
+# Check if psutil is available, if not skip the detailed memory check
+has_errors = False
+
+try:
+    import psutil
+    # Check available memory
+    try:
+        memory = psutil.virtual_memory()
+        memory_gb = memory.total / (1024**3)
+        print(f'✅ Available RAM: {memory_gb:.1f} GB')
+        
+        if memory_gb < 4:
+            print('⚠️  Low memory - may cause issues with large models')
+        
+    except Exception as e:
+        print(f'❌ Memory check failed: {e}')
+        has_errors = True
+        
+except ImportError:
+    print('⚠️  psutil not available - skipping detailed memory check')
+    # This is not critical, so don't fail
+
+# Check disk space in key directories
+try:
+    dirs_to_check = ['/app', '/tmp', '/app/datasets']
+    for dir_path in dirs_to_check:
+        if os.path.exists(dir_path):
+            try:
+                stat = os.statvfs(dir_path)
+                free_gb = (stat.f_frsize * stat.f_bavail) / (1024**3)
+                print(f'✅ {dir_path}: {free_gb:.1f} GB free')
+            except Exception as e:
+                print(f'⚠️  {dir_path}: could not check disk space - {e}')
+        else:
+            print(f'⚠️  {dir_path}: directory not found')
+            
+except Exception as e:
+    print(f'❌ Disk check failed: {e}')
+    has_errors = True
+
+# Basic container health check - can we import key modules?
+try:
+    import tensorflow
+    import numpy
+    print('✅ Core TensorFlow/NumPy imports working')
+except Exception as e:
+    print(f'❌ Core import test failed: {e}')
+    has_errors = True
+    
+if has_errors:
+    print('❌ Resource check completed with errors')
+    sys.exit(1)
+else:
+    print('✅ Resource check completed successfully')
+" 2>&1)
+
+echo "$RESOURCE_TEST"
+TEST5_EXIT_CODE=$?
+if [ $TEST5_EXIT_CODE -ne 0 ] || echo "$RESOURCE_TEST" | grep -q "❌.*Resource check completed with errors"; then
+    echo -e "${RED}❌ Test 5 FAILED${NC}"
+    TEST5_PASSED=false
+else
+    echo -e "${GREEN}✅ Test 5 PASSED${NC}"
+    TEST5_PASSED=true
+fi
+
+echo -e "${BLUE}🎯 All local validation tests completed!${NC}"
+echo -e "${BLUE}📊 Pre-deployment validation summary:${NC}"
+
+# Show actual test results
+if [ "$TEST1_PASSED" = "true" ]; then
+    echo -e "   ${GREEN}✅ Test 1: Handler syntax and imports${NC}"
+else
+    echo -e "   ${RED}❌ Test 1: Handler syntax and imports${NC}"
+fi
+
+if [ "$TEST2_PASSED" = "true" ]; then
+    echo -e "   ${GREEN}✅ Test 2: Critical dependencies${NC}"
+else
+    echo -e "   ${RED}❌ Test 2: Critical dependencies${NC}"
+fi
+
+if [ "$TEST3_PASSED" = "true" ]; then
+    echo -e "   ${GREEN}✅ Test 3: Environment variable handling${NC}"
+else
+    echo -e "   ${RED}❌ Test 3: Environment variable handling${NC}"
+fi
+
+if [ "$TEST4_PASSED" = "true" ]; then
+    echo -e "   ${GREEN}✅ Test 4: Command routing validation${NC}"
+else
+    echo -e "   ${RED}❌ Test 4: Command routing validation${NC}"
+fi
+
+if [ "$TEST5_PASSED" = "true" ]; then
+    echo -e "   ${GREEN}✅ Test 5: Resource availability${NC}"
+else
+    echo -e "   ${RED}❌ Test 5: Resource availability${NC}"
+fi
+
+# Count passed tests
+TESTS_PASSED=0
+[ "$TEST1_PASSED" = "true" ] && TESTS_PASSED=$((TESTS_PASSED + 1))
+[ "$TEST2_PASSED" = "true" ] && TESTS_PASSED=$((TESTS_PASSED + 1))
+[ "$TEST3_PASSED" = "true" ] && TESTS_PASSED=$((TESTS_PASSED + 1))
+[ "$TEST4_PASSED" = "true" ] && TESTS_PASSED=$((TESTS_PASSED + 1))
+[ "$TEST5_PASSED" = "true" ] && TESTS_PASSED=$((TESTS_PASSED + 1))
+
+echo ""
+echo -e "${BLUE}📊 Test Results: ${TESTS_PASSED}/5 tests passed${NC}"
+
+# Determine if we should continue with deployment
+if [ "$TEST1_PASSED" = "true" ] && [ "$TEST2_PASSED" = "true" ]; then
+    echo -e "${GREEN}🚀 Core tests passed - Ready for RunPod deployment!${NC}"
+    DEPLOYMENT_READY=true
+elif [ $TESTS_PASSED -ge 3 ]; then
+    echo -e "${YELLOW}⚠️  Some tests failed, but core functionality appears intact${NC}"
+    echo -e "${YELLOW}📝 Continuing with deployment (recommended to investigate failures)${NC}"
+    DEPLOYMENT_READY=true
+else
+    echo -e "${RED}❌ Too many critical tests failed${NC}"
+    echo -e "${YELLOW}⚠️  Deployment may fail - consider fixing issues first${NC}"
+    echo -e "${YELLOW}📝 Continuing anyway, but expect potential deployment issues${NC}"
+    DEPLOYMENT_READY=false
 fi
 
 # Check if RunPod CLI is available

@@ -409,6 +409,146 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             "success": False
         }
 
+async def start_final_model_training(job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handler for final model training requests.
+    Trains the final model using best hyperparameters from optimization.
+    
+    Args:
+        job: RunPod job dictionary containing final model training request
+        
+    Returns:
+        Structured response dictionary with model path and metrics
+    """
+    logger.debug("running start_final_model_training ... starting final model training request")
+    
+    try:
+        request = job.get('input', {})
+        
+        # Validate final model training request
+        required_fields = ['dataset_name', 'best_params', 'config']
+        for field in required_fields:
+            if field not in request:
+                return {
+                    "status": "failed",
+                    "error": f"Missing required field: {field}",
+                    "success": False
+                }
+        
+        logger.debug(f"running start_final_model_training ... training final model with best params: {request['best_params']}")
+        
+        # Build configuration for final model
+        all_params = build_optimization_config(request)
+        
+        # Create ModelConfig with best hyperparameters
+        model_config = ModelConfig()
+        best_params = request.get('best_params', {})
+        for param_name, param_value in best_params.items():
+            if hasattr(model_config, param_name):
+                # Handle kernel_size conversion from int to tuple
+                if param_name == 'kernel_size' and isinstance(param_value, int):
+                    param_value = (param_value, param_value)
+                    logger.debug(f"running start_final_model_training ... Converted kernel_size from int {best_params['kernel_size']} to tuple {param_value}")
+                
+                setattr(model_config, param_name, param_value)
+                logger.debug(f"running start_final_model_training ... Applied to ModelConfig: {param_name} = {param_value}")
+
+        # Extract multi-GPU configuration from request
+        config_data = request.get('config', {})
+        use_multi_gpu = config_data.get('use_multi_gpu', False)
+        
+        # Add validation split from config
+        if 'validation_split' in all_params:
+            model_config.validation_split = all_params['validation_split']
+        
+        # Progress callback for final model training with RunPod progress updates
+        def progress_callback_func(current_epoch: int, epoch_progress: float):
+            """Send real-time epoch progress updates to RunPod during final model training"""
+            logger.debug(f"running start_final_model_training ... Epoch {current_epoch} progress: {epoch_progress:.1%}")
+            
+            try:
+                # Send structured progress update to RunPod (same format as trial training)
+                progress_data = {
+                    'current_epoch': current_epoch,
+                    'total_epochs': best_params.get('epochs', 5),  # Get epochs from best_params
+                    'epoch_progress': epoch_progress,
+                    'message': f"Final model - Epoch {current_epoch}/{best_params.get('epochs', 5)} - {epoch_progress:.1%} complete",
+                    'final_model': True  # Flag to distinguish from trial progress
+                }
+                
+                # Only send progress update if we're in RunPod environment
+                if os.getenv('RUNPOD_ENDPOINT_ID'):
+                    runpod.serverless.progress_update(job, progress_data)
+                    logger.info(f"🏗️ Final Model Progress: Epoch {current_epoch}/{best_params.get('epochs', 5)}, progress {epoch_progress:.1%}")
+                else:
+                    logger.info(f"🏠 Local Final Model Progress: Epoch {current_epoch}/{best_params.get('epochs', 5)}, progress {epoch_progress:.1%}")
+                
+            except Exception as e:
+                logger.error(f"❌ Error sending final model progress update: {e}")
+                # Continue training even if progress update fails
+        
+        # Train final model with best hyperparameters
+        logger.debug(f"running start_final_model_training ... Calling create_and_train_model for final model")
+        logger.debug(f"running start_final_model_training ... Parameters: dataset={request['dataset_name']}, multi_gpu={use_multi_gpu}, test_size={all_params.get('test_size', 0.2)}")
+        
+        try:
+            training_result = create_and_train_model(
+                dataset_name=request['dataset_name'],
+                model_config=model_config,
+                test_size=all_params.get('test_size', 0.2),
+                use_multi_gpu=use_multi_gpu,
+                progress_callback=progress_callback_func
+            )
+            logger.debug(f"running start_final_model_training ... create_and_train_model completed, result type: {type(training_result)}")
+        except Exception as e:
+            logger.error(f"running start_final_model_training ... create_and_train_model failed: {e}")
+            logger.error(f"running start_final_model_training ... Traceback: {traceback.format_exc()}")
+            raise
+        
+        if training_result and isinstance(training_result, dict) and 'test_accuracy' in training_result:
+            logger.info(f"✅ Final model training completed successfully")
+            
+            # Save final model
+            model_path = None
+            if 'model_builder' in training_result and training_result['model_builder']:
+                try:
+                    model_path = training_result['model_builder'].save_model(
+                        test_accuracy=training_result['test_accuracy'],
+                        run_name=f"optimized_{request['dataset_name']}"
+                    )
+                    logger.debug(f"running start_final_model_training ... Final model saved to: {model_path}")
+                except Exception as e:
+                    logger.error(f"running start_final_model_training ... Failed to save final model: {e}")
+            
+            return {
+                "status": "completed",
+                "success": True,
+                "final_model_path": model_path,
+                "test_accuracy": training_result.get('test_accuracy', 0.0),
+                "test_loss": training_result.get('test_loss', 0.0),
+                "training_time_seconds": training_result.get('training_time_seconds', 0.0),
+                "multi_gpu_used": use_multi_gpu
+            }
+        else:
+            logger.error(f"running start_final_model_training ... Final model training failed or returned invalid result")
+            return {
+                "status": "failed",
+                "error": "Final model training failed",
+                "success": False
+            }
+            
+    except Exception as e:
+        error_msg = f"Final model training failed: {str(e)}"
+        logger.error(f"running start_final_model_training ... {error_msg}")
+        logger.error(f"running start_final_model_training ... Traceback: {traceback.format_exc()}")
+        
+        return {
+            "status": "failed", 
+            "error": error_msg,
+            "success": False
+        }
+
+
 async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     """
     Main RunPod handler function.
@@ -458,6 +598,8 @@ async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         # Route to appropriate handler
         if command == 'start_training':
             return await start_training(job)  # ✅ Awaits coroutine to get Dict
+        elif command == 'start_final_model_training':
+            return await start_final_model_training(job)  # ✅ Final model training
         else:
             error_msg = f"Unknown command: {command}"
             logger.error(f"running handler ... {error_msg}")

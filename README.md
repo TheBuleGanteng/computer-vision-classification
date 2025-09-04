@@ -59,29 +59,65 @@ computer-vision-classification/
 
 This project uses a dual-path configuration architecture with a sophisticated hyperparameter management system:
 
-#### **Path 1: API-Driven Flow (Web UI)**
+#### **Path 1: API-Driven Flow (Web UI) - Distributed Architecture**
 ```
-User Input (Web UI)
-       ↓
-OptimizationRequest (api_server.py)
+🌐 User Input (Web UI)
+       ↓ HTTP POST /optimize
+💻 OptimizationRequest (api_server.py) [LOCAL MACHINE]
   • API validation layer
   • User-friendly field names
   • HTTP request parsing
   • User-controlled defaults
        ↓
-create_optimization_config()
+💻 create_optimization_config() [LOCAL MACHINE]
   • Conversion function
   • Type transformations (string → enum)
   • Pass-through all user values
        ↓
-OptimizationConfig (optimizer.py)
+💻 OptimizationConfig (optimizer.py) [LOCAL MACHINE]
   • Business logic configuration
   • Fail-fast validation
   • System-controlled defaults
   • Enum types for internal use
        ↓
-ModelOptimizer → HyperparameterSelector → Optuna → ModelConfig → ModelBuilder
+💻 ModelOptimizer → HyperparameterSelector → Optuna [LOCAL COORDINATION]
+  • Optuna study orchestration
+  • Hyperparameter selection
+  • Trial coordination
+  • Progress aggregation
+       ↓ For each trial:
+       ↓ HTTP POST https://api.runpod.ai/v2/{endpoint}/run
+☁️  RunPod API [CLOUD SERVICE]
+  • Receives trial parameters
+  • Invokes serverless handler
+       ↓ Serverless invocation
+🔥 handler.py [RUNPOD GPU WORKER]
+  • ModelConfig creation
+  • ModelBuilder execution  
+  • GPU-accelerated training
+  • Progress updates via runpod.serverless.progress_update()
+       ↓ Training results
+☁️  RunPod API [CLOUD SERVICE]
+  • Returns trial results
+       ↓ HTTP response
+💻 ModelOptimizer [LOCAL COORDINATION]
+  • Receives trial results
+  • Updates Optuna study
+  • Continues optimization
+       ↓ Progress updates
+💻 api_server.py [LOCAL MACHINE]
+  • WebSocket/polling updates
+       ↓
+🌐 Web UI [FRONTEND]
+  • Real-time progress display
+  • Final results presentation
 ```
+
+**Key Architecture Points:**
+- **Local Coordination**: Optuna study and optimization logic runs on your local machine
+- **Remote Execution**: Individual trials execute on RunPod GPU workers  
+- **Cost Efficiency**: You only pay for GPU time during actual model training
+- **Scalability**: Multiple trials can run in parallel on different RunPod workers
 
 #### **Path 2: Programmatic Flow (Direct Usage)**
 ```
@@ -437,10 +473,15 @@ class ModelOptimizer:
 
 **Key Deliverables:**
 - ✅ Fix bug that occurs when multiple trials are running simultaniously and the first trial completed is considered trial_1 and the second trial completed is trial_0.  This does not make sense for the user. Instead, the first trial completed should be trial_0, the second trial completed should be trial_1, etc.
-- Ensure use of multiple GPUs as determined by concurrent_workers in in OptimizationConfig in optimizer.py
-- Migrate final model training to GPU. Currently, this still happens on local CPU, even when the trials are done on the runpod proxy GPU. This will include getting the correct status updates for that final model build from the runpod proxy GPU, similar to what is done with the trials.
-- Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled). Clicking the cancel run button in the UI should cancel the process and clear the runpod jobs, regardless of whether the optuna hyperparameter exploration process is underway or the final model building is underway. 
-- UI feature (checkbox) that allows the toggling on/off of runpod proxy GPU resources
+- ✅ Ensure use of multiple GPUs as determined by concurrent_workers in in OptimizationConfig in optimizer.py
+- ✅ Migrate final model training to GPU. Currently, this still happens on local CPU, even when the trials are done on the runpod proxy GPU. This will include getting the correct status updates for that final model build from the runpod proxy GPU, similar to what is done with the trials.
+- 🔄 When a job is cancelled, I believe the polling continues, which throws JS console errors. The polling should stop when a job is cancelled, so as to avoid this.  
+- 🔄 When an optimization (Optuna + final model build) completes and I click the "start optimization" button again to start a new optimization, I see the following error: - 🔄 Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled). Clicking the cancel run button in the UI should cancel the process and clear the runpod jobs, regardless of whether the optuna hyperparameter exploration process is underway or the final model building is underway.
+
+- 🔄 Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled). Clicking the cancel run button in the UI should cancel the process and clear the runpod jobs, regardless of whether the optuna hyperparameter exploration process is underway or the final model building is underway.
+- 🔄 When a job is cancelled while in progress, the status section (the bars, epochs, etc) persist in the state they were when the job was cancelled. This should be replaced by the text "Job cancelled" to make it clear to the user that the job is no longer underway. 
+ 
+- 🔄 UI feature (checkbox) that allows the toggling on/off of runpod proxy GPU resources
 
 ---
 

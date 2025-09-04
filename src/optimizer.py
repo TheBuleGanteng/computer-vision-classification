@@ -276,7 +276,7 @@ class OptimizationConfig:
     
     # System concurrency settings - ONLY here with their defaults
     concurrent_workers: int = field(default=2)
-    use_multi_gpu: bool = field(default=False)
+    use_multi_gpu: bool = field(default=True)
     target_gpus_per_worker: int = field(default=2)
     auto_detect_gpus: bool = field(default=True)
     multi_gpu_batch_size_scaling: bool = field(default=True)
@@ -2572,9 +2572,214 @@ class ModelOptimizer:
         except Exception as e:
             logger.error(f"running ModelOptimizer._save_results ... Failed to save optimization results: {e}")
 
+    def _train_final_model_via_runpod_service(self, results: OptimizationResult) -> Optional[str]:
+        """
+        Train final model using RunPod service with best hyperparameters
+        
+        Args:
+            results: Optimization results containing best hyperparameters
+            
+        Returns:
+            Path to the saved final model, or None if training failed
+        """
+        logger.debug("running _train_final_model_via_runpod_service ... Starting RunPod final model training")
+        
+        try:
+            api_key = os.getenv('RUNPOD_API_KEY')
+            if not api_key:
+                raise RuntimeError("RUNPOD_API_KEY environment variable not set")
+            
+            # Build request payload for final model training
+            request_payload = {
+                "input": {
+                    "command": "start_final_model_training",
+                    "dataset_name": self.dataset_name,
+                    "best_params": results.best_params,
+                    "config": {
+                        "mode": self.config.mode.value,
+                        "objective": self.config.objective.value,
+                        "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage,
+                        "use_multi_gpu": self.config.use_multi_gpu,
+                        "target_gpus_per_worker": self.config.target_gpus_per_worker,
+                        "auto_detect_gpus": self.config.auto_detect_gpus,
+                        "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling,
+                        "validation_split": 0.2,
+                        "test_size": 0.2
+                    }
+                }
+            }
+            
+            logger.debug(f"running _train_final_model_via_runpod_service ... Final model payload: {json.dumps(request_payload, indent=2)}")
+            
+            # Submit final model training job
+            with requests.Session() as sess:
+                # Set authentication headers (same as trial training)
+                sess.headers.update({
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "Connection": "close"
+                })
+                
+                submit_url = self.config.runpod_service_endpoint
+                if not submit_url:
+                    raise RuntimeError("RunPod service endpoint not configured")
+                    
+                logger.debug(f"running _train_final_model_via_runpod_service ... POST {submit_url}")
+                response = sess.post(submit_url, json=request_payload, timeout=self.config.runpod_service_timeout)
+                response.raise_for_status()
+                result = response.json()
+                
+                job_id = result.get('id')
+                if not job_id:
+                    raise RuntimeError("No job ID returned from RunPod service for final model training")
+                
+                logger.debug(f"running _train_final_model_via_runpod_service ... Final model job submitted with ID: {job_id}")
+                
+                # Poll for completion with progress reporting
+                max_poll_time = 3600  # 1 hour timeout for final model training
+                poll_interval = 10
+                start_time = time.time()
+                
+                while time.time() - start_time < max_poll_time:
+                    status_url = f"{submit_url.rsplit('/run', 1)[0]}/status/{job_id}"
+                    status_response = sess.get(status_url, timeout=30)
+                    status_response.raise_for_status()
+                    
+                    status_data = status_response.json()
+                    job_status = status_data.get('status', 'UNKNOWN')
+                    
+                    logger.debug(f"running _train_final_model_via_runpod_service ... Final model job {job_id} status: {job_status}")
+                    
+                    if job_status == 'COMPLETED':
+                        output = status_data.get('output', {})
+                        if output.get('success'):
+                            logger.info(f"✅ Final model training completed via RunPod")
+                            
+                            # Report completion progress
+                            self._report_final_model_progress("Completed", 1.0)
+                            
+                            # Return the model path if provided
+                            model_path = output.get('final_model_path')
+                            if model_path:
+                                logger.debug(f"running _train_final_model_via_runpod_service ... Final model saved at: {model_path}")
+                                return model_path
+                            else:
+                                logger.warning(f"running _train_final_model_via_runpod_service ... No model path returned")
+                                return None
+                        else:
+                            error_msg = output.get('error', 'Unknown error during final model training')
+                            logger.error(f"running _train_final_model_via_runpod_service ... Final model training failed: {error_msg}")
+                            return None
+                    
+                    elif job_status in ['FAILED', 'CANCELLED', 'TIMED_OUT']:
+                        output = status_data.get('output', {})
+                        error_msg = output.get('error', f'Final model job {job_status.lower()}')
+                        
+                        # Enhanced error logging for debugging
+                        logger.error(f"running _train_final_model_via_runpod_service ... Final model training failed: {error_msg}")
+                        logger.error(f"running _train_final_model_via_runpod_service ... Full RunPod response: {json.dumps(status_data, indent=2)}")
+                        
+                        if 'logs' in output:
+                            logger.error(f"running _train_final_model_via_runpod_service ... RunPod logs: {output['logs']}")
+                        
+                        return None
+                    
+                    elif job_status == 'IN_PROGRESS':
+                        # Extract real-time progress updates from RunPod (similar to trial progress)
+                        progress_extracted = False
+                        output = status_data.get('output', {})
+                        
+                        # Debug: Log what we're getting from RunPod
+                        logger.debug(f"running _train_final_model_via_runpod_service ... STATUS DATA KEYS: {list(status_data.keys())}")
+                        logger.debug(f"running _train_final_model_via_runpod_service ... OUTPUT KEYS: {list(output.keys()) if output else 'None'}")
+                        
+                        # Look for progress updates in various possible locations (using same logic as trial progress)
+                        progress_updates = []
+                        
+                        # Check if output directly contains progress data (this is where RunPod puts it)
+                        if output and any(key in output for key in ['current_epoch', 'total_epochs', 'epoch_progress', 'message']):
+                            # Direct progress data in output
+                            progress_updates = [output]
+                            logger.debug(f"running _train_final_model_via_runpod_service ... Found progress data directly in output object")
+                        # Check for progress updates array
+                        elif 'progress_updates' in output:
+                            progress_updates = output['progress_updates']
+                            logger.debug(f"running _train_final_model_via_runpod_service ... Found progress updates array")
+                        # Check for streaming output that might contain progress
+                        elif 'stream' in output and isinstance(output['stream'], list):
+                            progress_updates = output['stream']
+                            logger.debug(f"running _train_final_model_via_runpod_service ... Found {len(progress_updates)} progress updates in stream")
+                        # Check root level for progress info
+                        elif 'progress' in status_data:
+                            progress_data = status_data['progress']
+                            if isinstance(progress_data, dict):
+                                progress_updates = [progress_data]
+                                logger.debug(f"running _train_final_model_via_runpod_service ... Found progress data at root level")
+                        else:
+                            logger.debug(f"running _train_final_model_via_runpod_service ... No progress updates found in expected locations")
+                        
+                        # Process the latest progress update for final model
+                        if progress_updates:
+                            latest_progress = progress_updates[-1]  # Get most recent
+                            
+                            # Check if this is final model progress
+                            if isinstance(latest_progress, dict) and latest_progress.get('final_model'):
+                                current_epoch = latest_progress.get('current_epoch', 1)
+                                total_epochs = latest_progress.get('total_epochs', 5)
+                                epoch_progress = latest_progress.get('epoch_progress', 0.0)
+                                
+                                # Calculate overall progress: (completed_epochs + current_epoch_progress) / total_epochs
+                                completed_epochs = max(0, current_epoch - 1)
+                                overall_progress = (completed_epochs + epoch_progress) / total_epochs
+                                
+                                step_message = f"Epoch {current_epoch}/{total_epochs} ({epoch_progress:.1%})"
+                                self._report_final_model_progress(step_message, overall_progress)
+                                progress_extracted = True
+                                
+                                logger.debug(f"running _train_final_model_via_runpod_service ... Real-time progress: {step_message}, overall: {overall_progress:.1%}")
+                        
+                        # Fallback to time-based estimate if no real-time progress available
+                        if not progress_extracted:
+                            elapsed = time.time() - start_time
+                            estimated_total = 1800  # 30 minutes estimate
+                            progress = min(0.95, elapsed / estimated_total)
+                            self._report_final_model_progress("Training final model", progress)
+                    
+                    time.sleep(poll_interval)
+                
+                raise RuntimeError(f"Final model training job {job_id} did not complete within {max_poll_time} seconds")
+                
+        except Exception as e:
+            logger.error(f"running _train_final_model_via_runpod_service ... RunPod final model training failed: {e}")
+            if self.config.runpod_service_fallback_local:
+                logger.warning(f"running _train_final_model_via_runpod_service ... Falling back to local execution for final model")
+                return self._build_final_model_locally(results)
+            raise RuntimeError(f"RunPod final model training failed: {e}")
+
     def _build_final_model(self, results: OptimizationResult) -> Optional[str]:
         """
         Build and train the final model using the best hyperparameters from optimization.
+        Routes to RunPod service or local execution based on configuration.
+        
+        Args:
+            results: Optimization results containing best hyperparameters
+            
+        Returns:
+            Path to the saved final model, or None if building failed
+        """
+        logger.debug("running _build_final_model ... Determining execution method for final model")
+        
+        # Check if we should use RunPod service for final model training
+        if self._should_use_runpod_service():
+            logger.debug("running _build_final_model ... Using RunPod service for final model training")
+            return self._train_final_model_via_runpod_service(results)
+        else:
+            logger.debug("running _build_final_model ... Using local execution for final model training")
+            return self._build_final_model_locally(results)
+
+    def _build_final_model_locally(self, results: OptimizationResult) -> Optional[str]:
+        """
+        Build and train the final model locally using the best hyperparameters from optimization.
         Uses the existing ModelBuilder functionality and saves to the correct optimization results directory.
         
         Args:
@@ -2584,7 +2789,7 @@ class ModelOptimizer:
             Path to the saved final model, or None if building failed
         """
         try:
-            logger.debug("running _build_final_model ... Building final model with best hyperparameters")
+            logger.debug("running _build_final_model_locally ... Building final model locally with best hyperparameters")
             
             # Report progress: Starting final model building
             self._report_final_model_progress("Initializing", 0.0)
