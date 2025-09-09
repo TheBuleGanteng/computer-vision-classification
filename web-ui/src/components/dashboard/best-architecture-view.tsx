@@ -199,13 +199,6 @@ const BestArchitectureView = React.memo(() => {
             </CardDescription>
           </div>
           
-          {/* Download Controls */}
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={handleDownloadVisualization}>
-              <Download className="h-4 w-4 mr-2" />
-              Download 3D
-            </Button>
-          </div>
         </div>
       </CardHeader>
       

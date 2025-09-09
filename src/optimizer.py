@@ -269,10 +269,20 @@ class OptimizationConfig:
     save_optimization_history: bool = field(default=True)
     create_comparison_plots: bool = field(default=True)
     plot_generation: PlotGenerationMode = field(default=PlotGenerationMode.ALL)
-    show_activation_maps: bool = field(default=True)
-    show_training_history: bool = field(default=True)
-    show_confusion_matrix: bool = field(default=True)
-    show_training_animation: bool = field(default=False)
+    
+    # Individual plot type flags
+    # LOCAL MODEL REQUIRED (cannot be created with RunPod returned data):
+    show_activation_maps: bool = field(default=True)         # Requires model inference for activation extraction
+    show_weights_bias: bool = field(default=True)            # Requires direct access to model weights/biases 
+    show_gradient_magnitudes: bool = field(default=True)     # Requires model for gradient computation
+    show_gradient_distributions: bool = field(default=True)  # Requires model for gradient computation
+    show_dead_neuron_analysis: bool = field(default=True)    # Requires model for gradient computation
+    show_detailed_predictions: bool = field(default=True)    # Requires model inference on test data
+    
+    # RUNPOD COMPATIBLE (can be created with metrics/predictions returned from GPU):
+    show_training_history: bool = field(default=True)        # Uses training metrics from history
+    show_confusion_matrix: bool = field(default=True)        # Uses test predictions returned from GPU
+    show_training_animation: bool = field(default=False)     # Uses training metrics from history
     
     # System concurrency settings - ONLY here with their defaults
     concurrent_workers: int = field(default=2)

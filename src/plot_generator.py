@@ -122,11 +122,19 @@ class PlotGenerator:
             plot_tasks.append(('training_history', 'Training History'))
         if training_history and getattr(config_source, 'show_training_animation', True):
             plot_tasks.append(('training_animation', 'Training Animation'))
-        plot_tasks.append(('gradient_flow', 'Gradient Flow'))
-        plot_tasks.append(('weights_bias', 'Weights & Bias'))
+        
+        # Check gradient flow sub-components individually
+        show_any_gradient_flow = (getattr(config_source, 'show_gradient_magnitudes', True) or 
+                                 getattr(config_source, 'show_gradient_distributions', True) or 
+                                 getattr(config_source, 'show_dead_neuron_analysis', True))
+        if show_any_gradient_flow:
+            plot_tasks.append(('gradient_flow', 'Gradient Flow'))
+        
+        if getattr(config_source, 'show_weights_bias', True):
+            plot_tasks.append(('weights_bias', 'Weights & Bias'))
         if self.data_type == "image" and getattr(config_source, 'show_activation_maps', True):
             plot_tasks.append(('activation_maps', 'Activation Maps'))
-        if log_detailed_predictions and max_predictions_to_show > 0:
+        if log_detailed_predictions and max_predictions_to_show > 0 and getattr(config_source, 'show_detailed_predictions', True):
             plot_tasks.append(('detailed_predictions', 'Detailed Predictions'))
         
         total_plots = len(plot_tasks)
@@ -329,7 +337,7 @@ class PlotGenerator:
         plot_dir: Path
     ) -> Optional[Dict[str, Any]]:
         """
-        Generate gradient flow analysis
+        Generate gradient flow analysis with individual sub-component control
         
         Args:
             model: Trained Keras model
@@ -343,6 +351,17 @@ class PlotGenerator:
         try:
             logger.debug(f"running generate_gradient_flow ... Generating gradient flow analysis")
             
+            # Get individual gradient flow flags
+            config_source = self.optimization_config if self.optimization_config else self.model_config
+            show_gradient_magnitudes = getattr(config_source, 'show_gradient_magnitudes', True)
+            show_gradient_distributions = getattr(config_source, 'show_gradient_distributions', True) 
+            show_dead_neuron_analysis = getattr(config_source, 'show_dead_neuron_analysis', True)
+            
+            # Skip if all sub-components are disabled
+            if not (show_gradient_magnitudes or show_gradient_distributions or show_dead_neuron_analysis):
+                logger.debug(f"running generate_gradient_flow ... All gradient flow sub-components disabled, skipping")
+                return {'skipped': True, 'reason': 'All gradient flow sub-components disabled'}
+            
             # Intelligent sample selection for gradient analysis
             default_gradient_sample_size = 100  # Default for gradient analysis
             sample_size = min(default_gradient_sample_size, len(data['x_test']))
@@ -353,13 +372,15 @@ class PlotGenerator:
             
             gradient_analyzer = GradientFlowAnalyzer(model_name=self.dataset_config.name)
             
+            # Pass configuration to analyzer for selective plotting
             results = gradient_analyzer.analyze_and_visualize(
                 model=model,
                 sample_data=sample_x,
                 sample_labels=sample_y,
                 dataset_name=self.dataset_config.name,
                 run_timestamp=run_timestamp,
-                plot_dir=plot_dir
+                plot_dir=plot_dir,
+                config=config_source  # Pass the configuration object
             )
             
             if 'error' not in results:

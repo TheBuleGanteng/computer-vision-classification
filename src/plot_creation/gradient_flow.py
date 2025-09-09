@@ -149,7 +149,8 @@ class GradientFlowAnalyzer:
         dataset_name: str = "dataset",
         run_timestamp: Optional[str] = None,
         plot_dir: Optional[Path] = None,
-        sample_size: int = 100
+        sample_size: int = 100,
+        config: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Analyze gradient flow through the network and create visualizations
@@ -329,7 +330,8 @@ class GradientFlowAnalyzer:
                 model=model,
                 dataset_name=dataset_name,
                 run_timestamp=run_timestamp,
-                plot_dir=plot_dir
+                plot_dir=plot_dir,
+                config=config
             )
             
             # Combine results
@@ -1418,7 +1420,8 @@ class GradientFlowAnalyzer:
         model: keras.Model,
         dataset_name: str,
         run_timestamp: Optional[str],
-        plot_dir: Optional[Path]
+        plot_dir: Optional[Path],
+        config: Optional[Any] = None
     ) -> List[Path]:
         """
         Create comprehensive gradient flow visualizations
@@ -1439,28 +1442,36 @@ class GradientFlowAnalyzer:
         visualization_paths = []
         
         try:
+            # Check configuration flags for each plot type
+            show_gradient_magnitudes = getattr(config, 'show_gradient_magnitudes', True) if config else True
+            show_gradient_distributions = getattr(config, 'show_gradient_distributions', True) if config else True
+            show_dead_neuron_analysis = getattr(config, 'show_dead_neuron_analysis', True) if config else True
+            
             # 1. Layer-wise gradient magnitude plot
-            magnitude_path = self._plot_gradient_magnitudes(
-                analysis_results['gradient_magnitudes'],
-                dataset_name, run_timestamp, plot_dir
-            )
-            if magnitude_path:
-                visualization_paths.append(magnitude_path)
+            if show_gradient_magnitudes:
+                magnitude_path = self._plot_gradient_magnitudes(
+                    analysis_results['gradient_magnitudes'],
+                    dataset_name, run_timestamp, plot_dir
+                )
+                if magnitude_path:
+                    visualization_paths.append(magnitude_path)
             
             # 2. Gradient distribution histograms
-            distribution_path = self._plot_gradient_distributions(
-                gradient_data, dataset_name, run_timestamp, plot_dir
-            )
-            if distribution_path:
-                visualization_paths.append(distribution_path)
+            if show_gradient_distributions:
+                distribution_path = self._plot_gradient_distributions(
+                    gradient_data, dataset_name, run_timestamp, plot_dir
+                )
+                if distribution_path:
+                    visualization_paths.append(distribution_path)
             
             # 3. Dead neuron analysis
-            dead_neuron_path = self._plot_dead_neuron_analysis(
-                analysis_results['dead_neurons'],
-                dataset_name, run_timestamp, plot_dir
-            )
-            if dead_neuron_path:
-                visualization_paths.append(dead_neuron_path)
+            if show_dead_neuron_analysis:
+                dead_neuron_path = self._plot_dead_neuron_analysis(
+                    analysis_results['dead_neurons'],
+                    dataset_name, run_timestamp, plot_dir
+                )
+                if dead_neuron_path:
+                    visualization_paths.append(dead_neuron_path)
             
             logger.debug(f"running _create_visualizations ... Created {len(visualization_paths)} visualization files")
             

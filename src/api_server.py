@@ -562,7 +562,7 @@ class OptimizationJob:
                 "average_duration_per_trial": unified_progress.average_duration_per_trial,
                 "elapsed_time": elapsed_time,
                 "status_message": unified_progress.status_message or f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed",
-                "is_gpu_mode": getattr(self.optimizer, 'config', None) and getattr(self.optimizer.config, 'use_runpod_service', False)
+                "is_gpu_mode": bool(self.optimizer and hasattr(self.optimizer, 'config') and getattr(self.optimizer.config, 'use_runpod_service', False))
             }
             
             # Include epoch information directly from unified progress (no more race conditions!)
@@ -675,7 +675,7 @@ class OptimizationJob:
                 "best_total_score": getattr(aggregated_progress, 'current_best_total_score', None),
                 "elapsed_time": elapsed_time,
                 "status_message": f"Trial {current_trial}/{total_trials} - {completed_count} completed, {running_count} running, {failed_count} failed",
-                "is_gpu_mode": getattr(self.optimizer, 'config', None) and getattr(self.optimizer.config, 'use_runpod_service', False)
+                "is_gpu_mode": bool(self.optimizer and hasattr(self.optimizer, 'config') and getattr(self.optimizer.config, 'use_runpod_service', False))
             }
             
             # Add epoch information if available
