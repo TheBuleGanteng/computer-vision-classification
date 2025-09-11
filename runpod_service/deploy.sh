@@ -127,20 +127,22 @@ echo -e "${BLUE}🧪 Testing Docker image locally...${NC}"
 # Uses minimal training parameters (1 epoch, batch_size=64) for faster deployment testing
 # The unified handler calls optimize_model() directly, so this does real model training
 TEST_REQUEST='{
-  "command": "start_training",
-  "trial_id": "deploy_test_001",
-  "dataset_name": "mnist",
-  "hyperparameters": {
-    "learning_rate": 0.001,
-    "epochs": 1,
-    "batch_size": 64,
-    "activation": "relu",
-    "optimizer": "adam"
-  },
-  "config": {
-    "validation_split": 0.2,
-    "mode": "simple",
-    "objective": "val_accuracy"
+  "input": {
+    "command": "start_training",
+    "trial_id": "deploy_test_001",
+    "dataset_name": "mnist",
+    "hyperparameters": {
+      "learning_rate": 0.001,
+      "epochs": 1,
+      "batch_size": 64,
+      "activation": "relu",
+      "optimizer": "adam"
+    },
+    "config": {
+      "validation_split": 0.2,
+      "mode": "simple",
+      "objective": "val_accuracy"
+    }
   }
 }'
 

@@ -14,7 +14,7 @@ Designed for deployment on RunPod with GPU acceleration and local development.
 import asyncio
 import concurrent.futures
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +34,7 @@ from typing import Dict, Any, List, Optional, Union
 import uuid
 import uvicorn
 import zipfile
+import aiohttp
 
 # UPDATED IMPORTS - Fixed compatibility
 from optimizer import optimize_model, OptimizationResult
@@ -44,10 +45,24 @@ from utils.logger import logger, setup_logging
 
 class TensorBoardManager:
     """
-    Manages TensorBoard server processes for different jobs
+    LEGACY/DEAD CODE - TensorBoard server process management (unused)
     
-    Handles starting, stopping, and tracking TensorBoard servers with proper
-    process management and port allocation.
+    This class was designed to manage TensorBoard visualization servers for 
+    optimization jobs, but is effectively dead code:
+    
+    Issues:
+    - Automatic startup logic is disabled (line 879: if not self.tensorboard_manager)
+    - No TensorBoard logs are generated during optimization 
+    - Manual API endpoints exist but would fail due to missing log directories
+    - The optimizer.py doesn't write TensorBoard-compatible logs
+    
+    Original Intent:
+    - Start isolated TensorBoard servers per optimization job
+    - Provide web URLs (localhost:6006+) for real-time training visualization
+    - Track process lifecycle with graceful shutdown handling
+    - Deterministic port allocation based on job_id hash
+    
+    Status: Safe to delete - infrastructure exists but core functionality never implemented
     """
     
     def __init__(self):
@@ -220,6 +235,140 @@ class TensorBoardManager:
             self.stop_server(job_id)
 
 
+class RunPodServiceClient:
+    """
+    HTTP client for direct communication with RunPod service
+    
+    Handles routing optimization requests directly to RunPod handler,
+    bypassing the local optimizer proxy. Includes progress monitoring,
+    error handling, and S3 integration.
+    """
+    
+    def __init__(self, endpoint_url: str, timeout: int = 600):
+        """
+        Initialize RunPod service client
+        
+        Args:
+            endpoint_url: RunPod service endpoint URL
+            timeout: Request timeout in seconds
+        """
+        self.endpoint_url = endpoint_url.rstrip('/')
+        self.timeout = timeout
+        
+    async def start_optimization(self, request: OptimizationRequest, progress_callback=None) -> OptimizationResult:
+        """
+        Start optimization directly via RunPod service
+        
+        Args:
+            request: OptimizationRequest containing all parameters
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            OptimizationResult compatible with existing api_server.py expectations
+            
+        Raises:
+            HTTPException: If RunPod service call fails
+        """
+        try:
+            logger.info(f"🚀 Starting optimization via RunPod service: {self.endpoint_url}")
+            
+            # Convert OptimizationRequest to RunPod handler format
+            payload = self._convert_request_to_runpod_format(request)
+            
+            # Make HTTP request to RunPod service
+            result = await self._make_runpod_request(payload, progress_callback)
+            
+            # Convert RunPod response back to OptimizationResult
+            optimization_result = self._convert_runpod_response_to_result(result, request)
+            
+            return optimization_result
+            
+        except Exception as e:
+            logger.error(f"RunPod service optimization failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"RunPod service error: {str(e)}"
+            )
+    
+    def _convert_request_to_runpod_format(self, request: OptimizationRequest) -> Dict[str, Any]:
+        """Convert OptimizationRequest to RunPod handler input format"""
+        return {
+            "input": {
+                "command": "start_training",
+                "dataset_name": request.dataset_name,
+                "trial_id": f"api_job_{uuid.uuid4().hex[:8]}",
+                "config": {
+                    "mode": request.mode,
+                    "objective": request.optimize_for,
+                    "trials": request.trials,
+                    "plot_generation": request.plot_generation,
+                    "create_optuna_model_plots": request.create_optuna_model_plots,
+                    "validation_split": request.validation_split,
+                    "test_size": request.test_size,
+                    "health_weight": request.health_weight,
+                    "min_epochs_per_trial": request.min_epochs_per_trial,
+                    "max_epochs_per_trial": request.max_epochs_per_trial,
+                    "use_multi_gpu": request.use_multi_gpu,
+                    "target_gpus_per_worker": request.target_gpus_per_worker
+                },
+                "hyperparameters": {
+                    "batch_size": request.batch_size,
+                    "learning_rate": request.learning_rate,
+                    "optimizer": request.optimizer_name,
+                    "activation": request.activation_functions[0] if request.activation_functions else "relu"
+                }
+            }
+        }
+    
+    async def _make_runpod_request(self, payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        """Make HTTP request to RunPod service with progress monitoring"""
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            logger.info(f"📡 Sending request to RunPod: {self.endpoint_url}")
+            logger.debug(f"📦 Payload size: {len(json.dumps(payload))} bytes")
+            
+            async with session.post(
+                self.endpoint_url,
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise RuntimeError(f"RunPod service returned {response.status}: {error_text}")
+                
+                result = await response.json()
+                logger.info(f"✅ RunPod service request completed successfully")
+                logger.debug(f"📋 Response keys: {list(result.keys())}")
+                
+                return result
+    
+    def _convert_runpod_response_to_result(self, runpod_response: Dict[str, Any], request: OptimizationRequest) -> OptimizationResult:
+        """Convert RunPod handler response to OptimizationResult"""
+        # Extract the key data from RunPod response
+        metrics = runpod_response.get("metrics", {})
+        health_metrics = runpod_response.get("health_metrics", {})
+        best_params = runpod_response.get("best_params", {})
+        
+        # Create OptimizationResult compatible with existing api_server.py expectations
+        result = OptimizationResult(
+            best_total_score=metrics.get("test_accuracy", 0.0),
+            best_params=best_params,
+            successful_trials=1 if runpod_response.get("success", False) else 0,
+            total_trials=1,
+            optimization_time_hours=runpod_response.get("metrics", {}).get("training_time_seconds", 0) / 3600.0,
+            best_trial_health=health_metrics,
+            dataset_name=request.dataset_name,
+            results_dir=None  # S3 integration will handle file downloads
+        )
+        
+        # Store RunPod-specific data for S3 integration
+        result.plots_s3_info = runpod_response.get("plots_s3")
+        result.final_model_s3_info = runpod_response.get("final_model_s3")
+        
+        return result
+
+
 class JobStatus(str, Enum):
     """
     Enumeration of possible job states for optimization tasks
@@ -372,45 +521,42 @@ class TrialData(BaseModel):
 
 class OptimizationJob:
     """
-    Enhanced job management class for tracking optimization tasks with real-time updates
+    Simplified job management class with direct RunPod/local routing
     
-    UPDATED: Integrated with new optimizer.py progress tracking system
+    SIMPLIFIED ARCHITECTURE: Direct routing eliminates unnecessary threading layers
     
-    Handles the lifecycle of individual optimization jobs including:
-    - Job state management
-    - Real-time trial tracking via progress callbacks
-    - Progress tracking with live updates
-    - Result storage and retrieval
-    - Error handling and logging
+    Handles complete optimization job lifecycle with two main phases:
+    1. orchestrate_job(): Job setup, state management, and execution launch
+    2. execute_optimization(): Direct routing to RunPod service OR local execution
     
-    This class bridges the FastAPI async world with the new optimizer system,
-    providing clean separation of concerns while capturing comprehensive data 
-    for frontend visualization.
+    Key Features:
+    - Direct RunPod communication via HTTP (no threading for cloud execution)
+    - Local execution via ThreadPoolExecutor (only when sync bridge needed)  
+    - Real-time progress tracking via callbacks
+    - Comprehensive job state management
+    - S3 integration for RunPod results (plots, models)
+    
+    Execution Paths:
+    - RunPod: execute_optimization() → RunPodServiceClient.start_optimization() → HTTP
+    - Local: execute_optimization() → ThreadPoolExecutor → _execute_optimization_local()
     
     Attributes:
         job_id: Unique identifier for this job
-        request: Original optimization request
-        status: Current job status
-        created_at: Job creation timestamp
-        started_at: Job start timestamp (None if not started)
-        completed_at: Job completion timestamp (None if not completed)
-        progress: Current progress information
-        result: Final optimization results (None if not completed)
-        error: Error message if job failed (None if successful)
-        task: Background asyncio task handle
-        
-        # NEW: Real-time trial tracking
-        optimizer: ModelOptimizer instance with progress callback
-        trial_progress_history: List of all trial progress updates
-        current_trial_progress: Currently running trial data
-        best_trial_progress: Best performing trial so far
+        request: OptimizationRequest with all parameters
+        status: JobStatus (PENDING/RUNNING/COMPLETED/FAILED/CANCELLED)
+        created_at/started_at/completed_at: Lifecycle timestamps
+        progress: Real-time progress tracking dictionary
+        result: Final optimization results (API format)
+        error: Error message if job failed
+        task: Background asyncio task handle for execute_optimization()
+        optimizer: ModelOptimizer instance (local execution only)
+        trial_progress_history: Historical trial progress data
         
     Example Usage:
-        job = OptimizationJob(request)
-        await job.start()
+        job = OptimizationJob(request, tensorboard_manager)
+        await job.orchestrate_job()  # Full lifecycle management
         status = job.get_status()
-        trials = job.get_trial_history()
-        current = job.get_current_trial()
+        results = job.result
     """
     
     def __init__(self, request: OptimizationRequest, tensorboard_manager=None):
@@ -697,21 +843,19 @@ class OptimizationJob:
         except Exception as e:
             logger.warning(f"running OptimizationJob._update_job_progress ... Failed to update progress: {e}")
     
-    async def start(self) -> None:
+    async def orchestrate_job(self) -> None:
         """
-        Start the optimization job as a background task
+        Orchestrate optimization job lifecycle and launch execution
         
-        UPDATED: Uses new optimizer.py with progress callback integration
+        Job orchestration responsibilities:
+        - Validate job state and set status to RUNNING
+        - Initialize progress tracking structure
+        - Launch actual optimization execution as asyncio task
+        - Start supporting services (TensorBoard for local jobs)
         
-        Launches the optimization process asynchronously while updating
-        job status and progress. Handles all exceptions gracefully.
+        This method handles job lifecycle management but delegates the actual
+        optimization work to execute_optimization() which handles routing.
         
-        Side Effects:
-            - Updates job status to RUNNING
-            - Sets started_at timestamp
-            - Launches background asyncio task
-            - Logs job start event
-            
         Raises:
             RuntimeError: If job is already running or completed
         """
@@ -721,17 +865,29 @@ class OptimizationJob:
         self.status = JobStatus.RUNNING
         self.started_at = datetime.now().isoformat()
         
-        logger.debug(f"running OptimizationJob.start ... Starting optimization job {self.job_id}")
-        logger.debug(f"running OptimizationJob.start ... Dataset: {self.request.dataset_name}")
-        logger.debug(f"running OptimizationJob.start ... Mode: {self.request.mode}")
-        logger.debug(f"running OptimizationJob.start ... Objective: {self.request.optimize_for}")
-        logger.debug(f"running OptimizationJob.start ... Trials: {self.request.trials}")
+        logger.debug(f"running OptimizationJob.orchestrate_job ... Starting optimization job {self.job_id}")
+        logger.debug(f"running OptimizationJob.orchestrate_job ... Dataset: {self.request.dataset_name}")
+        logger.debug(f"running OptimizationJob.orchestrate_job ... Mode: {self.request.mode}")
+        logger.debug(f"running OptimizationJob.orchestrate_job ... Objective: {self.request.optimize_for}")
+        logger.debug(f"running OptimizationJob.orchestrate_job ... Trials: {self.request.trials}")
         
-        # Start the optimization task
-        self.task = asyncio.create_task(self._run_optimization())
+        # Initialize progress tracking
+        self.progress = {
+            "current_trial": 0,
+            "total_trials": self.request.trials,
+            "completed_trials": 0,
+            "success_rate": 0.0,
+            "best_total_score": None,
+            "elapsed_time": 0,
+            "status_message": "Initializing optimization..."
+        }
         
-        # Auto-start TensorBoard server in the background
-        asyncio.create_task(self._auto_start_tensorboard())
+        # Start optimization with direct routing
+        self.task = asyncio.create_task(self.execute_optimization())
+        
+        # Auto-start TensorBoard server in the background (only for local execution)
+        if not (self.request.use_runpod_service and self.request.runpod_service_endpoint):
+            asyncio.create_task(self._auto_start_tensorboard())
     
     async def _auto_start_tensorboard(self) -> None:
         """
@@ -779,109 +935,101 @@ class OptimizationJob:
             logger.warning(f"running OptimizationJob._auto_start_tensorboard ... Failed to auto-start TensorBoard: {e}")
             # Don't fail the optimization if TensorBoard startup fails
     
-    async def _run_optimization(self) -> None:
+    async def execute_optimization(self) -> None:
         """
-        Execute the optimization process in background
+        Execute optimization with direct routing (simplified architecture)
         
-        UPDATED: Uses new optimizer.py with progress callback
+        Routes to appropriate execution path based on use_runpod_service flag:
+        - RunPod: Direct async HTTP communication (no threading needed)
+        - Local: ThreadPoolExecutor for sync optimizer integration
         
-        Runs the actual hyperparameter optimization using the new unified
-        optimizer system. Updates progress and handles results.
-        
-        This method bridges async FastAPI with the optimizer by running
-        the optimization in a thread pool executor.
-        
-        Side Effects:
-            - Updates job progress during execution
-            - Sets final result on completion
-            - Updates status to COMPLETED or FAILED
-            - Sets completed_at timestamp
-            - Logs optimization progress and results
-            
-        Error Handling:
-            - Catches all exceptions and stores in job.error
-            - Sets status to FAILED on any error
-            - Logs detailed error information
+        This eliminates the unnecessary _run_optimization threading layer for RunPod paths.
         """
         try:
-            logger.debug(f"running OptimizationJob._run_optimization ... Starting optimization for job {self.job_id}")
-            
-            # Initialize progress tracking
-            self.progress = {
-                "current_trial": 0,
-                "total_trials": self.request.trials,
-                "completed_trials": 0,
-                "success_rate": 0.0,
-                "best_total_score": None,
-                "elapsed_time": 0,
-                "status_message": "Initializing optimization..."
-            }
-            
-            # Run optimization in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
+            logger.debug(f"running OptimizationJob.execute_optimization ... Starting optimization for job {self.job_id}")
             
             # Update progress: Starting optimization
-            self.progress["status_message"] = "Loading dataset and initializing optimizer..."
-            logger.debug(f"running OptimizationJob._run_optimization ... Loading dataset {self.request.dataset_name}")
+            if self.progress:
+                self.progress["status_message"] = "Loading dataset and initializing optimizer..."
+            logger.debug(f"running OptimizationJob.execute_optimization ... Dataset: {self.request.dataset_name}")
             
-            # Execute optimization with cancellation handling
-            # Use a dedicated executor so we can control cancellation better
-            result = None  # Initialize to avoid "possibly unbound" errors
+            result = None
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                try:
-                    future = executor.submit(self._execute_optimization)
-                    
-                    # Check for cancellation periodically while waiting for result
-                    while not future.done():
-                        if self.status == JobStatus.CANCELLED:
-                            logger.info(f"running OptimizationJob._run_optimization ... Cancellation detected, requesting optimizer stop")
-                            if hasattr(self, 'optimizer') and self.optimizer:
-                                self.optimizer.cancel()
-                            
-                            # Give the optimization a short time to stop gracefully
-                            try:
-                                result = await asyncio.wait_for(
-                                    asyncio.wrap_future(future), 
-                                    timeout=5.0
-                                )
-                            except asyncio.TimeoutError:
-                                logger.warning(f"running OptimizationJob._run_optimization ... Optimization didn't stop gracefully, forcing cancellation")
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                raise asyncio.CancelledError("Optimization forcefully cancelled")
-                            break
+            # DIRECT ROUTING: Choose execution path based on configuration
+            if self.request.use_runpod_service and self.request.runpod_service_endpoint:
+                logger.info(f"🚀 Routing optimization to RunPod service: {self.request.runpod_service_endpoint}")
+                
+                # RunPod path: Direct async HTTP communication
+                runpod_client = RunPodServiceClient(
+                    endpoint_url=self.request.runpod_service_endpoint,
+                    timeout=self.request.runpod_service_timeout or 600
+                )
+                
+                # Direct async call - no threading needed
+                result = await runpod_client.start_optimization(
+                    request=self.request,
+                    progress_callback=self._progress_callback
+                )
+                
+                logger.info(f"✅ RunPod service optimization completed")
+                
+            else:
+                logger.info(f"🏠 Executing optimization locally")
+                
+                # Local path: Use ThreadPoolExecutor for sync optimizer
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    try:
+                        future = executor.submit(self._execute_optimization_local)
                         
-                        await asyncio.sleep(0.5)  # Check every 500ms
-                    
-                    if future.done():
-                        result = future.result()
-                    
-                except asyncio.CancelledError:
-                    logger.info(f"running OptimizationJob._run_optimization ... Job {self.job_id} was cancelled")
-                    self.status = JobStatus.CANCELLED
-                    self.completed_at = datetime.now().isoformat()
-                    self.progress["status_message"] = "Optimization cancelled by user"
-                    raise
+                        # Check for cancellation periodically
+                        while not future.done():
+                            if self.status == JobStatus.CANCELLED:
+                                logger.info(f"running OptimizationJob.execute_optimization ... Cancellation detected")
+                                if hasattr(self, 'optimizer') and self.optimizer:
+                                    self.optimizer.cancel()
+                                
+                                try:
+                                    result = await asyncio.wait_for(
+                                        asyncio.wrap_future(future), 
+                                        timeout=5.0
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.warning(f"running OptimizationJob.execute_optimization ... Forcing cancellation")
+                                    executor.shutdown(wait=False, cancel_futures=True)
+                                    raise asyncio.CancelledError("Optimization forcefully cancelled")
+                                break
+                            
+                            await asyncio.sleep(0.5)
+                        
+                        if future.done():
+                            result = future.result()
+                        
+                    except asyncio.CancelledError:
+                        logger.info(f"running OptimizationJob.execute_optimization ... Job {self.job_id} was cancelled")
+                        self.status = JobStatus.CANCELLED
+                        self.completed_at = datetime.now().isoformat()
+                        if self.progress:
+                            self.progress["status_message"] = "Optimization cancelled by user"
+                        raise
             
-            # Ensure we have a valid result before processing
+            # Process successful result
             if result is None:
                 raise RuntimeError("Optimization completed but no result was obtained")
             
-            # Convert OptimizationResult to API format
+            # Convert and store result
             api_result = self._convert_optimization_result(result)
-            
-            # Store successful result
             self.result = api_result
             self.status = JobStatus.COMPLETED
             self.completed_at = datetime.now().isoformat()
             
             # Update final progress
-            self.progress["status_message"] = "Optimization completed successfully"
-            self.progress["current_trial"] = self.request.trials
-            self.progress["best_total_score"] = result.best_total_score
+            if self.progress:
+                self.progress["status_message"] = "Optimization completed successfully"
+                self.progress["current_trial"] = self.request.trials
+                self.progress["best_total_score"] = result.best_total_score
             
-            logger.debug(f"running OptimizationJob._run_optimization ... Job {self.job_id} completed successfully")
-            logger.debug(f"running OptimizationJob._run_optimization ... Best value: {result.best_total_score:.4f}")
+            logger.debug(f"running OptimizationJob.execute_optimization ... Job {self.job_id} completed successfully")
+            logger.debug(f"running OptimizationJob.execute_optimization ... Best score: {result.best_total_score:.4f}")
             
         except Exception as e:
             # Handle any optimization errors
@@ -892,10 +1040,10 @@ class OptimizationJob:
             if self.progress:
                 self.progress["status_message"] = f"Optimization failed: {str(e)}"
             
-            logger.error(f"running OptimizationJob._run_optimization ... Job {self.job_id} failed: {e}")
-            logger.debug(f"running OptimizationJob._run_optimization ... Error traceback: {traceback.format_exc()}")
+            logger.error(f"running OptimizationJob.execute_optimization ... Job {self.job_id} failed: {e}")
+            logger.debug(f"running OptimizationJob.execute_optimization ... Error traceback: {traceback.format_exc()}")
     
-    def _execute_optimization(self) -> OptimizationResult:
+    def _execute_optimization_local(self) -> OptimizationResult:
         """
         Execute the actual optimization (synchronous)
         
@@ -943,6 +1091,9 @@ class OptimizationJob:
         logger.debug(f"running OptimizationJob._execute_optimization ... Using clean OptimizationConfig conversion")
         logger.debug(f"running OptimizationJob._execute_optimization ... Config created with user values: dataset_name={opt_config.dataset_name}, mode={opt_config.mode}, trials={opt_config.trials}")
         logger.debug(f"running OptimizationJob._execute_optimization ... System defaults: batch_size={opt_config.batch_size}, learning_rate={opt_config.learning_rate}")
+        
+        # Local execution only (RunPod routing handled in _execute_optimization_async)
+        logger.info(f"🏠 Executing optimization locally")
         
         # Create optimizer instance and store reference for cancellation
         self.optimizer = ModelOptimizer(
@@ -1557,7 +1708,7 @@ class OptimizationAPI:
         self.jobs[job.job_id] = job
         
         # Start optimization in background
-        background_tasks.add_task(job.start)
+        background_tasks.add_task(job.orchestrate_job)
         
         logger.debug(f"running _start_optimization ... Created job {job.job_id} with corrected epoch config")
         return job.get_status()
@@ -1670,7 +1821,7 @@ class OptimizationAPI:
         
         return {
             "job_id": job_id,
-            "job_status": job_status.dict(),
+            "job_status": job_status.model_dump(),
             "trials": trial_history,
             "elapsed_seconds": elapsed_seconds,
             "is_complete": is_complete,
@@ -1692,7 +1843,7 @@ class OptimizationAPI:
         
         for job in self.jobs.values():
             job_status = job.get_status()
-            jobs_list.append(job_status.dict())
+            jobs_list.append(job_status.model_dump())
             
             # Count statuses
             status = job_status.status
@@ -2270,7 +2421,7 @@ Job ID: {job_id}
                 "job_id": job_id,
                 "trial_id": trial_id or trial_number or 'best',
                 "cytoscape_data": cytoscape_data,
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": datetime.now(timezone(timedelta(hours=7))).isoformat(), # Jakarta timezone
                 "trial_info": {
                     "trial_number": trial_number,
                     "status": trial_status,
@@ -2637,7 +2788,14 @@ Job ID: {job_id}
                         return results_dir
             
             # Fallback: Search for directory by pattern
-            optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "/app/optimization_results"))
+            # Use /app path only if actually in RunPod container
+            if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
+                logger.debug("running _get_job_results_directory ... Detected RunPod container environment")
+                optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "/app/optimization_results"))
+            else:
+                logger.debug("running _get_job_results_directory ... Running in local environment")
+                optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "./optimization_results"))
+            
             if not optimization_results_dir.exists():
                 optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_FALLBACK_DIR", "./optimization_results"))
             

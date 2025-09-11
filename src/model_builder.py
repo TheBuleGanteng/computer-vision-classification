@@ -2019,14 +2019,17 @@ class ModelBuilder:
         """
         project_root = Path(__file__).parent.parent.parent  # Go up 3 levels to project root
         
-        # Check if we're in RunPod environment - use optimization_results structure
-        if os.getenv('RUNPOD_ENDPOINT_ID'):
+        # Check if we're actually in RunPod container environment (not just endpoint configured)
+        # RunPod containers have /app directory and RUNPOD_ENDPOINT_ID set
+        if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
+            logger.debug("running _determine_save_directory ... Detected RunPod container environment")            
             # Use /app/optimization_results structure for RunPod to match local behavior
             if run_name:
                 save_dir = Path("/app/optimization_results") / run_name / "models"
             else:
                 save_dir = Path("/app/optimization_results") / "default_run" / "models"
         else:
+            logger.debug("running _determine_save_directory ... running in local environment")            
             # Local execution - use legacy paths
             if run_name and run_name.startswith("optimized_"):
                 # For optimized runs, save to optimized_model directory
@@ -2132,8 +2135,9 @@ class ModelBuilder:
             else:
                 logger.debug(f"running save_model ... - File size: Unknown")
             
-            # Upload to S3 if running on RunPod
-            if os.getenv('RUNPOD_ENDPOINT_ID'):
+            # Upload to S3 if actually running in RunPod container
+            if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
+                logger.debug("running save_model ... Detected RunPod container environment, attempting S3 upload")
                 logger.debug(f"running save_model ... Uploading model to S3 (RunPod environment detected)")
                 try:
                     from utils.s3_transfer import upload_to_runpod_s3
@@ -2167,7 +2171,8 @@ class ModelBuilder:
                         
                 except Exception as e:
                     logger.error(f"Failed to upload model to S3: {e}")
-            
+            else:
+                logger.debug("running save_model ... Not in RunPod container environment, skipping S3 upload")
             return str(final_filepath)
             
         except Exception as e:

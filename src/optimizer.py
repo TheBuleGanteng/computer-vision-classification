@@ -103,6 +103,7 @@ class OptimizationResult:
     
     # S3 upload information (for RunPod execution)
     plots_s3_info: Optional[Dict[str, Any]] = None
+    final_model_s3_info: Optional[Dict[str, Any]] = None
     average_health_metrics: Optional[Dict[str, float]] = None
     
     # Dataset and configuration info
@@ -997,7 +998,7 @@ class ModelOptimizer:
                         "auto_detect_gpus": self.config.auto_detect_gpus,
                         "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling,
                         "create_optuna_model_plots": self.config.create_optuna_model_plots,
-                        "plot_generation": self.config.plot_generation.value if hasattr(self.config.plot_generation, 'value') else str(self.config.plot_generation)
+                        "plot_generation": str(getattr(self.config.plot_generation, 'value', self.config.plot_generation))
                     }
                 }
             }
@@ -1128,6 +1129,26 @@ class ModelOptimizer:
                             logger.warning(f"❌ PLOTS_S3 NOT FOUND in RunPod response")
                             logger.warning(f"🔍 Available response keys: {list(output.keys())}")
                         
+                        # Check for final_model_s3 information
+                        if 'final_model_s3' in output:
+                            final_model_s3_info = output['final_model_s3']
+                            logger.info(f"✅ FINAL_MODEL_S3 FOUND in RunPod response")
+                            logger.info(f"🎯 FINAL_MODEL_S3 CONTENT: {final_model_s3_info}")
+                            
+                            # Validate final_model_s3 structure
+                            required_fields = ['success', 's3_key', 'bucket', 'model_filename']
+                            missing_fields = [field for field in required_fields if field not in final_model_s3_info]
+                            if missing_fields:
+                                logger.error(f"❌ FINAL_MODEL_S3 MISSING FIELDS: {missing_fields}")
+                            else:
+                                logger.info(f"✅ FINAL_MODEL_S3 STRUCTURE VALID - All required fields present")
+                                logger.info(f"🎯 S3_KEY: {final_model_s3_info.get('s3_key')}")
+                                logger.info(f"🎯 S3_BUCKET: {final_model_s3_info.get('bucket')}")
+                                logger.info(f"🎯 MODEL_FILENAME: {final_model_s3_info.get('model_filename')}")
+                        else:
+                            logger.warning(f"❌ FINAL_MODEL_S3 NOT FOUND in RunPod response")
+                            logger.warning(f"🔍 Available response keys: {list(output.keys())}")
+                        
                         # ========================================
                         # S3 DOWNLOAD ATTEMPT
                         # ========================================
@@ -1140,6 +1161,19 @@ class ModelOptimizer:
                         else:
                             logger.warning(f"❌ S3 DOWNLOAD FAILED for Trial {trial.number}")
                             logger.warning(f"🔍 Check S3 credentials, connectivity, or plot availability")
+                        
+                        # ========================================
+                        # FINAL MODEL S3 DOWNLOAD ATTEMPT
+                        # ========================================
+                        logger.info(f"🎯 INITIATING FINAL MODEL S3 DOWNLOAD ATTEMPT for Trial {trial.number}")
+                        final_model_download_success = self._download_final_model_from_s3(output)
+                        
+                        if final_model_download_success:
+                            logger.info(f"🎯 FINAL MODEL S3 DOWNLOAD SUCCESSFUL for Trial {trial.number}")
+                            logger.info(f"🎯 Final model should now be available locally")
+                        else:
+                            logger.info(f"🎯 FINAL MODEL S3 DOWNLOAD SKIPPED/FAILED for Trial {trial.number}")
+                            logger.info(f"🎯 Either no final model available or download failed")
                         
                         # Report completion to UI
                         completion_progress = TrialProgress(
@@ -1634,6 +1668,130 @@ class ModelOptimizer:
                 
         except Exception as e:
             logger.error(f"Error downloading trial {trial_number} plots from S3: {e}")
+            return False
+    
+    def _download_final_model_from_s3(self, runpod_output: Dict[str, Any]) -> bool:
+        """
+        Download final model from S3 if available in RunPod response
+        
+        Args:
+            runpod_output: The complete RunPod response containing final_model_s3 info
+            
+        Returns:
+            True if download successful, False otherwise
+        """
+        try:
+            logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION START =====")
+            logger.info(f"🎯 Checking for S3 final model to download")
+            logger.info(f"🎯 Available RunPod response keys: {list(runpod_output.keys())}")
+            
+            # Check if final model was uploaded to S3
+            final_model_s3_info = runpod_output.get('final_model_s3')
+            if not final_model_s3_info:
+                logger.info(f"🎯 No S3 final model information found")
+                logger.info(f"🎯 This means either:")
+                logger.info(f"🎯   - Final model building was disabled")
+                logger.info(f"🎯   - RunPod handler didn't create final_model_s3_info")
+                logger.info(f"🎯   - Final model failed to upload to S3")
+                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (NO DOWNLOAD) =====")
+                return False
+            
+            # ========================================
+            # VALIDATE S3 INFORMATION
+            # ========================================
+            logger.info(f"✅ S3 final model information found")
+            logger.info(f"🎯 S3 Info Details: {final_model_s3_info}")
+            
+            # Extract S3 key from final_model_s3 info
+            s3_key = final_model_s3_info.get('s3_key')
+            if not s3_key:
+                logger.error(f"❌ No S3 key found in final_model_s3 info")
+                logger.error(f"🎯 Available final_model_s3 keys: {list(final_model_s3_info.keys())}")
+                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (NO KEY) =====")
+                return False
+            
+            model_filename = final_model_s3_info.get('model_filename')
+            if not model_filename:
+                logger.error(f"❌ No model filename found in final_model_s3 info")
+                return False
+                
+            logger.info(f"🎯 S3 Key: {s3_key}")
+            logger.info(f"🎯 Model Filename: {model_filename}")
+            
+            # ========================================
+            # CREATE LOCAL DOWNLOAD DIRECTORY
+            # ========================================
+            if not self.results_dir:
+                logger.error(f"❌ No results directory set, cannot download final model")
+                return False
+                
+            local_model_dir = self.results_dir / "optimized_model"
+            local_model_dir.mkdir(parents=True, exist_ok=True)
+            local_model_path = local_model_dir / model_filename
+            
+            logger.info(f"🎯 Local model download path: {local_model_path}")
+            
+            # ========================================
+            # ATTEMPT S3 DOWNLOAD
+            # ========================================
+            logger.info(f"🎯 STARTING FINAL MODEL S3 DOWNLOAD")
+            logger.info(f"🎯 FROM: s3://40ub9vhaa7/{s3_key}")
+            logger.info(f"🎯 TO: {local_model_path}")
+            
+            # Import the S3 download utility
+            from utils.s3_transfer import download_from_runpod_s3
+            
+            # Create temporary directory for download
+            import tempfile
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Download final model from S3 to temp directory
+                success = download_from_runpod_s3(
+                    s3_prefix=s3_key.rsplit('/', 1)[0],  # Get directory part of S3 key
+                    local_dir=temp_dir
+                )
+                
+                if success:
+                    # Move the downloaded file to final location
+                    temp_model_path = Path(temp_dir) / model_filename
+                    if temp_model_path.exists():
+                        import shutil
+                        shutil.move(str(temp_model_path), str(local_model_path))
+                        success = True
+                    else:
+                        logger.error(f"🎯 Downloaded file not found at expected path: {temp_model_path}")
+                        success = False
+            
+            # ========================================
+            # REPORT DOWNLOAD RESULTS
+            # ========================================
+            if success:
+                logger.info(f"🎯 FINAL MODEL S3 DOWNLOAD SUCCESSFUL")
+                logger.info(f"🎯 Final model downloaded to: {local_model_path}")
+                
+                # Verify file exists and get size
+                try:
+                    if local_model_path.exists():
+                        file_size = local_model_path.stat().st_size
+                        logger.info(f"🎯 Downloaded file size: {file_size:,} bytes")
+                        logger.info(f"🎯 Downloaded file: {local_model_path.name}")
+                    else:
+                        logger.warning(f"🎯 Local model file doesn't exist after download: {local_model_path}")
+                        return False
+                except Exception as e:
+                    logger.warning(f"🎯 Error verifying downloaded file: {e}")
+                    
+                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (SUCCESS) =====")
+                return True
+                
+            else:
+                logger.error(f"🎯 FINAL MODEL S3 DOWNLOAD FAILED")
+                logger.error(f"🎯 Check S3 credentials, connectivity, or model availability")
+                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (FAILED) =====")
+                return False
+                
+        except Exception as e:
+            logger.error(f"🎯 Error downloading final model from S3: {e}")
+            logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (ERROR) =====")
             return False
     
     def _train_locally_for_trial(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
@@ -2509,7 +2667,7 @@ class ModelOptimizer:
     def _build_final_model(self, results: OptimizationResult) -> Optional[str]:
         """
         Build and train the final model using the best hyperparameters from optimization.
-        Routes to RunPod service or local execution based on configuration.
+        Always builds locally - S3 transfer handled by the container/handler.
         
         Args:
             results: Optimization results containing best hyperparameters
@@ -2517,15 +2675,8 @@ class ModelOptimizer:
         Returns:
             Path to the saved final model, or None if building failed
         """
-        logger.debug("running _build_final_model ... Determining execution method for final model")
-        
-        # Simplified logic: use_runpod_service controls everything with S3 transfer
-        if self._should_use_runpod_service():
-            logger.debug("running _build_final_model ... Using RunPod service for final model training with S3 transfer")
-            return self._train_final_model_via_runpod_service(results)
-        else:
-            logger.debug("running _build_final_model ... Using local execution for final model training")
-            return self._build_final_model_locally(results)
+        logger.debug("running _build_final_model ... Building final model locally")
+        return self._build_final_model_locally(results)
 
     def _build_final_model_locally(self, results: OptimizationResult) -> Optional[str]:
         """

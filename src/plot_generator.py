@@ -186,8 +186,9 @@ class PlotGenerator:
         # Log summary
         self._log_generation_summary(analysis_results, test_loss, test_accuracy)
         
-        # Upload plots to S3 if running on RunPod
-        if os.getenv('RUNPOD_ENDPOINT_ID'):
+        # Upload plots to S3 if actually running in RunPod container
+        if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
+            logger.debug("running generate_compreshensive_plots ... Detected RunPod container environment")
             logger.debug(f"Uploading plots to S3 (RunPod environment detected)")
             try:
                 from utils.s3_transfer import upload_to_runpod_s3
@@ -219,6 +220,8 @@ class PlotGenerator:
             except Exception as e:
                 logger.error(f"Failed to upload plots to S3: {e}")
         
+        else:
+            logger.debug("running generate_comprehensive_plots ... Running in local environment, skipping S3 upload")
         return analysis_results
     
     def generate_confusion_matrix(

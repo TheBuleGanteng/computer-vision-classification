@@ -7,14 +7,20 @@ ensuring identical behavior between local and RunPod execution.
 
 import json
 import os
+from pathlib import Path
 import runpod
+import shutil
 import sys
+import tempfile       
 import traceback
 from typing import Dict, Any
 from datetime import datetime
 
 from src.optimizer import optimize_model
 from src.utils.logger import logger
+from src.utils.s3_transfer import upload_to_runpod_s3
+                    
+
 
 # Add project root to Python path for imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -148,6 +154,7 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"✅ Successful Trials: {result.successful_trials}")
         
         plots_s3_info = None
+        final_model_s3_info = None
         
         # Create plots_s3_info when plots are generated successfully
         # Since handler.py only runs in RunPod contexts, always create S3 info when appropriate
@@ -203,6 +210,89 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
         
         logger.info(f"🔍 ===== RUNPOD HANDLER PLOTS_S3 ANALYSIS END =====")
         logger.info(f"📦 Final plots_s3_info: {plots_s3_info}")
+        
+        # ========================================
+        # FINAL MODEL S3 ANALYSIS
+        # ========================================
+        logger.info(f"🔍 ===== RUNPOD HANDLER FINAL_MODEL_S3 ANALYSIS =====")
+        
+        if result.successful_trials > 0 and result.best_model_path:
+            logger.info(f"🎯 FINAL MODEL: Model path found: {result.best_model_path}")
+            
+            # Check if final model file exists
+            model_path = Path(result.best_model_path)
+            if model_path.exists():
+                logger.info(f"🎯 FINAL MODEL: ✅ Model file exists at: {model_path}")
+                
+                # Extract S3 path info similar to plots
+                model_dir_str = str(model_path.parent)
+                if "optimization_results" in model_dir_str:
+                    opt_results_index = model_dir_str.find("optimization_results")
+                    relative_part = model_dir_str[opt_results_index + len("optimization_results"):].lstrip("/")
+                    s3_prefix = f"optimization_results/{relative_part}" if relative_part else "optimization_results"
+                else:
+                    s3_prefix = "optimization_results"
+                
+                model_filename = model_path.name
+                s3_key = f"{s3_prefix}/{model_filename}"
+                
+                logger.info(f"🎯 FINAL MODEL: S3 key will be: {s3_key}")
+                
+                # Upload to S3
+                try:
+                    
+                    logger.info(f"🎯 FINAL MODEL: Uploading to S3: s3://40ub9vhaa7/{s3_key}")
+                    
+                    # Create a temporary directory with the model file to upload
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_model_path = Path(temp_dir) / model_filename
+                        shutil.copy2(str(model_path), str(temp_model_path))
+                        
+                        # Upload using the directory-based function
+                        upload_result = upload_to_runpod_s3(
+                            local_dir=temp_dir,
+                            s3_prefix=s3_prefix
+                        )
+                        
+                        success = upload_result is not None
+                    
+                    if success:
+                        logger.info(f"🎯 FINAL MODEL: ✅ S3 upload successful!")
+                        
+                        final_model_s3_info = {
+                            'success': True,
+                            's3_prefix': s3_prefix,
+                            's3_key': s3_key,
+                            'bucket': '40ub9vhaa7',
+                            'model_filename': model_filename
+                        }
+                        
+                        logger.info(f"🎯 FINAL MODEL: Created final_model_s3_info")
+                        logger.info(f"🎯 FINAL MODEL: S3 Prefix: {final_model_s3_info['s3_prefix']}")
+                        logger.info(f"🎯 FINAL MODEL: S3 Key: {final_model_s3_info['s3_key']}")
+                        logger.info(f"🎯 FINAL MODEL: Bucket: {final_model_s3_info['bucket']}")
+                    else:
+                        logger.error(f"🎯 FINAL MODEL: ❌ S3 upload failed")
+                        final_model_s3_info = None
+                        
+                except Exception as e:
+                    logger.error(f"🎯 FINAL MODEL: S3 upload error: {e}")
+                    final_model_s3_info = None
+                    
+            else:
+                logger.warning(f"🎯 FINAL MODEL: ❌ Model file not found at: {model_path}")
+                final_model_s3_info = None
+                
+        else:
+            if result.successful_trials == 0:
+                logger.warning(f"🎯 FINAL MODEL: No successful trials")
+            else:
+                logger.warning(f"🎯 FINAL MODEL: No model path in result")
+            final_model_s3_info = None
+            
+        logger.info(f"🔍 ===== RUNPOD HANDLER FINAL_MODEL_S3 ANALYSIS END =====")
+        logger.info(f"📦 Final final_model_s3_info: {final_model_s3_info}")
+        
         # ========================================
         # RESPONSE CONSTRUCTION
         # ========================================
@@ -231,7 +321,8 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 "multi_gpu_used": config_data.get('use_multi_gpu', False),
                 "target_gpus": config_data.get('target_gpus_per_worker', 1),
                 "model_attributes": None,
-                "plots_s3": plots_s3_info  # S3 plot upload information
+                "plots_s3": plots_s3_info,  # S3 plot upload information
+                "final_model_s3": final_model_s3_info  # S3 final model upload information
             }
         else:
             # No successful trials
@@ -247,7 +338,8 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 "multi_gpu_used": False,
                 "target_gpus": 1,
                 "model_attributes": None,
-                "plots_s3": None
+                "plots_s3": None,
+                "final_model_s3": None
             }
         
         # ========================================
