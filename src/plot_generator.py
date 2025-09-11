@@ -10,6 +10,7 @@ different plot analysis modules to create comprehensive training reports.
 
 from datetime import datetime
 import numpy as np
+import os
 from pathlib import Path
 from tensorflow import keras # type: ignore
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
@@ -184,6 +185,39 @@ class PlotGenerator:
         
         # Log summary
         self._log_generation_summary(analysis_results, test_loss, test_accuracy)
+        
+        # Upload plots to S3 if running on RunPod
+        if os.getenv('RUNPOD_ENDPOINT_ID'):
+            logger.debug(f"Uploading plots to S3 (RunPod environment detected)")
+            try:
+                from utils.s3_transfer import upload_to_runpod_s3
+                
+                # Upload the plot directory to S3 using same structure as local
+                # Extract the relative path from optimization_results onward
+                # Handle both RunPod container paths (/app/...) and local test paths
+                plot_dir_str = str(plot_dir)
+                if "optimization_results" in plot_dir_str:
+                    # Find the optimization_results part and extract relative path from there
+                    opt_results_index = plot_dir_str.find("optimization_results")
+                    relative_part = plot_dir_str[opt_results_index + len("optimization_results"):].lstrip("/")
+                    s3_prefix = f"optimization_results/{relative_part}" if relative_part else "optimization_results"
+                else:
+                    # Fallback: use the directory name structure
+                    s3_prefix = f"optimization_results/{plot_dir.name}"
+                s3_result = upload_to_runpod_s3(
+                    local_dir=str(plot_dir),
+                    s3_prefix=s3_prefix
+                )
+                
+                if s3_result:
+                    logger.info(f"✅ Plots uploaded to S3: s3://40ub9vhaa7/{s3_prefix}")
+                    # Store S3 info in analysis results
+                    analysis_results['plots_s3'] = s3_result
+                else:
+                    logger.warning(f"⚠️ Failed to upload plots to S3")
+                    
+            except Exception as e:
+                logger.error(f"Failed to upload plots to S3: {e}")
         
         return analysis_results
     

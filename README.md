@@ -201,6 +201,8 @@ ModelConfig() defaults → Used when Optuna fails → Safe fallback values
 - ✅ **Real-time Progress Aggregation**: Thread-safe concurrent training progress visualization
 - ✅ **Local Fallback**: Automatic local execution when cloud service unavailable
 - ✅ **Accuracy Synchronization**: <0.5% gap between cloud and local execution
+- ✅ **RunPod S3 Storage Integration**: Automatic model and artifact transfer via RunPod Network Volumes
+- ✅ **Simplified Architecture**: Deprecated train_locally/build_model_locally flags in favor of unified S3-based transfer system
 
 ### Backend API & Data Processing
 - ✅ **FastAPI REST API**: Comprehensive endpoints for job management and data retrieval
@@ -463,47 +465,128 @@ class ModelOptimizer:
 
 ---
 
-### **Phase 2: Testing UI with runpod proxy GPU enabled** 🔧
-**Status**: Not started
+### **Phase 2: RunPod S3 Storage Integration** ✅ **COMPLETED**
+**Status**: Successfully completed with automatic model transfer
 
 **Objectives:**
-- Ensure existing functionality also works when use of runpod proxy GPU is enabled. This functionality is already in place, but has not yet been tested in conjunction with the UI.
-- Understand if use of the runpod proxy GPU speeds up the complete optimization (Optuna traials + plot generation + final model build) and if so, by how much
-- Explore and implement any additional means of more fully leveraging the runpod proxy GPU to further accelerate an optimization (for example, via plot generation or any other activities currently done via CPU)
+- ✅ Enable automatic transfer of final models from RunPod GPU workers to local machine
+- ✅ Implement S3-compatible storage integration with RunPod Network Volumes  
+- ✅ Simplify architecture by eliminating need for train_locally/build_model_locally configuration flags
+- ✅ Ensure seamless model availability regardless of where training occurred
 
-**Key Deliverables:**
-- ✅ Fix bug that occurs when multiple trials are running simultaniously and the first trial completed is considered trial_1 and the second trial completed is trial_0.  This does not make sense for the user. Instead, the first trial completed should be trial_0, the second trial completed should be trial_1, etc.
-- ✅ Ensure use of multiple GPUs as determined by concurrent_workers in in OptimizationConfig in optimizer.py
-- ✅ Migrate final model training to GPU. Currently, this still happens on local CPU, even when the trials are done on the runpod proxy GPU. This will include getting the correct status updates for that final model build from the runpod proxy GPU, similar to what is done with the trials.
-- 🔄 When a job is cancelled, I believe the polling continues, which throws JS console errors. The polling should stop when a job is cancelled, so as to avoid this.  
-- 🔄 When an optimization (Optuna + final model build) completes and I click the "start optimization" button again to start a new optimization, I see the following error: - 🔄 Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled). Clicking the cancel run button in the UI should cancel the process and clear the runpod jobs, regardless of whether the optuna hyperparameter exploration process is underway or the final model building is underway.
+**Implementation Completed:**
+The RunPod S3 storage integration has been successfully implemented, providing automatic model transfer:
+- ✅ **S3 Upload in RunPod Handler**: Models automatically uploaded to RunPod S3 storage after training
+- ✅ **S3 Download in Optimizer**: Models automatically downloaded from S3 to local optimization_results directory
+- ✅ **Credential Management**: Secure S3 authentication via RunPod Network Volume credentials
+- ✅ **Storage Volume Connection**: RunPod serverless instances connected to persistent storage volumes
+- ✅ **Automatic Cleanup**: S3 files cleaned up after successful download to save storage space
 
-- 🔄 Implemenation of any additional functionality needed to ensure clean operation when using runpod proxy GPU (for example, automatic cleanup of existing runpod jobs when an ongoing job is cancelled). Clicking the cancel run button in the UI should cancel the process and clear the runpod jobs, regardless of whether the optuna hyperparameter exploration process is underway or the final model building is underway.
-- 🔄 When a job is cancelled while in progress, the status section (the bars, epochs, etc) persist in the state they were when the job was cancelled. This should be replaced by the text "Job cancelled" to make it clear to the user that the job is no longer underway. 
- 
-- 🔄 UI feature (checkbox) that allows the toggling on/off of runpod proxy GPU resources
+**Architecture Achievement:**
+With S3 storage working, the complex train_locally/build_model_locally flag system is now deprecated:
+- **Old Approach**: Required separate code paths and configuration flags to control execution location
+- **New Approach**: Unified execution with automatic S3 transfer - models trained anywhere become available locally
+- **Benefits**: Simplified codebase, automatic model availability, no configuration complexity
+
+**Remaining Work for Future Phases:**
+
+While the S3 storage integration has simplified model transfer, there are still opportunities for future optimization:
+
+**Potential Future Enhancement - Plot Transfer via S3:**
+- **Current Limitation**: Trial plots are still generated locally, requiring local model building for each trial
+- **Future Opportunity**: Extend S3 integration to transfer plots from RunPod workers
+- **Benefit**: Could enable ALL plot mode while keeping models trained entirely on RunPod
+- **Implementation**: Upload trial plots to S3 alongside models, download for UI display 
 
 ---
 
-### **Phase 3: Logging Consolidation & System Polish** 🔧
-**Status**: Not started
+### **Phase 3: Plot Transfer via S3 Extension** 🔧
+**Status**: Ready for implementation
 
 **Objectives:**
-- **CRITICAL FIX**: Ensure UI-triggered optimizations write logs to `logs/non-cron.log`
-- Consolidate all optimization logs into unified logging system
-- Improve error handling and user feedback
-- System stability and performance optimizations
+- Extend S3 storage integration to include trial plots for complete remote execution capability
+- Enable ALL plot generation mode while maintaining full GPU acceleration
+- Implement plot upload/download mechanism similar to model transfer
+- Ensure local operation remains unaffected by S3 plot transfer
+
+**Current State Analysis:**
+With S3 model transfer working successfully, the system currently handles:
+- ✅ **Final Model Transfer**: Models automatically uploaded/downloaded via S3
+- ✅ **RunPod Storage Integration**: Credentials and bucket access working perfectly
+- ✅ **Automatic Cleanup**: S3 files cleaned up after successful downloads
+- 🔄 **Plot Transfer**: Trial plots still require local model building for generation
+
+**Implementation Plan:**
+
+**Stage 1: Plot Upload Integration in RunPod Handler**
+- Extend `handler.py` to generate and upload trial plots to S3 after each trial
+- Use existing S3 upload mechanism with plot-specific S3 prefix
+- Include all plot types: training_history, gradient_analysis, weight_distributions, activation_progression
+- Maintain existing plot generation quality and format
+
+**Stage 2: Plot Download Integration in Optimizer**
+- Extend `optimizer.py` S3 download functionality to retrieve trial plots
+- Download plots to appropriate trial directories in `optimization_results/`
+- Ensure plot availability for UI visualization system
+- Implement plot-specific cleanup after successful download
+
+**Stage 3: Conditional Plot Generation Logic**
+- Add `generate_plots_on_runpod` configuration parameter
+- Enable local model building bypass when plots available via S3
+- Maintain backward compatibility with existing local plot generation
+- Implement fallback to local generation if S3 plots unavailable
+
+**Testing Strategy:**
+- **S3 Plot Upload**: Verify plots correctly uploaded to RunPod S3 storage
+- **S3 Plot Download**: Confirm plots downloaded to correct local directories
+- **UI Integration**: Test plot visualization with S3-transferred plots
+- **Local Fallback**: Ensure local operation unaffected when S3 unavailable
+
+**Benefits:**
+- **Full GPU Acceleration**: Enable ALL plot mode with complete RunPod execution
+- **Reduced Local Overhead**: Eliminate need for local model building during trials
+- **Performance Gain**: Faster trial completion by removing local model building bottleneck
+- **Unified Architecture**: Complete S3-based transfer system for all artifacts
 
 **Key Deliverables:**
-- Unified logging across all optimization trigger methods
-- Enhanced error messages and debugging capability
-- Improved system stability and reliability
-- Consistent log formatting and rotation
+- 🔄 **Plot Upload**: Extend RunPod handler to generate and upload trial plots to S3
+- 🔄 **Plot Download**: Extend optimizer to download and organize plots locally  
+- 🔄 **Configuration Options**: Add plot generation location control parameters
+- 🔄 **Testing**: Comprehensive validation of plot transfer functionality
+- 🔄 **Documentation**: Updated configuration and usage documentation
+
+---
+
+### **Phase 4: System Polish & Testing** 🔧
+**Status**: Ready for testing validation
+
+**Objectives:**
+- Ensure robust operation with RunPod GPU acceleration and S3 storage
+- Comprehensive testing of S3 transfer system under various conditions
+- System stability validation and performance benchmarking
+- User experience optimization for cloud-based workflows
+
+**Key Areas for Testing:**
+- **S3 Integration Robustness**: Test S3 transfer with network interruptions, credential changes
+- **Final Model GPU Training**: Validate GPU-based final model training with progress updates
+- **UI State Management**: Ensure proper UI state updates during job cancellation and completion
+- **Error Handling**: Test graceful degradation when cloud services unavailable
+- **Performance Benchmarking**: Measure end-to-end optimization speed improvements
+
+**Key Deliverables:**
+- ✅ Fix trial numbering bug (first completed = trial_0, second = trial_1, etc.)
+- ✅ Ensure multiple GPU usage via concurrent_workers configuration
+- ✅ Migrate final model training to GPU with proper status updates
+- 🔄 Implement proper job cancellation with RunPod cleanup
+- 🔄 Fix UI polling continuation after job cancellation
+- 🔄 Add "Job cancelled" status display when optimization stopped
+- 🔄 Add UI checkbox for RunPod GPU resource toggling
+- 🔄 Comprehensive logging for UI-triggered optimizations
 
 ---
 
 
-### **Phase 4: Deployment & Container Integration** 🚀
+### **Phase 5: Deployment & Container Integration** 🚀
 **Status**: Production readiness
 
 **Objectives:**
@@ -520,7 +603,7 @@ class ModelOptimizer:
 
 ---
 
-### **Phase 5: Website Integration** 🌐
+### **Phase 6: Website Integration** 🌐
 **Status**: Not started
 
 **Objectives:**

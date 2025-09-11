@@ -25,7 +25,8 @@ import os
 from pathlib import Path
 from pydantic import BaseModel, Field
 import shutil
-from optimizer import ModelOptimizer, OptimizationConfig, OptimizationMode, OptimizationObjective
+from optimizer import ModelOptimizer
+from data_classes.configs import OptimizationConfig, OptimizationRequest, OptimizationMode, OptimizationObjective
 import subprocess
 import tempfile
 import traceback
@@ -35,7 +36,8 @@ import uvicorn
 import zipfile
 
 # UPDATED IMPORTS - Fixed compatibility
-from optimizer import optimize_model, OptimizationResult, OptimizationMode, OptimizationObjective, UnifiedProgress
+from optimizer import optimize_model, OptimizationResult
+from data_classes.callbacks import UnifiedProgress
 from dataset_manager import DatasetManager
 from utils.logger import logger, setup_logging
 
@@ -239,53 +241,7 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class OptimizationRequest(BaseModel):
-    """
-    API request model for commonly modified user configs.
-    
-    Contains only the 8 most commonly modified variables with their defaults.
-    All other variables are system variables handled by OptimizationConfig.
-    """
-    
-    # Required field - no default anywhere
-    dataset_name: str = Field(..., description="Dataset name (e.g., 'cifar10', 'mnist', 'imdb')")
-    
-    # Commonly modified user-controlled variables with defaults HERE
-    mode: str = Field("health", pattern="^(simple|health)$", description="Optimization mode")
-    optimize_for: str = Field("val_accuracy", description="Optimization objective")
-    trials: int = Field(2, ge=1, le=500, description="Number of optimization trials")
-    max_epochs_per_trial: int = Field(6, ge=1, le=100, description="Maximum epochs per trial")
-    min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
-    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
-    use_runpod_service: bool = Field(True, description="Use RunPod cloud service")
-    
-    # Legacy compatibility
-    config_overrides: Dict[str, Any] = Field(default_factory=dict, description="Additional configuration overrides")
-
-
-def create_optimization_config(request: OptimizationRequest) -> OptimizationConfig:
-    """
-    Convert API request to business configuration.
-    
-    Passes all user-controlled variables directly (simple pass-through).
-    OptimizationConfig will fail fast if any required values are missing/invalid.
-    """
-    
-    return OptimizationConfig(
-        # Pass all 8 user-controlled variables directly from OptimizationRequest
-        dataset_name=request.dataset_name,
-        mode=OptimizationMode(request.mode),
-        optimize_for=request.optimize_for,
-        trials=request.trials,
-        max_epochs_per_trial=request.max_epochs_per_trial,
-        min_epochs_per_trial=request.min_epochs_per_trial,
-        health_weight=request.health_weight,
-        use_runpod_service=request.use_runpod_service,
-        
-        # Apply any config overrides
-        **request.config_overrides
-        # System variables will use OptimizationConfig defaults (not passed from request)
-    )
+# OptimizationRequest and OptimizationConfig are now centralized in configs.py
 
 
 class JobResponse(BaseModel):
@@ -982,7 +938,7 @@ class OptimizationJob:
         # This ensures consistency and eliminates code duplication
         
         # Use clean conversion function - gets all user values + system defaults
-        opt_config = create_optimization_config(self.request)
+        opt_config = self.request  # OptimizationRequest is now the unified config
         
         logger.debug(f"running OptimizationJob._execute_optimization ... Using clean OptimizationConfig conversion")
         logger.debug(f"running OptimizationJob._execute_optimization ... Config created with user values: dataset_name={opt_config.dataset_name}, mode={opt_config.mode}, trials={opt_config.trials}")
@@ -2871,7 +2827,7 @@ Job ID: {job_id}
         Args:
             job_id: Unique job identifier
             trial_id: Trial number (e.g., "0", "1", "2")
-            plot_type: Plot type ("training_history", "weights_bias", "gradient_flow", "dead_neuron_analysis", "gradient_distributions", "training_progress", "activation_maps", "activation_summary", "confusion_matrix", "training_animation")
+            plot_type: Plot type ("training_history", "weights_bias", "gradient_magnitudes", "gradient_distributions", "dead_neuron_analysis", "training_progress", "activation_maps", "activation_summary", "confusion_matrix", "training_animation")
             
         Returns:
             File response with the plot image
@@ -2900,9 +2856,9 @@ Job ID: {job_id}
             plot_patterns = {
                 "training_history": ["training_history*", "training_progress*", "training_*dashboard*"],
                 "weights_bias": ["weights_bias*", "*weights*bias*"], 
-                "gradient_flow": ["gradient_flow*", "gradient_magnitudes*", "gradient_distributions*"],
-                "dead_neuron_analysis": ["*dead_neuron*"],
+                "gradient_magnitudes": ["gradient_magnitudes*"],
                 "gradient_distributions": ["gradient_distributions*"],
+                "dead_neuron_analysis": ["*dead_neuron*"],
                 "training_progress": ["training_progress*"],
                 "activation_maps": ["activation_maps*", "activation_comparison*"],
                 "activation_progression": ["activation_progression*"],
@@ -2982,9 +2938,9 @@ Job ID: {job_id}
             plot_patterns = {
                 "training_history": ["training_history*", "training_progress*", "training_*dashboard*"],
                 "weights_bias": ["weights_bias*", "*weights*bias*"], 
-                "gradient_flow": ["gradient_flow*", "gradient_magnitudes*", "gradient_distributions*"],
-                "dead_neuron_analysis": ["*dead_neuron*"],
+                "gradient_magnitudes": ["gradient_magnitudes*"],
                 "gradient_distributions": ["gradient_distributions*"],
+                "dead_neuron_analysis": ["*dead_neuron*"],
                 "training_progress": ["training_progress*"],
                 "activation_maps": ["activation_maps*", "activation_comparison*"],
                 "activation_progression": ["activation_progression*"],
@@ -3097,7 +3053,7 @@ if __name__ == "__main__":
     For production deployment, use:
     uvicorn api_server:app --host 0.0.0.0 --port 8000
     """
-    # CRITICAL FIX: Ensure logging is set up before server starts
+    # Ensure logging is set up before server starts
     setup_logging()
     logger.info("FastAPI server starting - all logs will be written to logs/non-cron.log")
     logger.debug("running api_server.__main__ ... Starting FastAPI development server")

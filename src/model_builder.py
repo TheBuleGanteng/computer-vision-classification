@@ -27,6 +27,7 @@ Supported Architectures:
 import copy
 from dataset_manager import DatasetConfig, DatasetManager
 import datetime
+import os
 from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
 from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
 from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
@@ -666,7 +667,8 @@ class ModelBuilder:
         validation_split: Optional[float] = None,
         use_multi_gpu: bool = False,
         plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None,
-        epoch_progress_callback: Optional[Callable[[int, float], None]] = None
+        epoch_progress_callback: Optional[Callable[[int, float], None]] = None,
+        create_plots: bool = True
     ) -> keras.callbacks.History:
         """
         Enhanced training with optimized GPU proxy execution
@@ -681,7 +683,7 @@ class ModelBuilder:
         
         # Execute local training
         logger.debug("running train ... Using local training execution")
-        return self._train_locally_optimized(data, validation_split, use_multi_gpu, plot_progress_callback, epoch_progress_callback)
+        return self._train_locally_optimized(data, validation_split, use_multi_gpu, plot_progress_callback, epoch_progress_callback, create_plots)
     
     
     def _should_use_gpu_proxy(self) -> bool:
@@ -1483,7 +1485,8 @@ class ModelBuilder:
         validation_split: Optional[float] = None,
         use_multi_gpu: bool = False,
         plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None,
-        epoch_progress_callback: Optional[Callable[[int, float], None]] = None
+        epoch_progress_callback: Optional[Callable[[int, float], None]] = None,
+        create_plots: bool = True
     ) -> keras.callbacks.History:
         """
         Optimized local training execution with PROPER multi-GPU implementation
@@ -1679,8 +1682,11 @@ class ModelBuilder:
         if self.training_history is None:
             raise RuntimeError("Training failed - no history returned")
         
-        # Generate training visualization plots after successful training
-        self._generate_training_plots(training_data, validation_data, plot_progress_callback)
+        # Generate training visualization plots after successful training (if enabled)
+        if create_plots:
+            self._generate_training_plots(training_data, validation_data, plot_progress_callback)
+        else:
+            logger.debug("running _train_locally_optimized ... Skipping plot generation (create_plots=False)")
         
         return self.training_history
 
@@ -2013,12 +2019,21 @@ class ModelBuilder:
         """
         project_root = Path(__file__).parent.parent.parent  # Go up 3 levels to project root
         
-        if run_name and run_name.startswith("optimized_"):
-            # For optimized runs, save to optimized_model directory
-            save_dir = project_root / "optimized_model"
+        # Check if we're in RunPod environment - use optimization_results structure
+        if os.getenv('RUNPOD_ENDPOINT_ID'):
+            # Use /app/optimization_results structure for RunPod to match local behavior
+            if run_name:
+                save_dir = Path("/app/optimization_results") / run_name / "models"
+            else:
+                save_dir = Path("/app/optimization_results") / "default_run" / "models"
         else:
-            # For regular runs, save to trained_models directory
-            save_dir = project_root / "trained_models"
+            # Local execution - use legacy paths
+            if run_name and run_name.startswith("optimized_"):
+                # For optimized runs, save to optimized_model directory
+                save_dir = project_root / "optimized_model"
+            else:
+                # For regular runs, save to trained_models directory
+                save_dir = project_root / "trained_models"
         
         # Create directory if it doesn't exist
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -2116,6 +2131,42 @@ class ModelBuilder:
                 logger.debug(f"running save_model ... - File size: {file_size_mb:.1f} MB")
             else:
                 logger.debug(f"running save_model ... - File size: Unknown")
+            
+            # Upload to S3 if running on RunPod
+            if os.getenv('RUNPOD_ENDPOINT_ID'):
+                logger.debug(f"running save_model ... Uploading model to S3 (RunPod environment detected)")
+                try:
+                    from utils.s3_transfer import upload_to_runpod_s3
+                    from pathlib import Path
+                    
+                    # Upload the model directory to S3 using same structure as local
+                    # Extract the relative path from optimization_results onward  
+                    # Handle both RunPod container paths (/app/...) and local test paths
+                    save_dir_str = str(save_dir)
+                    if "optimization_results" in save_dir_str:
+                        # Find the optimization_results part and extract relative path from there
+                        opt_results_index = save_dir_str.find("optimization_results")
+                        relative_part = save_dir_str[opt_results_index + len("optimization_results"):].lstrip("/")
+                        s3_prefix = f"optimization_results/{relative_part}" if relative_part else "optimization_results"
+                    else:
+                        # Fallback: use the directory name structure
+                        s3_prefix = f"optimization_results/{save_dir.name}"
+                    s3_result = upload_to_runpod_s3(
+                        local_dir=str(save_dir),
+                        s3_prefix=s3_prefix
+                    )
+                    
+                    if s3_result:
+                        logger.info(f"✅ Model uploaded to S3: s3://40ub9vhaa7/{s3_prefix}")
+                        # Store S3 info for later retrieval
+                        if not hasattr(self, '_s3_uploads'):
+                            self._s3_uploads = {}
+                        self._s3_uploads['model'] = s3_result
+                    else:
+                        logger.warning(f"⚠️ Failed to upload model to S3")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to upload model to S3: {e}")
             
             return str(final_filepath)
             
@@ -2407,8 +2458,8 @@ def _handle_model_training_refactored(
         else:
             logger.debug("running _handle_model_training_refactored ... Skipping model building - will be done inside MirroredStrategy scope")
         
-        logger.debug("running _handle_model_training_refactored ... Training model...")
-        builder.train(data, use_multi_gpu=use_multi_gpu, epoch_progress_callback=progress_callback)
+        logger.debug("running _handle_model_training_refactored ... Training model without plot generation...")
+        builder.train(data, use_multi_gpu=use_multi_gpu, epoch_progress_callback=progress_callback, create_plots=False)
         
         logger.debug("running _handle_model_training_refactored ... Evaluating model...")
         test_loss, test_accuracy = builder.evaluate(data=data)

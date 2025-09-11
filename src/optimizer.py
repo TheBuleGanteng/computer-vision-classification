@@ -43,6 +43,12 @@ from health_analyzer import HealthAnalyzer
 from model_builder import ModelBuilder, ModelConfig
 from utils.logger import logger
 
+# Import centralized configurations
+from data_classes.configs import OptimizationConfig, OptimizationMode, OptimizationObjective, PlotGenerationMode
+
+# Import progress tracking and callbacks
+from data_classes.callbacks import TrialProgress, AggregatedProgress, UnifiedProgress, ConcurrentProgressAggregator, EpochProgressCallback, default_progress_callback
+
 # Import modular components
 from hyperparameter_selector import HyperparameterSelector
 from model_visualizer import ModelVisualizer, ArchitectureVisualization
@@ -68,325 +74,7 @@ def _load_env_file():
 _load_env_file()
 
 
-@dataclass
-class TrialProgress:
-    """Real-time trial progress data for API streaming"""
-    trial_id: str
-    trial_number: int
-    status: str  # "running", "completed", "failed", "pruned"
-    started_at: str
-    completed_at: Optional[str] = None
-    duration_seconds: Optional[float] = None
-    
-    # Epoch-level progress tracking
-    current_epoch: Optional[int] = None
-    total_epochs: Optional[int] = None
-    epoch_progress: Optional[float] = None  # 0.0 to 1.0 within current epoch
-    
-    # Architecture Information
-    architecture: Optional[Dict[str, Any]] = None
-    hyperparameters: Optional[Dict[str, Any]] = None
-    model_size: Optional[Dict[str, Any]] = None
-    
-    # Health Metrics (populated during/after training)
-    health_metrics: Optional[Dict[str, Any]] = None
-    training_stability: Optional[Dict[str, Any]] = None
-    
-    # Performance Data
-    performance: Optional[Dict[str, Any]] = None
-    training_history: Optional[Dict[str, Any]] = None
-    
-    # Pruning Information
-    pruning_info: Optional[Dict[str, Any]] = None
-    
-    # Plot Generation Progress
-    plot_generation: Optional[Dict[str, Any]] = None
-    
-    # Final Model Building Progress
-    final_model_building: Optional[Dict[str, Any]] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API serialization"""
-        return {
-            'trial_id': self.trial_id,
-            'trial_number': self.trial_number,
-            'status': self.status,
-            'started_at': self.started_at,
-            'completed_at': self.completed_at,
-            'duration_seconds': self.duration_seconds,
-            'current_epoch': self.current_epoch,
-            'total_epochs': self.total_epochs,
-            'epoch_progress': self.epoch_progress,
-            'architecture': self.architecture,
-            'hyperparameters': self.hyperparameters,
-            'model_size': self.model_size,
-            'health_metrics': self.health_metrics,
-            'training_stability': self.training_stability,
-            'performance': self.performance,
-            'training_history': self.training_history,
-            'pruning_info': self.pruning_info,
-            'plot_generation': self.plot_generation,
-            'final_model_building': self.final_model_building
-        }
-
-
-class OptimizationMode(Enum):
-    """
-    Optimization mode selection for different optimization strategies
-    
-    SIMPLE: Pure objective optimization focusing on primary metrics (accuracy, efficiency, etc.)
-            Health metrics are calculated for monitoring but don't influence trial scoring
-            
-    HEALTH: Health-aware optimization that combines objective with health metrics
-            Uses configurable health_weight to balance objective vs health importance
-    """
-    SIMPLE = "simple"
-    HEALTH = "health"
-
-
-class OptimizationObjective(Enum):
-    """
-    Simplified optimization objectives for hyperparameter tuning
-    
-    Universal Objectives (work in both SIMPLE and HEALTH modes):
-        VAL_ACCURACY: Maximize validation accuracy (preferred for generalization)
-        ACCURACY: Maximize final training accuracy (may overfit)
-        TRAINING_TIME: Minimize training time (faster models)
-        PARAMETER_EFFICIENCY: Maximize accuracy per parameter (compact models)
-        MEMORY_EFFICIENCY: Maximize accuracy per memory usage (memory-efficient models)
-        INFERENCE_SPEED: Maximize accuracy per inference time (fast prediction models)
-    
-    Health-Only Objectives (only work in HEALTH mode):
-        OVERALL_HEALTH: Maximize overall model health score
-        NEURON_UTILIZATION: Maximize active neuron usage (minimize dead neurons)
-        TRAINING_STABILITY: Maximize training process stability
-        GRADIENT_HEALTH: Maximize gradient flow quality
-    """
-    # Universal objectives (work in both modes)
-    VAL_ACCURACY = "val_accuracy"
-    ACCURACY = "accuracy"
-    TRAINING_TIME = "training_time"
-    PARAMETER_EFFICIENCY = "parameter_efficiency"
-    MEMORY_EFFICIENCY = "memory_efficiency"
-    INFERENCE_SPEED = "inference_speed"
-    
-    # Health-only objectives (only work in HEALTH mode)
-    OVERALL_HEALTH = "overall_health"
-    NEURON_UTILIZATION = "neuron_utilization"
-    TRAINING_STABILITY = "training_stability"
-    GRADIENT_HEALTH = "gradient_health"
-    
-    @classmethod
-    def get_universal_objectives(cls) -> List['OptimizationObjective']:
-        """Get objectives that work in both SIMPLE and HEALTH modes"""
-        return [
-            cls.VAL_ACCURACY,
-            cls.ACCURACY,
-            cls.TRAINING_TIME,
-            cls.PARAMETER_EFFICIENCY,
-            cls.MEMORY_EFFICIENCY,
-            cls.INFERENCE_SPEED
-        ]
-    
-    @classmethod
-    def get_health_only_objectives(cls) -> List['OptimizationObjective']:
-        """Get objectives that only work in HEALTH mode"""
-        return [
-            cls.OVERALL_HEALTH,
-            cls.NEURON_UTILIZATION,
-            cls.TRAINING_STABILITY,
-            cls.GRADIENT_HEALTH
-        ]
-    
-    @classmethod
-    def is_health_only(cls, objective: 'OptimizationObjective') -> bool:
-        """Check if objective only works in HEALTH mode"""
-        return objective in cls.get_health_only_objectives()
-
-
-class PlotGenerationMode(Enum):
-    """Plot generation modes for optimization"""
-    ALL = "all"      # Generate plots for all trials
-    BEST = "best"    # Generate plots for best trial only  
-    NONE = "none"    # No plot generation
-
-
-@dataclass
-class OptimizationConfig:
-    """Business logic configuration with system defaults only"""
-    
-    # User-controlled variables - NO DEFAULTS (fail fast if not provided)
-    dataset_name: str = field(default="")  # Will trigger validation error if empty
-    mode: OptimizationMode = field(default=OptimizationMode.SIMPLE)  # Will use provided value
-    optimize_for: str = field(default="")  # Will trigger validation error if empty
-    trials: int = field(default=0)  # Will trigger validation error if 0
-    max_epochs_per_trial: int = field(default=0)  # Will trigger validation error if 0  
-    min_epochs_per_trial: int = field(default=0)  # Will trigger validation error if 0
-    health_weight: float = field(default=-1.0)  # Will trigger validation error if negative
-    use_runpod_service: bool = field(default=False)  # Will use provided value
-    
-    # System variables - ONLY here with their defaults
-    objective: OptimizationObjective = field(default=OptimizationObjective.VAL_ACCURACY)
-    timeout_hours: Optional[float] = field(default=None)
-    health_monitoring_frequency: int = field(default=1)
-    max_bias_change_per_epoch: float = field(default=10.0)
-    runpod_service_endpoint: Optional[str] = field(default=None)
-    runpod_service_timeout: int = field(default=600)
-    runpod_service_fallback_local: bool = field(default=True)
-    concurrent: bool = field(default=True)
-    config_overrides: Dict[str, Any] = field(default_factory=dict)
-    
-    # System training parameters - ONLY here with their defaults
-    batch_size: int = field(default=32)
-    learning_rate: float = field(default=0.001)
-    optimizer_name: str = field(default="adam")
-    validation_split: float = field(default=0.2)
-    test_size: float = field(default=0.2)
-    
-    # System optimization parameters - ONLY here with their defaults
-    activation_functions: List[str] = field(default_factory=lambda: ["relu", "tanh", "sigmoid"])
-    startup_trials: int = field(default=10)
-    warmup_steps: int = field(default=5)
-    random_seed: int = field(default=42)
-    gpu_proxy_sample_percentage: float = field(default=0.5)
-    
-    # System resource constraints - ONLY here with their defaults
-    max_training_time_minutes: float = field(default=60.0)
-    max_parameters: int = field(default=10_000_000)
-    min_accuracy_threshold: float = field(default=0.5)
-    
-    # System stability parameters - ONLY here with their defaults
-    enable_stability_checks: bool = field(default=True)
-    stability_window: int = field(default=3)
-    health_analysis_sample_size: int = field(default=50)
-    
-    # System advanced options - ONLY here with their defaults
-    enable_early_stopping: bool = field(default=True)
-    early_stopping_patience: int = field(default=5)
-    
-    # System output settings - ONLY here with their defaults
-    save_best_model: bool = field(default=True)
-    save_optimization_history: bool = field(default=True)
-    create_comparison_plots: bool = field(default=True)
-    plot_generation: PlotGenerationMode = field(default=PlotGenerationMode.ALL)
-    
-    # Individual plot type flags
-    # LOCAL MODEL REQUIRED (cannot be created with RunPod returned data):
-    show_activation_maps: bool = field(default=True)         # Requires model inference for activation extraction
-    show_weights_bias: bool = field(default=True)            # Requires direct access to model weights/biases 
-    show_gradient_magnitudes: bool = field(default=True)     # Requires model for gradient computation
-    show_gradient_distributions: bool = field(default=True)  # Requires model for gradient computation
-    show_dead_neuron_analysis: bool = field(default=True)    # Requires model for gradient computation
-    show_detailed_predictions: bool = field(default=True)    # Requires model inference on test data
-    
-    # RUNPOD COMPATIBLE (can be created with metrics/predictions returned from GPU):
-    show_training_history: bool = field(default=True)        # Uses training metrics from history
-    show_confusion_matrix: bool = field(default=True)        # Uses test predictions returned from GPU
-    show_training_animation: bool = field(default=False)     # Uses training metrics from history
-    
-    # System concurrency settings - ONLY here with their defaults
-    concurrent_workers: int = field(default=2)
-    use_multi_gpu: bool = field(default=True)
-    target_gpus_per_worker: int = field(default=2)
-    auto_detect_gpus: bool = field(default=True)
-    multi_gpu_batch_size_scaling: bool = field(default=True)
-    max_gpus_per_worker: int = field(default=4)
-    
-    
-    def __post_init__(self) -> None:
-        """Fail-fast validation and system setup"""
-        
-        # Validate all required user-controlled variables are provided
-        if not self.dataset_name:
-            raise ValueError("dataset_name is required")
-        if not self.optimize_for:
-            raise ValueError("optimize_for is required")
-        if self.trials <= 0:
-            raise ValueError("trials must be > 0")
-        if self.max_epochs_per_trial <= 0:
-            raise ValueError("max_epochs_per_trial must be > 0")
-        if self.min_epochs_per_trial <= 0:
-            raise ValueError("min_epochs_per_trial must be > 0")
-        if self.health_weight < 0:
-            raise ValueError("health_weight must be >= 0")
-        
-        # Convert optimize_for string to objective enum (system conversion)
-        if isinstance(self.optimize_for, str):
-            objective_mapping = {
-                "val_accuracy": OptimizationObjective.VAL_ACCURACY,
-                "accuracy": OptimizationObjective.ACCURACY,
-                "training_time": OptimizationObjective.TRAINING_TIME,
-                "parameter_efficiency": OptimizationObjective.PARAMETER_EFFICIENCY,
-                "memory_efficiency": OptimizationObjective.MEMORY_EFFICIENCY,
-                "inference_speed": OptimizationObjective.INFERENCE_SPEED,
-                "overall_health": OptimizationObjective.OVERALL_HEALTH,
-                "neuron_utilization": OptimizationObjective.NEURON_UTILIZATION,
-                "training_stability": OptimizationObjective.TRAINING_STABILITY,
-                "gradient_health": OptimizationObjective.GRADIENT_HEALTH
-            }
-            self.objective = objective_mapping.get(self.optimize_for, OptimizationObjective.VAL_ACCURACY)
-        
-        # System validations and adjustments
-        if not 0 < self.validation_split < 1:
-            raise ValueError("validation_split must be between 0 and 1")
-        if not 0 < self.test_size < 1:
-            raise ValueError("test_size must be between 0 and 1")
-        if not 0 <= self.health_weight <= 1:
-            raise ValueError("health_weight must be between 0 and 1")
-        if self.concurrent_workers < 1:
-            self.concurrent_workers = 1
-            logger.debug("running OptimizationConfig.__post_init__ ... concurrent_workers < 1; coerced to 1")
-        
-        # System configuration and backward compatibility
-        self.n_trials = self.trials  # Backward compatibility
-        self.n_startup_trials = self.startup_trials
-        self.n_warmup_steps = self.warmup_steps
-        
-        # Validate mode-objective compatibility
-        self._validate_mode_objective_compatibility()
-        logger.debug(f"running OptimizationConfig.__post_init__ ... Plot generation mode: {self.plot_generation.value}")
-        
-        # Auto-configure RunPod endpoint if not provided
-        if self.use_runpod_service and not self.runpod_service_endpoint:
-            endpoint_id = os.getenv('RUNPOD_ENDPOINT_ID')
-            if endpoint_id:
-                self.runpod_service_endpoint = f"https://api.runpod.ai/v2/{endpoint_id}/run"
-                logger.debug(f"running OptimizationConfig.__post_init__ ... Auto-configured endpoint from RUNPOD_ENDPOINT_ID: {self.runpod_service_endpoint}")
-            else:
-                logger.warning(f"running OptimizationConfig.__post_init__ ... RunPod service enabled but RUNPOD_ENDPOINT_ID not found in environment")
-        
-        # Log RunPod Service configuration
-        if self.use_runpod_service:
-            logger.debug(f"running OptimizationConfig.__post_init__ ... RunPod service enabled in optimization config")
-            logger.debug(f"running OptimizationConfig.__post_init__ ... - Endpoint: {self.runpod_service_endpoint}")
-            logger.debug(f"running OptimizationConfig.__post_init__ ... - Timeout: {self.runpod_service_timeout}s")
-            logger.debug(f"running OptimizationConfig.__post_init__ ... - Fallback local: {self.runpod_service_fallback_local}")
-            logger.debug(f"running OptimizationConfig.__post_init__ ... concurrent is: {self.concurrent}")
-            logger.debug(f"running OptimizationConfig.__post_init__ ... - concurrent_workers is: {self.concurrent_workers}")
-        else:
-            logger.debug(f"running OptimizationConfig.__post_init__ ... RunPod service disabled - using local execution only")
-    
-        # Enforce: local execution must not use concurrent workers
-        if not self.use_runpod_service:
-            if self.concurrent or self.concurrent_workers != 1:
-                logger.debug("running OptimizationConfig.__post_init__ ... local execution detected; "
-                            "forcing concurrent=False and concurrent_workers=1")
-            self.concurrent = False
-            self.concurrent_workers = 1
-
-    
-    def _validate_mode_objective_compatibility(self) -> None:
-        """Validate that the objective is compatible with the selected mode"""
-        if self.mode == OptimizationMode.SIMPLE:
-            if OptimizationObjective.is_health_only(self.objective):
-                universal_objectives = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
-                raise ValueError(
-                    f"Health-only objective '{self.objective.value}' cannot be used in SIMPLE mode. "
-                    f"Available objectives for SIMPLE mode: {universal_objectives}"
-                )
-        
-        logger.debug(f"running OptimizationConfig._validate_mode_objective_compatibility ... "
-                    f"Mode '{self.mode.value}' is compatible with objective '{self.objective.value}'")
+# Progress tracking classes moved to callbacks.py
 
 
 @dataclass
@@ -412,6 +100,9 @@ class OptimizationResult:
     # Health monitoring data
     health_history: List[Dict[str, Any]] = field(default_factory=list)
     best_trial_health: Optional[Dict[str, Any]] = None
+    
+    # S3 upload information (for RunPod execution)
+    plots_s3_info: Optional[Dict[str, Any]] = None
     average_health_metrics: Optional[Dict[str, float]] = None
     
     # Dataset and configuration info
@@ -472,250 +163,7 @@ Top Parameter Importance:
         return "\n".join(lines)
 
 
-class ConcurrentProgressAggregator:
-    """Aggregates progress across multiple concurrent trials"""
-    
-    def __init__(self, total_trials: int):
-        self.total_trials = total_trials
-    
-    def aggregate_progress(self, current_trial: Optional[TrialProgress], all_trial_statuses: Dict[int, str]) -> 'AggregatedProgress':
-        """
-        Aggregate progress from multiple concurrent trials
-        
-        Args:
-            current_trial: Current trial progress data
-            all_trial_statuses: Dictionary mapping trial numbers to status strings
-            
-        Returns:
-            AggregatedProgress with consolidated status
-        """
-        logger.debug(f"running aggregate_progress ... aggregating progress for {len(all_trial_statuses)} trials")
-        
-        # Categorize trials by status
-        running_trials = [t for t, s in all_trial_statuses.items() if s == "running"]
-        completed_trials = [t for t, s in all_trial_statuses.items() if s == "completed"]
-        failed_trials = [t for t, s in all_trial_statuses.items() if s == "failed"]
-        
-        # Calculate ETA using the current trial statuses
-        estimated_time_remaining = self.calculate_eta(all_trial_statuses)
-        
-        # Get current best value (this will be implemented in the callback)
-        current_best_value = self.get_current_best_total_score()
-        
-        return AggregatedProgress(
-            total_trials=self.total_trials,
-            running_trials=running_trials,
-            completed_trials=completed_trials,
-            failed_trials=failed_trials,
-            current_best_total_score=current_best_value,
-            estimated_time_remaining=estimated_time_remaining
-        )
-    
-    def calculate_eta(self, all_trial_statuses: Dict[int, str]) -> Optional[float]:
-        """Calculate estimated time remaining based on trial statuses"""
-        # Simple implementation - can be enhanced later
-        completed_count = len([s for s in all_trial_statuses.values() if s == "completed"])
-        
-        if completed_count == 0:
-            return None
-        
-        # Rough estimate based on completion rate
-        remaining_trials = self.total_trials - completed_count
-        avg_time_per_trial = 120.0  # Assume 2 minutes per trial as baseline
-        
-        return remaining_trials * avg_time_per_trial
-    
-    def get_current_best_total_score(self) -> Optional[float]:
-        """Get current best value - placeholder for now"""
-        return None  # Will be populated by the ModelOptimizer instance
-
-
-class EpochProgressCallback(keras.callbacks.Callback):
-    """
-    Real-time epoch progress callback that tracks progress within epochs
-    Updates progress during batch training for live progress updates
-    """
-    
-    def __init__(self, trial_number: int, total_epochs: int, optimizer_instance=None):
-        super().__init__()
-        self.trial_number = trial_number
-        self.total_epochs = total_epochs
-        self.optimizer_instance = optimizer_instance
-        self.current_epoch = 0
-        self.total_batches = 0
-        self.current_batch = 0
-        
-    def on_epoch_begin(self, epoch, logs=None):
-        """Called at the beginning of each epoch"""
-        # Check for cancellation first
-        if self.optimizer_instance and self.optimizer_instance.is_cancelled():
-            logger.info(f"EpochProgressCallback.on_epoch_begin ... Cancellation detected, stopping training")
-            self.model.stop_training = True
-            return
-        
-        self.current_epoch = epoch + 1  # Convert 0-based to 1-based
-        self.current_batch = 0
-        
-        # Try to get total batches from params
-        if hasattr(self, 'params') and self.params:
-            self.total_batches = self.params.get('steps', 0)
-        
-        self._update_progress(0.0)
-        logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} started")
-    
-    def on_batch_end(self, batch, logs=None):
-        """Called at the end of each batch - update progress within epoch"""
-        # Check for cancellation first
-        if self.optimizer_instance and self.optimizer_instance.is_cancelled():
-            logger.info(f"EpochProgressCallback.on_batch_end ... Cancellation detected, stopping training")
-            self.model.stop_training = True
-            return
-        
-        self.current_batch = batch + 1  # Convert 0-based to 1-based
-        
-        if self.total_batches > 0:
-            batch_progress = min(self.current_batch / self.total_batches, 1.0)
-            self._update_progress(batch_progress)
-    
-    def on_epoch_end(self, epoch, logs=None):
-        """Called at the end of each epoch"""
-        self._update_progress(1.0)
-        logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} completed")
-    
-    def _update_progress(self, epoch_progress: float):
-        """Update epoch progress and trigger unified progress update"""
-        # Update epoch info in the optimizer
-        if self.optimizer_instance and hasattr(self.optimizer_instance, '_current_epoch_info'):
-            self.optimizer_instance._current_epoch_info[self.trial_number] = {
-                'current_epoch': self.current_epoch,
-                'total_epochs': self.total_epochs,
-                'epoch_progress': epoch_progress
-            }
-            
-            # Trigger unified progress update every 10 batches or at epoch boundaries
-            if (epoch_progress == 0.0 or epoch_progress == 1.0 or 
-                (self.current_batch > 0 and self.current_batch % 10 == 0)):
-                self._trigger_unified_progress_update()
-    
-    def _trigger_unified_progress_update(self):
-        """Trigger a unified progress update with current epoch information"""
-        if self.optimizer_instance and hasattr(self.optimizer_instance, 'progress_callback') and self.optimizer_instance.progress_callback:
-            try:
-                # Create a mock trial progress for aggregation
-                trial_progress = TrialProgress(
-                    trial_id=f"trial_{self.trial_number}",
-                    trial_number=self.trial_number,
-                    status="running",
-                    started_at=datetime.now().isoformat(),
-                    current_epoch=self.current_epoch,
-                    total_epochs=self.total_epochs,
-                    epoch_progress=self.optimizer_instance._current_epoch_info.get(self.trial_number, {}).get('epoch_progress', 0.0)
-                )
-                
-                # Get best trial info for aggregation
-                best_trial_number, best_trial_value = self.optimizer_instance.get_best_trial_info()
-                self.optimizer_instance._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
-                
-                # Create aggregated progress using the progress aggregator
-                aggregated_progress = self.optimizer_instance._progress_aggregator.aggregate_progress(
-                    current_trial=trial_progress,
-                    all_trial_statuses=self.optimizer_instance._trial_statuses
-                )
-                
-                # Create unified progress and send update
-                unified_progress = self.optimizer_instance._create_unified_progress(aggregated_progress)
-                self.optimizer_instance.progress_callback(unified_progress)
-                
-            except Exception as e:
-                logger.warning(f"EpochProgressCallback._trigger_unified_progress_update error: {e}")
-
-
-@dataclass 
-class AggregatedProgress:
-    """Aggregated progress data across multiple concurrent trials"""
-    total_trials: int
-    running_trials: List[int]
-    completed_trials: List[int]
-    failed_trials: List[int]
-    current_best_total_score: Optional[float]
-    estimated_time_remaining: Optional[float]
-
-
-@dataclass
-class UnifiedProgress:
-    """
-    Unified progress data combining trial statistics with epoch information
-    This replaces the dual callback system to eliminate race conditions
-    """
-    # Trial statistics (from AggregatedProgress)
-    total_trials: int
-    running_trials: List[int]
-    completed_trials: List[int]
-    failed_trials: List[int]
-    current_best_total_score: Optional[float]  # Optimization objective (accuracy or weighted score)
-    current_best_accuracy: Optional[float]     # Raw accuracy for comparison
-    average_duration_per_trial: Optional[float]  # Average duration in seconds
-    estimated_time_remaining: Optional[float]
-    
-    # Current epoch information (from most recent TrialProgress)
-    current_epoch: Optional[int] = None
-    total_epochs: Optional[int] = None
-    epoch_progress: Optional[float] = None
-    current_trial_id: Optional[str] = None
-    current_trial_status: Optional[str] = None
-    
-    # Status message for UI display
-    status_message: Optional[str] = None
-    
-    # Final model building progress
-    final_model_building: Optional[Dict[str, Any]] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API serialization"""
-        return {
-            'total_trials': self.total_trials,
-            'running_trials': self.running_trials,
-            'completed_trials': self.completed_trials,
-            'failed_trials': self.failed_trials,
-            'current_best_total_score': self.current_best_total_score,
-            'current_best_accuracy': self.current_best_accuracy,
-            'estimated_time_remaining': self.estimated_time_remaining,
-            'current_epoch': self.current_epoch,
-            'total_epochs': self.total_epochs,
-            'epoch_progress': self.epoch_progress,
-            'current_trial_id': self.current_trial_id,
-            'current_trial_status': self.current_trial_status,
-            'status_message': self.status_message,
-            'final_model_building': self.final_model_building
-        }
-
-
-# Progress callback
-def default_progress_callback(progress: Union[TrialProgress, AggregatedProgress, UnifiedProgress]) -> None:
-    """Default progress callback that prints progress updates to console"""
-    if isinstance(progress, UnifiedProgress):
-        # New unified progress system
-        print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
-              f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
-        if progress.current_best_total_score is not None:
-            print(f"📈 Best value so far: {progress.current_best_total_score:.4f}")
-        if progress.current_epoch is not None and progress.total_epochs is not None:
-            print(f"⏱️ Current epoch: {progress.current_epoch}/{progress.total_epochs}")
-        if progress.estimated_time_remaining is not None:
-            eta_minutes = progress.estimated_time_remaining / 60
-            print(f"   ETA: {eta_minutes:.1f} minutes")
-    elif isinstance(progress, AggregatedProgress):
-        # Legacy aggregated progress (deprecated)
-        print(f"📊 Progress: {len(progress.completed_trials)}/{progress.total_trials} trials completed, "
-              f"{len(progress.running_trials)} trials running, {len(progress.failed_trials)} trials failed")
-        if progress.current_best_total_score is not None:
-            print(f"📈 Best value so far: {progress.current_best_total_score:.4f}")
-        if progress.estimated_time_remaining is not None:
-            eta_minutes = progress.estimated_time_remaining / 60
-            print(f"   ETA: {eta_minutes:.1f} minutes")
-    else:
-        # TrialProgress (legacy - should not be used anymore)
-        print(f"🔄 Trial {progress.trial_number} ({progress.status})")
+# Callback and progress tracking classes moved to callbacks.py
 
 
 class ModelOptimizer:
@@ -744,7 +192,9 @@ class ModelOptimizer:
             activation_override: Optional activation function override for all trials
         """
         self.dataset_name = dataset_name
-        self.config = optimization_config or OptimizationConfig()
+        if not optimization_config:
+            raise ValueError("optimization_config is required - no defaults provided to avoid configuration duplication")
+        self.config = optimization_config
         self.run_name = run_name
         self.activation_override = activation_override
         
@@ -759,7 +209,7 @@ class ModelOptimizer:
         #self.best_trial_number = None      
         
         # Log plot generation configuration
-        logger.debug(f"running ModelOptimizer.__init__ ... Plot generation mode: {self.config.plot_generation.value}")
+        logger.debug(f"running ModelOptimizer.__init__ ... Plot generation mode: {self.config.plot_generation}")
         
         # Initialize health analyzer (always available for monitoring)
         self.health_analyzer = health_analyzer or HealthAnalyzer()
@@ -862,8 +312,8 @@ class ModelOptimizer:
         
         
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
-        logger.debug(f"running ModelOptimizer.__init__ ... Mode: {self.config.mode.value}")
-        logger.debug(f"running ModelOptimizer.__init__ ... Objective: {self.config.objective.value}")
+        logger.debug(f"running ModelOptimizer.__init__ ... Mode: {self.config.mode}")
+        logger.debug(f"running ModelOptimizer.__init__ ... Objective: {self.config.optimize_for}")
         if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
             logger.debug(f"running ModelOptimizer.__init__ ... Health weight: {self.config.health_weight} ({(1-self.config.health_weight)*100:.0f}% objective, {self.config.health_weight*100:.0f}% health)")
         logger.debug(f"running ModelOptimizer.__init__ ... Max trials: {self.config.trials}")
@@ -1354,7 +804,7 @@ class ModelOptimizer:
         else:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
             dataset_clean = self.dataset_name.replace(" ", "_").lower()
-            mode_suffix = self.config.mode.value
+            mode_suffix = self.config.mode
             fallback_name = f"{timestamp}_{dataset_clean}_{mode_suffix}_fallback"
             self.results_dir = optimization_results_dir / fallback_name
             logger.debug(f"running _setup_results_directory ... No run_name provided, using fallback: {fallback_name}")
@@ -1498,6 +948,27 @@ class ModelOptimizer:
         # If we've waited too long, proceed anyway
         logger.warning(f"Staggered start: Timeout waiting for trial {previous_trial_number} head start, proceeding with trial {current_trial_number}")
     
+    def train(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
+        """
+        Unified training function that automatically determines execution mode based on configuration
+        
+        Args:
+            trial: Optuna trial object
+            params: Hyperparameters for this trial
+            
+        Returns:
+            Objective value for optimization
+        """
+        # Automatically determine execution mode based on configuration
+        train_locally = not self._should_use_runpod_service()
+        
+        if train_locally:
+            logger.debug(f"running train ... Trial {trial.number}: Using local execution (RunPod disabled)")
+            return self._train_locally_for_trial(trial, params)
+        else:
+            logger.debug(f"running train ... Trial {trial.number}: Using RunPod service execution")
+            return self._train_via_runpod_service(trial, params)
+    
     def _train_via_runpod_service(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
         logger.debug(f"running _train_via_runpod_service ... Starting RunPod service training for trial {trial.number}")
         logger.debug(f"running _train_via_runpod_service ... Using JSON API approach (tiny payloads) instead of code injection")
@@ -1518,13 +989,15 @@ class ModelOptimizer:
                     "config": {
                         "validation_split": self.config.validation_split,
                         "max_training_time": self.config.max_training_time_minutes,
-                        "mode": self.config.mode.value,
-                        "objective": self.config.objective.value,
+                        "mode": self.config.mode,
+                        "objective": self.config.optimize_for,
                         "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage,
                         "use_multi_gpu": self.config.use_multi_gpu,
                         "target_gpus_per_worker": self.config.target_gpus_per_worker,
                         "auto_detect_gpus": self.config.auto_detect_gpus,
-                        "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling
+                        "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling,
+                        "create_optuna_model_plots": self.config.create_optuna_model_plots,
+                        "plot_generation": self.config.plot_generation.value if hasattr(self.config.plot_generation, 'value') else str(self.config.plot_generation)
                     }
                 }
             }
@@ -1588,13 +1061,13 @@ class ModelOptimizer:
                     # Log what we're getting back from RunPod for debugging
                     logger.info(f"🔍 RUNPOD POLLING - Trial {trial.number} - Status: {job_status}")
                     logger.info(f"🔍 RUNPOD POLLING - Status response keys: {list(status_data.keys())}")
-                    logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
+                    # logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
                     
                     # Check for output data
                     output_data = status_data.get('output')
                     if output_data:
                         logger.info(f"🔍 RUNPOD POLLING - Output data found with keys: {list(output_data.keys())}")
-                        logger.info(f"🔍 RUNPOD POLLING - Full output data: {json.dumps(output_data, indent=2)}")
+                        # logger.info(f"🔍 RUNPOD POLLING - Full output data: {json.dumps(output_data, indent=2)}")
                     else:
                         logger.info(f"🔍 RUNPOD POLLING - No output data available yet")
 
@@ -1602,7 +1075,7 @@ class ModelOptimizer:
                         logger.info(f"🎉 RUNPOD COMPLETED - Trial {trial.number} job finished!")
                         
                         output = status_data.get('output', {})
-                        logger.info(f"🔍 RUNPOD COMPLETED - Processing output data: {json.dumps(output, indent=2) if output else 'NO OUTPUT DATA'}")
+                        #logger.info(f"🔍 RUNPOD COMPLETED - Processing output data: {json.dumps(output, indent=2) if output else 'NO OUTPUT DATA'}")
                         
                         if not output:
                             logger.error(f"🚨 RUNPOD COMPLETED - No output returned from completed RunPod job")
@@ -1629,6 +1102,45 @@ class ModelOptimizer:
                         logger.info(f"🎯 RUNPOD COMPLETED - Trial {trial.number} completed successfully!")
                         logger.info(f"🎯 RUNPOD COMPLETED - Total score calculated: {total_score:.4f}")
                         
+                        # ========================================
+                        # ENHANCED RUNPOD RESPONSE ANALYSIS
+                        # ========================================
+                        logger.info(f"🔍 RUNPOD RESPONSE ANALYSIS - Trial {trial.number}")
+                        logger.info(f"📦 RUNPOD RESPONSE KEYS: {list(output.keys())}")
+                        logger.info(f"📦 RUNPOD RESPONSE SIZE: {len(str(output))} characters")
+                        
+                        # Check for plots_s3 information
+                        if 'plots_s3' in output:
+                            plots_s3_info = output['plots_s3']
+                            logger.info(f"✅ PLOTS_S3 FOUND in RunPod response")
+                            logger.info(f"📊 PLOTS_S3 CONTENT: {plots_s3_info}")
+                            
+                            # Validate plots_s3 structure
+                            required_fields = ['success', 's3_prefix', 'bucket']
+                            missing_fields = [field for field in required_fields if field not in plots_s3_info]
+                            if missing_fields:
+                                logger.error(f"❌ PLOTS_S3 MISSING FIELDS: {missing_fields}")
+                            else:
+                                logger.info(f"✅ PLOTS_S3 STRUCTURE VALID - All required fields present")
+                                logger.info(f"📂 S3_PREFIX: {plots_s3_info.get('s3_prefix')}")
+                                logger.info(f"🪣 S3_BUCKET: {plots_s3_info.get('bucket')}")
+                        else:
+                            logger.warning(f"❌ PLOTS_S3 NOT FOUND in RunPod response")
+                            logger.warning(f"🔍 Available response keys: {list(output.keys())}")
+                        
+                        # ========================================
+                        # S3 DOWNLOAD ATTEMPT
+                        # ========================================
+                        logger.info(f"📥 INITIATING S3 DOWNLOAD ATTEMPT for Trial {trial.number}")
+                        download_success = self._download_trial_plots_from_s3(output, trial.number)
+                        
+                        if download_success:
+                            logger.info(f"✅ S3 DOWNLOAD SUCCESSFUL for Trial {trial.number}")
+                            logger.info(f"📁 Plots should now be available locally")
+                        else:
+                            logger.warning(f"❌ S3 DOWNLOAD FAILED for Trial {trial.number}")
+                            logger.warning(f"🔍 Check S3 credentials, connectivity, or plot availability")
+                        
                         # Report completion to UI
                         completion_progress = TrialProgress(
                             trial_id=f"trial_{trial.number}",
@@ -1647,6 +1159,27 @@ class ModelOptimizer:
                             hyperparameters=params
                         )
                         self._thread_safe_progress_callback(completion_progress)
+                        
+                        # Generate plots if enabled (using returned model_attributes)
+                        if self.config.create_optuna_model_plots:
+                            try:
+                                logger.debug(f"running _train_via_runpod_service ... Generating plots for RunPod trial {trial.number}")
+                                model_attributes = output.get('model_attributes')
+                                if model_attributes:
+                                    if not self.results_dir:
+                                        logger.error(f"running _train_via_runpod_service ... Results directory not set, cannot generate plots")
+                                        continue
+                                    trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number}"
+                                    trial_plot_dir.mkdir(parents=True, exist_ok=True)
+                                    
+                                    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    
+                                    # RunPod now returns only metrics - no plot generation needed
+                                    logger.debug(f"running _train_via_runpod_service ... RunPod completed trial {trial.number}, plots will be generated locally if needed")
+                                else:
+                                    logger.warning(f"running _train_via_runpod_service ... No model_attributes returned for trial {trial.number}")
+                            except Exception as e:
+                                logger.error(f"running _train_via_runpod_service ... Failed to generate plots for trial {trial.number}: {e}")
                         
                         return total_score
 
@@ -1678,12 +1211,32 @@ class ModelOptimizer:
                 raise RuntimeError(f"RunPod job {job_id} did not complete within {max_poll_time} seconds")
 
         except Exception as e:
-            logger.error(f"running _train_via_runpod_service ... RunPod service training failed for trial {trial.number}: {e}")
+            # ========================================
+            # RUNPOD FAILURE AND FALLBACK ANALYSIS
+            # ========================================
+            logger.error(f"💥 RUNPOD SERVICE FAILURE for trial {trial.number}")
+            logger.error(f"❌ Error type: {type(e).__name__}")
+            logger.error(f"❌ Error message: {str(e)}")
+            logger.error(f"🔍 Failure occurred during RunPod request/response cycle")
+            
+            # Check fallback configuration
             if self.config.runpod_service_fallback_local:
-                logger.warning(f"running _train_via_runpod_service ... Falling back to local execution for trial {trial.number}")
-                return self._train_locally_for_trial(trial, params)
-            logger.error("running _train_via_runpod_service ... RunPod service failed and local fallback disabled")
-            raise RuntimeError(f"RunPod service training failed for trial {trial.number}: {e}")
+                logger.warning(f"🔄 LOCAL FALLBACK ENABLED - Switching to local execution")
+                logger.warning(f"⚠️ This means trial {trial.number} will run on your local machine instead of RunPod")
+                logger.warning(f"📍 CRITICAL: You will see continued local optimization logs after this point")
+                logger.warning(f"🔄 STARTING LOCAL FALLBACK for trial {trial.number}")
+                
+                # Call local fallback
+                result = self._train_locally_for_trial(trial, params)
+                
+                logger.info(f"✅ LOCAL FALLBACK COMPLETED for trial {trial.number}")
+                logger.info(f"📊 Fallback result: {result}")
+                return result
+            else:
+                logger.error(f"🚫 LOCAL FALLBACK DISABLED - No fallback will occur")
+                logger.error(f"💀 Trial {trial.number} will fail completely")
+                logger.error("running _train_via_runpod_service ... RunPod service failed and local fallback disabled")
+                raise RuntimeError(f"RunPod service training failed for trial {trial.number}: {e}")
 
     def _report_runpod_progress(self, trial: optuna.Trial, job_status: str, status_data: Dict[str, Any]) -> None:
         """
@@ -1954,32 +1507,134 @@ class ModelOptimizer:
             # Health-only objectives
             elif self.config.objective == OptimizationObjective.OVERALL_HEALTH:
                 if self.config.mode != OptimizationMode.HEALTH:
-                    raise ValueError(f"Health-only objective '{self.config.objective.value}' requires HEALTH mode")
+                    raise ValueError(f"Health-only objective '{self.config.optimize_for}' requires HEALTH mode")
                 return float(overall_health)
             
             elif self.config.objective == OptimizationObjective.NEURON_UTILIZATION:
                 if self.config.mode != OptimizationMode.HEALTH:
-                    raise ValueError(f"Health-only objective '{self.config.objective.value}' requires HEALTH mode")
+                    raise ValueError(f"Health-only objective '{self.config.optimize_for}' requires HEALTH mode")
                 return float(health_metrics.get('neuron_utilization', 0.5))
             
             elif self.config.objective == OptimizationObjective.TRAINING_STABILITY:
                 if self.config.mode != OptimizationMode.HEALTH:
-                    raise ValueError(f"Health-only objective '{self.config.objective.value}' requires HEALTH mode")
+                    raise ValueError(f"Health-only objective '{self.config.optimize_for}' requires HEALTH mode")
                 return float(health_metrics.get('training_stability', 0.5))
             
             elif self.config.objective == OptimizationObjective.GRADIENT_HEALTH:
                 if self.config.mode != OptimizationMode.HEALTH:
-                    raise ValueError(f"Health-only objective '{self.config.objective.value}' requires HEALTH mode")
+                    raise ValueError(f"Health-only objective '{self.config.optimize_for}' requires HEALTH mode")
                 return float(health_metrics.get('gradient_health', 0.5))
             
             else:
                 # Fallback to test accuracy
-                logger.warning(f"running _calculate_total_score_from_service_response ... Unknown objective {self.config.objective.value}, using test_accuracy")
+                logger.warning(f"running _calculate_total_score_from_service_response ... Unknown objective {self.config.optimize_for}, using test_accuracy")
                 return float(test_accuracy)
             
         except Exception as e:
             logger.error(f"running _calculate_total_score_from_service_response ... Error calculating total score: {e}")
             return float(metrics.get('test_accuracy', 0.0))
+    
+    def _download_trial_plots_from_s3(self, output: Dict[str, Any], trial_number: int) -> bool:
+        """
+        Download trial plots from S3 after RunPod trial completion.
+        
+        Args:
+            output: RunPod service response containing plots_s3 information
+            trial_number: Trial number for directory organization
+            
+        Returns:
+            True if plots were downloaded successfully, False otherwise
+        """
+        try:
+            logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION START - Trial {trial_number} =====")
+            logger.info(f"📥 Checking for S3 plots to download for trial {trial_number}")
+            logger.info(f"🔑 Available RunPod response keys: {list(output.keys())}")
+            
+            # Check if plots were uploaded to S3
+            plots_s3_info = output.get('plots_s3')
+            if not plots_s3_info:
+                logger.warning(f"❌ No S3 plots information found for trial {trial_number}")
+                logger.warning(f"💡 This means either:")
+                logger.warning(f"   - Plot generation was disabled")
+                logger.warning(f"   - RunPod handler didn't create plots_s3_info")
+                logger.warning(f"   - Plots failed to upload to S3")
+                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (NO DOWNLOAD) =====")
+                return False
+            
+            # ========================================
+            # VALIDATE S3 INFORMATION
+            # ========================================
+            logger.info(f"✅ S3 plots information found for trial {trial_number}")
+            logger.info(f"📊 S3 Info Details: {plots_s3_info}")
+            
+            # Extract S3 prefix from plots_s3 info
+            s3_prefix = plots_s3_info.get('s3_prefix')
+            if not s3_prefix:
+                logger.error(f"❌ No S3 prefix found in plots_s3 info for trial {trial_number}")
+                logger.error(f"📊 Available plots_s3 keys: {list(plots_s3_info.keys())}")
+                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (NO PREFIX) =====")
+                return False
+            
+            logger.info(f"📂 S3 Prefix: {s3_prefix}")
+            
+            # Determine local directory for plots
+            if not self.results_dir:
+                logger.error(f"❌ Results directory not set, cannot download plots for trial {trial_number}")
+                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (NO RESULTS DIR) =====")
+                return False
+            
+            local_plots_dir = self.results_dir / "plots" / f"trial_{trial_number}"
+            logger.info(f"📁 Local download directory: {local_plots_dir}")
+            
+            # ========================================
+            # ATTEMPT S3 DOWNLOAD
+            # ========================================
+            logger.info(f"🚀 STARTING S3 DOWNLOAD for trial {trial_number}")
+            logger.info(f"📂 FROM: s3://40ub9vhaa7/{s3_prefix}")
+            logger.info(f"📁 TO: {local_plots_dir}")
+            
+            # Import the S3 download utility
+            from utils.s3_transfer import download_from_runpod_s3
+            
+            # Download plots from S3
+            success = download_from_runpod_s3(
+                s3_prefix=s3_prefix,
+                local_dir=str(local_plots_dir)
+            )
+            
+            # ========================================
+            # REPORT DOWNLOAD RESULTS
+            # ========================================
+            if success:
+                logger.info(f"🎉 S3 DOWNLOAD SUCCESSFUL for trial {trial_number}")
+                logger.info(f"📁 Plots downloaded to: {local_plots_dir}")
+                
+                # Count downloaded files
+                try:
+                    if local_plots_dir.exists():
+                        plot_files = list(local_plots_dir.glob("*"))
+                        logger.info(f"📊 Downloaded {len(plot_files)} plot files")
+                        logger.info(f"📄 First few files: {[f.name for f in plot_files[:5]]}")
+                    else:
+                        logger.warning(f"⚠️ Local plots directory doesn't exist after download: {local_plots_dir}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error counting downloaded files: {e}")
+                
+                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (SUCCESS) =====")
+                return True
+            else:
+                logger.error(f"💥 S3 DOWNLOAD FAILED for trial {trial_number}")
+                logger.error(f"🔍 Possible causes:")
+                logger.error(f"   - S3 credentials invalid")
+                logger.error(f"   - Network connectivity issues")
+                logger.error(f"   - S3 prefix doesn't exist: {s3_prefix}")
+                logger.error(f"   - Permission issues")
+                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (FAILED) =====")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error downloading trial {trial_number} plots from S3: {e}")
+            return False
     
     def _train_locally_for_trial(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
         """
@@ -2154,6 +1809,7 @@ class ModelOptimizer:
             
             # Extract metrics
             test_accuracy = comprehensive_metrics.get('test_accuracy', 0.0)
+            test_loss = comprehensive_metrics.get('test_loss', 0.0)
             overall_health = comprehensive_metrics.get('overall_health', 0.5)
             
             logger.debug(f"running _train_locally_for_trial ... Trial {trial.number}: Local fallback completed")
@@ -2192,6 +1848,18 @@ class ModelOptimizer:
             
             logger.debug(f"running _train_locally_for_trial ... Trial {trial.number}: Local fallback total score: {total_score:.4f}")
             
+            # Generate plots if enabled
+            if self.config.create_optuna_model_plots:
+                try:
+                    logger.debug(f"running _train_locally_for_trial ... Generating plots for trial {trial.number}")
+                    if not self.results_dir:
+                        logger.error(f"running _train_locally_for_trial ... Results directory not set, cannot generate plots")
+                        return float(total_score)
+                    # Plots will be generated by model_builder.py after training completion
+                    logger.debug(f"running _objective ... Plots will be generated by model_builder, skipping duplicate generation")
+                except Exception as e:
+                    logger.error(f"running _train_locally_for_trial ... Failed to generate plots for trial {trial.number}: {e}")
+            
             return float(total_score)
             
         except Exception as e:
@@ -2206,8 +1874,8 @@ class ModelOptimizer:
             OptimizationResult with best parameters and comprehensive metrics
         """
         logger.debug(f"running ModelOptimizer.optimize ... Starting optimization for {self.dataset_name}")
-        logger.debug(f"running ModelOptimizer.optimize ... Mode: {self.config.mode.value}")
-        logger.debug(f"running ModelOptimizer.optimize ... Objective: {self.config.objective.value}")
+        logger.debug(f"running ModelOptimizer.optimize ... Mode: {self.config.mode}")
+        logger.debug(f"running ModelOptimizer.optimize ... Objective: {self.config.optimize_for}")
         logger.debug(f"running ModelOptimizer.optimize ... Trials: {self.config.trials}")
         
         # Log execution approach
@@ -2402,13 +2070,8 @@ class ModelOptimizer:
                 )
                 self._thread_safe_progress_callback(trial_progress)
             
-            # Check execution method
-            if self._should_use_runpod_service():
-                logger.debug(f"running _objective_function ... Trial {trial.number}: 🔄 Using RunPod service (JSON API)")
-                total_score = self._train_via_runpod_service(trial, params)
-            else:
-                logger.debug(f"running _objective_function ... Trial {trial.number}: Using local execution")
-                total_score = self._train_locally_for_trial(trial, params)
+            # Train using automatically determined execution method
+            total_score = self.train(trial, params)
             
             # Track trial completion in progress aggregation
             if self.progress_callback:
@@ -2496,7 +2159,7 @@ class ModelOptimizer:
                 total_trials=len(self.study.trials),
                 successful_trials=0,
                 optimization_time_hours=optimization_time / 3600,
-                optimization_mode=self.config.mode.value,
+                optimization_mode=self.config.mode,
                 health_weight=self.config.health_weight,
                 objective_history=[],
                 parameter_importance={},
@@ -2528,7 +2191,7 @@ class ModelOptimizer:
             total_trials=len(self.study.trials),
             successful_trials=len(completed_trials),
             optimization_time_hours=optimization_time / 3600,
-            optimization_mode=self.config.mode.value,
+            optimization_mode=self.config.mode,
             health_weight=self.config.health_weight,
             objective_history=[t.value for t in self.study.trials if t.value is not None],
             parameter_importance=importance,
@@ -2606,15 +2269,16 @@ class ModelOptimizer:
                     "dataset_name": self.dataset_name,
                     "best_params": results.best_params,
                     "config": {
-                        "mode": self.config.mode.value,
-                        "objective": self.config.objective.value,
+                        "mode": self.config.mode,
+                        "objective": self.config.optimize_for,
                         "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage,
                         "use_multi_gpu": self.config.use_multi_gpu,
                         "target_gpus_per_worker": self.config.target_gpus_per_worker,
                         "auto_detect_gpus": self.config.auto_detect_gpus,
                         "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling,
                         "validation_split": 0.2,
-                        "test_size": 0.2
+                        "test_size": 0.2,
+                        "create_optuna_model_plots": self.config.create_optuna_model_plots
                     }
                 }
             }
@@ -2668,10 +2332,86 @@ class ModelOptimizer:
                             # Report completion progress
                             self._report_final_model_progress("Completed", 1.0)
                             
-                            # Return the model path if provided
+                            # Generate final model plots if enabled
+                            if self.config.create_final_model_plots:
+                                try:
+                                    logger.debug(f"running _train_final_model_via_runpod_service ... Generating plots for final model")
+                                    model_attributes = output.get('model_attributes')
+                                    if model_attributes:
+                                        if not self.results_dir:
+                                            logger.error(f"running _train_final_model_via_runpod_service ... Results directory not set, cannot generate plots")
+                                        else:
+                                            final_model_plot_dir = self.results_dir / "plots" / "final_model"
+                                            final_model_plot_dir.mkdir(parents=True, exist_ok=True)
+                                            
+                                            run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                            
+                                            # Reconstruct objects needed for plot generation from RunPod response
+                                            model_data = output.get('model_data')
+                                            training_history = output.get('training_history')
+                                            dataset_data = output.get('dataset_data')
+                                            
+                                            if model_data and training_history and dataset_data:
+                                                # Deserialize model from bytes
+                                                import tempfile
+                                                import tensorflow as tf
+                                                import numpy as np
+                                                
+                                                with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as tmp_file:
+                                                    tmp_file.write(model_data)
+                                                    tmp_file.flush()
+                                                    model = tf.keras.models.load_model(tmp_file.name) # type: ignore
+                                                    os.unlink(tmp_file.name)  # Clean up
+                                                
+                                                # Plots will be generated by model_builder.py after training completion
+                                                logger.debug(f"running _train_final_model_via_runpod_service ... Plots will be generated by local model_builder, skipping duplicate generation")
+                                            else:
+                                                logger.warning(f"running _train_final_model_via_runpod_service ... Missing required data for final model plot generation (model_data={bool(model_data)}, history={bool(training_history)}, data={bool(dataset_data)})")
+                                    else:
+                                        logger.warning(f"running _train_final_model_via_runpod_service ... No model_attributes returned for final model")
+                                except Exception as e:
+                                    logger.error(f"running _train_final_model_via_runpod_service ... Failed to generate final model plots: {e}")
+                            
+                            # Check for S3 upload info and download model artifacts
+                            s3_upload = output.get('s3_upload')
                             model_path = output.get('final_model_path')
+                            
+                            if s3_upload and s3_upload.get('success'):
+                                logger.debug(f"running _train_final_model_via_runpod_service ... S3 upload successful, downloading artifacts")
+                                
+                                # Import S3 transfer utilities
+                                from utils.s3_transfer import download_from_runpod_s3, cleanup_s3_files
+                                
+                                s3_prefix = s3_upload.get('s3_prefix')
+                                if s3_prefix and self.results_dir:
+                                    # Create local optimized_model directory
+                                    local_model_dir = self.results_dir / "optimized_model"
+                                    local_model_dir.mkdir(parents=True, exist_ok=True)
+                                    
+                                    # Download from S3
+                                    download_success = download_from_runpod_s3(s3_prefix, str(local_model_dir))
+                                    
+                                    if download_success:
+                                        # Find the downloaded .keras model file
+                                        keras_files = list(local_model_dir.rglob("*.keras"))
+                                        if keras_files:
+                                            local_model_path = str(keras_files[0])
+                                            logger.debug(f"running _train_final_model_via_runpod_service ... Downloaded final model to: {local_model_path}")
+                                            
+                                            # Clean up S3 files after successful download
+                                            cleanup_s3_files(s3_prefix)
+                                            
+                                            return local_model_path
+                                        else:
+                                            logger.warning(f"running _train_final_model_via_runpod_service ... No .keras file found after S3 download")
+                                    else:
+                                        logger.error(f"running _train_final_model_via_runpod_service ... Failed to download from S3")
+                                else:
+                                    logger.error(f"running _train_final_model_via_runpod_service ... Missing S3 prefix or results directory")
+                            
+                            # Fallback to original model path (remote path in container)
                             if model_path:
-                                logger.debug(f"running _train_final_model_via_runpod_service ... Final model saved at: {model_path}")
+                                logger.debug(f"running _train_final_model_via_runpod_service ... Final model saved at (remote): {model_path}")
                                 return model_path
                             else:
                                 logger.warning(f"running _train_final_model_via_runpod_service ... No model path returned")
@@ -2779,9 +2519,9 @@ class ModelOptimizer:
         """
         logger.debug("running _build_final_model ... Determining execution method for final model")
         
-        # Check if we should use RunPod service for final model training
+        # Simplified logic: use_runpod_service controls everything with S3 transfer
         if self._should_use_runpod_service():
-            logger.debug("running _build_final_model ... Using RunPod service for final model training")
+            logger.debug("running _build_final_model ... Using RunPod service for final model training with S3 transfer")
             return self._train_final_model_via_runpod_service(results)
         else:
             logger.debug("running _build_final_model ... Using local execution for final model training")
@@ -2930,6 +2670,23 @@ class ModelOptimizer:
                     
                     logger.debug(f"running _build_final_model ... Final model saved to: {final_model_path}")
                     
+                    # Generate final model plots if enabled
+                    if self.config.create_final_model_plots:
+                        try:
+                            logger.debug(f"running _build_final_model ... Generating plots for final model")
+                            final_model_plot_dir = self.results_dir / "plots" / "final_model"
+                            final_model_plot_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            
+                            # Use the model_builder to get the necessary data for plotting
+                            # Note: This assumes the training data is accessible
+                            # TODO: May need to reload training data for final model plotting
+                            logger.warning(f"running _build_final_model ... Final model plot generation not fully implemented - needs training data access")
+                            
+                        except Exception as e:
+                            logger.error(f"running _build_final_model ... Failed to generate final model plots: {e}")
+                    
                     # Report progress: Complete
                     self._report_final_model_progress("Completed", 1.0)
                     
@@ -2948,140 +2705,122 @@ class ModelOptimizer:
 
 # Convenience function for command-line usage with RunPod service support
 def optimize_model(
-    dataset_name: str,
-    mode: str = "simple",
-    optimize_for: str = "val_accuracy",
-    trials: int = 50,
+    dataset_name: Optional[str] = None,
+    mode: Optional[str] = None,
+    optimize_for: Optional[str] = None,
+    trials: Optional[int] = None,
     run_name: Optional[str] = None,
     activation: Optional[str] = None,
     progress_callback: Optional[Callable[[Union[TrialProgress, AggregatedProgress, UnifiedProgress]], None]] = None,
-    # RunPod service parameters (replacing GPU proxy)
-    use_runpod_service: bool = False,
+    # RunPod service parameters
+    use_runpod_service: Optional[bool] = None,
     runpod_service_endpoint: Optional[str] = None,
-    runpod_service_timeout: int = 600,
-    runpod_service_fallback_local: bool = True,
-    gpu_proxy_sample_percentage: float = 0.5,
-    concurrent: bool = True,
-    concurrent_workers: int = 2,
+    runpod_service_timeout: Optional[int] = None,
+    runpod_service_fallback_local: Optional[bool] = None,
+    gpu_proxy_sample_percentage: Optional[float] = None,
+    concurrent: Optional[bool] = None,
+    concurrent_workers: Optional[int] = None,
     **config_overrides
 ) -> OptimizationResult:
     """
-    Convenience function with RunPod service support
+    Unified optimization function that uses centralized defaults from configs.py
+    
+    This function serves as the common entry point for optimization from three sources:
+    1. API server (web requests via api_server.py)
+    2. Command-line interface (python src/optimizer.py)
+    3. Direct function calls (programmatic usage)
+    
+    All parameters are optional and use defaults from OptimizationConfig in configs.py
+    unless explicitly overridden.
     
     Args:
-        dataset_name: Name of dataset to optimize
-        mode: Optimization mode ("simple" or "health")
-        optimize_for: Optimization objective
-        trials: Number of trials to run
+        All parameters are optional and correspond to OptimizationConfig fields:
+        dataset_name: Dataset to optimize (default: "mnist")
+        mode: Optimization mode "simple" or "health" (default: "health") 
+        optimize_for: Optimization objective (default: "val_accuracy")
+        trials: Number of optimization trials (default: 2)
         run_name: Optional unified run name for consistent directory/file naming
         progress_callback: Optional callback for real-time progress updates
-        # RunPod service parameters
-        use_runpod_service: Enable/disable RunPod service usage
-        runpod_service_endpoint: RunPod service endpoint URL
-        runpod_service_timeout: Request timeout in seconds
-        runpod_service_fallback_local: Fall back to local execution if service fails
+        use_runpod_service: Enable/disable RunPod service (default: True)
+        runpod_service_endpoint: RunPod service endpoint URL (auto-configured from env)
+        runpod_service_timeout: Request timeout in seconds (default: 600)
+        runpod_service_fallback_local: Fall back to local execution if service fails (default: True)
         **config_overrides: Additional optimization config overrides
         
     Returns:
         OptimizationResult with best parameters and metrics
         
-    Examples:
-        # Local execution
-        result = optimize_model('cifar10', mode='simple', optimize_for='val_accuracy', trials=20)
+    Usage Examples:
+    
+    1. API Usage (via web server):
+        # Start the API server
+        python src/api_server.py
         
-        # RunPod service execution (JSON API)
-        result = optimize_model('cifar10', mode='simple', optimize_for='val_accuracy', 
-                               trials=20, use_runpod_service=True, 
-                               runpod_service_endpoint='https://your-runpod-endpoint.com')
+        # Make API request with overrides
+        curl -X POST http://localhost:8000/optimize \\
+             -H "Content-Type: application/json" \\
+             -d '{
+                 "dataset_name": "cifar10",
+                 "mode": "simple", 
+                 "trials": 10,
+                 "max_epochs_per_trial": 8
+             }'
+    
+    2. Command-line Usage (direct CLI):
+        # Call optimizer.py with overrides
+        python src/optimizer.py dataset_name=cifar10 mode=simple trials=10 max_epochs_per_trial=8
+    
+    3. Direct Function Call (programmatic):
+        from optimizer import optimize_model
+        
+        # Call function with overrides
+        result = optimize_model(
+            dataset_name="cifar10",
+            mode="simple", 
+            trials=10,
+            max_epochs_per_trial=8
+        )
+        
+        # With RunPod service
+        result = optimize_model(
+            dataset_name="cifar10",
+            mode="simple",
+            trials=10,
+            use_runpod_service=True,
+            runpod_service_endpoint="https://api.runpod.ai/v2/your-endpoint/run"
+        )
     """
-    # Create unified run name if not provided
+    # Collect all non-None parameters for OptimizationConfig
+    override_params = {}
+    
+    # Get all function parameters (excluding special ones)
+    function_locals = locals()
+    exclude_params = {'override_params', 'config_overrides', 'run_name', 'activation', 'progress_callback'}
+    
+    for param_name, param_value in function_locals.items():
+        if param_name not in exclude_params and param_value is not None:
+            override_params[param_name] = param_value
+    
+    # Add config_overrides
+    override_params.update(config_overrides)
+    
+    # Create optimization config - Pydantic will use defaults from configs.py for unspecified parameters
+    opt_config = OptimizationConfig(**override_params)
+    
+    # Create unified run name if not provided using centralized function
     if run_name is None:
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        dataset_clean = dataset_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-        
-        if mode == 'health':
-            run_name = f"{timestamp}_{dataset_clean}_health"
-        elif mode == 'simple':
-            run_name = f"{timestamp}_{dataset_clean}_simple-{optimize_for}"
-        else:
-            run_name = f"{timestamp}_{dataset_clean}_{mode}"
-    
-    logger.debug(f"running optimize_model ... Using unified run name: {run_name}")
-    
-    # Convert string parameters to enums
-    try:
-        opt_mode = OptimizationMode(mode.lower())
-    except ValueError:
-        available_modes = [m.value for m in OptimizationMode]
-        raise ValueError(f"Unknown optimization mode '{mode}'. Available: {available_modes}")
-    
-    try:
-        objective = OptimizationObjective(optimize_for.lower())
-    except ValueError:
-        available_objectives = [obj.value for obj in OptimizationObjective]
-        raise ValueError(f"Unknown objective '{optimize_for}'. Available: {available_objectives}")
-    
-    # Early validation
-    if opt_mode == OptimizationMode.SIMPLE and OptimizationObjective.is_health_only(objective):
-        universal_objectives = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
-        health_objectives = [obj.value for obj in OptimizationObjective.get_health_only_objectives()]
-        raise ValueError(
-            f"Cannot use health-only objective '{optimize_for}' in SIMPLE mode.\n"
-            f"Available objectives for SIMPLE mode: {universal_objectives}\n"
-            f"Health-only objectives (require HEALTH mode): {health_objectives}\n"
-            f"To use '{optimize_for}', change mode to 'health'"
+        from data_classes.configs import generate_unified_run_name
+        run_name = generate_unified_run_name(
+            dataset_name=opt_config.dataset_name,
+            mode=opt_config.mode,
+            optimize_for=opt_config.optimize_for
         )
     
-    # Create optimization config
-    opt_config = OptimizationConfig(
-        dataset_name=dataset_name,
-        mode=opt_mode,
-        optimize_for=optimize_for,
-        trials=trials,
-        max_epochs_per_trial=args['max_epochs_per_trial'],
-        min_epochs_per_trial=args['min_epochs_per_trial'],
-        health_weight=args['health_weight'],
-        use_runpod_service=use_runpod_service,
-        runpod_service_endpoint=runpod_service_endpoint,
-        runpod_service_timeout=runpod_service_timeout,
-        runpod_service_fallback_local=runpod_service_fallback_local,
-        gpu_proxy_sample_percentage=gpu_proxy_sample_percentage,
-        concurrent=concurrent,
-        concurrent_workers=concurrent_workers,
-    )
-    
+    logger.debug(f"running optimize_model ... Using unified run name: {run_name}")
     logger.debug(
         "running optimize_model ... opt_config loaded: concurrent=%s, workers=%s, use_runpod_service=%s",
         opt_config.concurrent, opt_config.concurrent_workers, opt_config.use_runpod_service
     )
-    if not opt_config.use_runpod_service and opt_config.concurrent:
-        logger.debug(
-            "running optimize_model ... local execution detected; ignoring concurrency flags (forcing n_jobs=1)"
-        )
-
-    
-    # Apply config overrides
-    for key, value in config_overrides.items():
-        if hasattr(opt_config, key):
-            if key == 'plot_generation' and isinstance(value, str):
-                try:
-                    if value.lower() == 'all':
-                        value = PlotGenerationMode.ALL
-                    elif value.lower() == 'best':
-                        value = PlotGenerationMode.BEST
-                    elif value.lower() == 'none':
-                        value = PlotGenerationMode.NONE
-                    else:
-                        logger.warning(f"running optimize_model ... Invalid plot_generation value: '{value}', defaulting to ALL")
-                        value = PlotGenerationMode.ALL
-                except Exception as e:
-                    logger.warning(f"running optimize_model ... Error converting plot_generation: {e}, defaulting to ALL")
-                    value = PlotGenerationMode.ALL
-            
-            setattr(opt_config, key, value)
-            logger.debug(f"running optimize_model ... Set {key} = {value}")
-        else:
-            logger.warning(f"running optimize_model ... Unknown config parameter: {key}")
     
     # Log execution approach
     if opt_config.use_runpod_service:
@@ -3095,7 +2834,7 @@ def optimize_model(
     
     # Run optimization
     optimizer = ModelOptimizer(
-        dataset_name=dataset_name,
+        dataset_name=opt_config.dataset_name,
         optimization_config=opt_config,
         run_name=run_name,
         progress_callback=progress_callback,

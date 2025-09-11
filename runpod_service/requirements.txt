@@ -16,3 +16,4 @@ altair
 runpod
 kagglehub
 psutil
+boto3
