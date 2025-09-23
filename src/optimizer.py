@@ -18,7 +18,6 @@ Uses Bayesian optimization (Optuna) for intelligent hyperparameter search.
 from datetime import datetime
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
-from enum import Enum
 import json
 import numpy as np
 import optuna
@@ -26,33 +25,34 @@ from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 import os
 from pathlib import Path
+import pytz
 import random
+import re
 import requests  # For RunPod service communication
+import shutil
 import sys
+import tempfile
 import tensorflow as tf  # type: ignore
-from tensorflow import keras # type: ignore
 import threading
 import time
 import traceback
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
-import yaml
+import yaml             
 
 # Import existing modules
-from dataset_manager import DatasetManager, DatasetConfig
-from health_analyzer import HealthAnalyzer
-from model_builder import ModelBuilder, ModelConfig
-from utils.logger import logger
-
-# Import centralized configurations
-from data_classes.configs import OptimizationConfig, OptimizationMode, OptimizationObjective, PlotGenerationMode
-
-# Import progress tracking and callbacks
 from data_classes.callbacks import TrialProgress, AggregatedProgress, UnifiedProgress, ConcurrentProgressAggregator, EpochProgressCallback, default_progress_callback
 
-# Import modular components
+from data_classes.configs import OptimizationConfig, OptimizationMode, OptimizationObjective, PlotGenerationMode
+
+from dataset_manager import DatasetManager, DatasetConfig
+from health_analyzer import HealthAnalyzer
 from hyperparameter_selector import HyperparameterSelector
-from model_visualizer import ModelVisualizer, ArchitectureVisualization
+from model_builder import ModelBuilder, ModelConfig
+from model_visualizer import ModelVisualizer
 from plot_generator import PlotGenerator
+from utils.logger import logger
+from utils.run_name import create_run_name
+from utils.runpod_direct_download import download_files_from_runpod_worker, get_runpod_worker_endpoint, download_specific_files_from_runpod_worker, download_files_via_runpod_api, download_directory_via_runpod_api
 
 
 # Auto-load .env file from project root
@@ -101,9 +101,9 @@ class OptimizationResult:
     health_history: List[Dict[str, Any]] = field(default_factory=list)
     best_trial_health: Optional[Dict[str, Any]] = None
     
-    # S3 upload information (for RunPod execution)
-    plots_s3_info: Optional[Dict[str, Any]] = None
-    final_model_s3_info: Optional[Dict[str, Any]] = None
+    # Direct download information (for RunPod execution)
+    plots_direct_info: Optional[Dict[str, Any]] = None
+    final_model_direct_info: Optional[Dict[str, Any]] = None
     average_health_metrics: Optional[Dict[str, float]] = None
     
     # Dataset and configuration info
@@ -199,9 +199,34 @@ class ModelOptimizer:
         self.run_name = run_name
         self.activation_override = activation_override
         
-        # Generate single timestamp for this entire optimization run
-        from datetime import datetime
-        self.run_timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        # Extract timestamp from run_name to ensure consistency between local and RunPod execution
+        # run_name format: "YYYY-MM-DD-HH-MM-SS_dataset_mode" or similar
+        if self.run_name:
+            try:
+                # Extract timestamp from the beginning of run_name
+                timestamp_part = self.run_name.split('_')[0]
+                # Validate timestamp format (should be YYYY-MM-DD-HH-MM-SS)
+                if len(timestamp_part) == 19 and timestamp_part.count('-') == 5:
+                    self.run_timestamp = timestamp_part
+                    logger.debug(f"running ModelOptimizer.__init__ ... Extracted timestamp from run_name: {self.run_timestamp}")
+                else:
+                    raise ValueError(f"Invalid timestamp format in run_name: {timestamp_part}")
+            except (IndexError, ValueError) as e:
+                # Fallback: generate new timestamp with Jakarta timezone (should rarely happen)
+                logger.warning(f"running ModelOptimizer.__init__ ... Could not extract timestamp from run_name '{self.run_name}': {e}")
+                logger.warning(f"running ModelOptimizer.__init__ ... Generating fallback timestamp...")
+                
+                jakarta_tz = pytz.timezone('Asia/Jakarta')
+                jakarta_time = datetime.now(jakarta_tz)
+                self.run_timestamp = jakarta_time.strftime("%Y-%m-%d-%H-%M-%S")
+                logger.warning(f"running ModelOptimizer.__init__ ... Using fallback timestamp: {self.run_timestamp}")
+        else:
+            # No run_name provided, generate timestamp with Jakarta timezone
+            logger.debug(f"running ModelOptimizer.__init__ ... No run_name provided, generating timestamp...")
+            jakarta_tz = pytz.timezone('Asia/Jakarta')
+            jakarta_time = datetime.now(jakarta_tz)
+            self.run_timestamp = jakarta_time.strftime("%Y-%m-%d-%H-%M-%S")
+            logger.debug(f"running ModelOptimizer.__init__ ... Generated timestamp: {self.run_timestamp}")
         if self.activation_override:
             logger.debug(f"running ModelOptimizer.__init__ ... Activation override: {self.activation_override} (will force this activation for all trials)")
         
@@ -310,6 +335,13 @@ class ModelOptimizer:
         
         # Current trial progress for unified progress updates
         self._current_trial_progress: Optional[TrialProgress] = None
+
+        # Track trials with plots available for download
+        self._trials_with_plots: set = set()
+
+        # Track final model status for status updates
+        self._final_model_building: bool = False
+        self._final_model_available: bool = False
         
         
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
@@ -329,9 +361,13 @@ class ModelOptimizer:
             logger.debug(f"running ModelOptimizer.__init__ ... - Timeout: {self.config.runpod_service_timeout}s")
             logger.debug(f"running ModelOptimizer.__init__ ... - Fallback local: {self.config.runpod_service_fallback_local}")
             logger.debug(f"running ModelOptimizer.__init__ ... - Payload: Tiny JSON commands (<1KB) instead of Python code")
+
+            # Skip FastAPI endpoint testing since we're using simpler RunPod API approach
+            logger.info("running ModelOptimizer.__init__ ... Skipping FastAPI endpoint testing - using RunPod API approach")
+            logger.info("running ModelOptimizer.__init__ ... File downloads will use RunPod API calls instead of proxy URLs")
         else:
             logger.debug(f"running ModelOptimizer.__init__ ... RunPod service integration: DISABLED (local execution only)")
-        
+
         logger.debug(f"running ModelOptimizer.__init__ ... GPU proxy code injection → RunPod service JSON API")
     
     
@@ -364,6 +400,48 @@ class ModelOptimizer:
                 self._best_trial_value = trial_value
                 self._best_trial_accuracy = trial_accuracy
 
+    def _test_runpod_endpoints(self) -> None:
+        """
+        Test RunPod endpoints to ensure connectivity before optimization starts.
+        """
+        try:
+            logger.info("running _test_runpod_endpoints ... Testing RunPod endpoint connectivity")
+
+            # Import test functions
+            from utils.test_runpod_endpoints import run_comprehensive_endpoint_tests, log_endpoint_test_summary
+            from utils.runpod_direct_download import get_runpod_worker_endpoint
+
+            # Get worker endpoint from API URL
+            if not self.config.runpod_service_endpoint:
+                logger.error("running _test_runpod_endpoints ... RunPod service endpoint not configured")
+                return
+
+            worker_endpoint = get_runpod_worker_endpoint(self.config.runpod_service_endpoint)
+
+            # Use run name for testing, fallback to a test name
+            test_run_name = self.run_name or "endpoint_test"
+
+            # Run comprehensive tests
+            test_results = run_comprehensive_endpoint_tests(worker_endpoint, test_run_name)
+
+            # Log detailed summary
+            log_endpoint_test_summary(test_results)
+
+            # Check if critical endpoints are working
+            if test_results["summary"]["all_critical_tests_passed"]:
+                logger.info("running _test_runpod_endpoints ... All critical RunPod endpoints are working")
+            else:
+                logger.warning("running _test_runpod_endpoints ... Some critical RunPod endpoints are not working")
+                logger.warning("running _test_runpod_endpoints ... This may cause issues with plot downloads")
+
+                # Store test results for later reference
+                if not hasattr(self, '_endpoint_test_results'):
+                    self._endpoint_test_results = test_results
+
+        except Exception as e:
+            logger.error(f"running _test_runpod_endpoints ... Error testing RunPod endpoints: {e}")
+            logger.warning("running _test_runpod_endpoints ... Proceeding with optimization, but file downloads may fail")
+
     def _create_unified_progress(self, aggregated_progress: AggregatedProgress, trial_progress: Optional[TrialProgress] = None) -> UnifiedProgress:
         """
         Create unified progress by combining aggregated progress with current trial progress
@@ -383,7 +461,7 @@ class ModelOptimizer:
             if total_epochs_across_trials > 0:
                 current_epoch = completed_epochs
                 total_epochs = total_epochs_across_trials
-                epoch_progress = completed_epochs / total_epochs_across_trials if total_epochs_across_trials > 0 else 0
+                epoch_progress = round(completed_epochs / total_epochs_across_trials, 2) if total_epochs_across_trials > 0 else 0
         else:
             # CPU mode: Use per-trial epoch information (existing behavior)
             if self._current_epoch_info:
@@ -408,6 +486,29 @@ class ModelOptimizer:
             if completed_durations:
                 average_duration = round(sum(completed_durations) / len(completed_durations))
         
+        # Track completed trials with plots available
+        available_plots = []
+        if hasattr(self, '_trials_with_plots'):
+            available_plots = [f"trial_{trial_num}" for trial_num in sorted(self._trials_with_plots)]
+
+        # Determine Optuna Trials status
+        optuna_trials_status = "pending"
+        if len(aggregated_progress.running_trials) > 0:
+            optuna_trials_status = "running"
+        elif len(aggregated_progress.completed_trials) >= aggregated_progress.total_trials:
+            optuna_trials_status = "completed"
+
+        # Determine Final Model status based on trials completion and final model availability
+        final_model_status = "pending"
+        if optuna_trials_status == "completed":
+            # Check if final model has been built/is available
+            if hasattr(self, '_final_model_available') and self._final_model_available:
+                final_model_status = "available"
+            elif hasattr(self, '_final_model_building') and self._final_model_building:
+                final_model_status = "running"
+            else:
+                final_model_status = "pending"
+
         return UnifiedProgress(
             # Copy all aggregated progress data
             total_trials=aggregated_progress.total_trials,
@@ -424,7 +525,14 @@ class ModelOptimizer:
             epoch_progress=epoch_progress,
             current_trial_id=current_trial_id,
             current_trial_status=current_trial_status,
-            status_message=self._get_current_status_message(aggregated_progress, current_epoch)  # Preserve GPU init or use default
+            status_message=self._get_current_status_message(aggregated_progress, current_epoch),  # Preserve GPU init or use default
+            # Add plot generation and file download information
+            plot_generation=getattr(current_trial, 'plot_generation', None) if current_trial else None,
+            downloaded_files=getattr(self, '_recent_downloads', None),
+            available_plots=available_plots,
+            # Add Optuna Trials and Final Model status sections
+            optuna_trials_status=optuna_trials_status,
+            final_model_status=final_model_status
         )
 
     def _get_current_status_message(self, aggregated_progress: 'AggregatedProgress', current_epoch: Optional[int]) -> Optional[str]:
@@ -664,13 +772,21 @@ class ModelOptimizer:
     def _thread_safe_progress_callback(self, trial_progress: TrialProgress) -> None:
         """
         Thread-safe progress callback wrapper as specified in status.md
-        
+
         Args:
             trial_progress: TrialProgress object with current trial status
         """
         logger.debug(f"running _thread_safe_progress_callback ... processing progress for trial {trial_progress.trial_number}")
-        
+
         with self._progress_lock:
+            # Check if we're trying to report "running" status for a trial that's already completed
+            # This prevents race conditions where epoch callbacks report running status after completion
+            current_status = self._trial_statuses.get(trial_progress.trial_number)
+            if (current_status in ['completed', 'failed', 'pruned'] and
+                trial_progress.status == 'running'):
+                logger.debug(f"running _thread_safe_progress_callback ... Trial {trial_progress.trial_number} already {current_status}, ignoring 'running' status update")
+                return
+
             # Update trial status tracking
             self._trial_statuses[trial_progress.trial_number] = trial_progress.status
             logger.debug(f"running _thread_safe_progress_callback ... updated trial {trial_progress.trial_number} status to '{trial_progress.status}'")
@@ -707,11 +823,11 @@ class ModelOptimizer:
                         all_trial_statuses=self._trial_statuses
                     )
                     
-                    logger.debug(f"running _thread_safe_progress_callback ... calling user progress callback with aggregated data")
-                    logger.debug(f"running _thread_safe_progress_callback ... - Total trials: {aggregated_progress.total_trials}")
-                    logger.debug(f"running _thread_safe_progress_callback ... - Running: {len(aggregated_progress.running_trials)}")
-                    logger.debug(f"running _thread_safe_progress_callback ... - Completed: {len(aggregated_progress.completed_trials)}")
-                    logger.debug(f"running _thread_safe_progress_callback ... - Failed: {len(aggregated_progress.failed_trials)}")
+                    # logger.debug(f"running _thread_safe_progress_callback ... calling user progress callback with aggregated data")
+                    # logger.debug(f"running _thread_safe_progress_callback ... - Total trials: {aggregated_progress.total_trials}")
+                    # logger.debug(f"running _thread_safe_progress_callback ... - Running: {len(aggregated_progress.running_trials)}")
+                    # logger.debug(f"running _thread_safe_progress_callback ... - Completed: {len(aggregated_progress.completed_trials)}")
+                    # logger.debug(f"running _thread_safe_progress_callback ... - Failed: {len(aggregated_progress.failed_trials)}")
                     
                     # PHASE 1: Unified progress callback system
                     # Store current trial progress for epoch information
@@ -803,24 +919,29 @@ class ModelOptimizer:
             self.results_dir = optimization_results_dir / self.run_name
             logger.debug(f"running _setup_results_directory ... Using provided run_name: {self.run_name}")
         else:
-            timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-            dataset_clean = self.dataset_name.replace(" ", "_").lower()
-            mode_suffix = self.config.mode
-            fallback_name = f"{timestamp}_{dataset_clean}_{mode_suffix}_fallback"
+            
+            fallback_name = create_run_name(
+                dataset_name=self.dataset_name,
+                mode=self.config.mode,
+                optimize_for=self.config.optimize_for
+            )
             self.results_dir = optimization_results_dir / fallback_name
-            logger.debug(f"running _setup_results_directory ... No run_name provided, using fallback: {fallback_name}")
+            logger.debug(f"running _setup_results_directory ... No run_name provided, generated: {fallback_name}")
         
+        # Ensure results_dir is set (for type checker)
+        assert self.results_dir is not None, "results_dir should be set by this point"
+
         # Create the main results directory
         self.results_dir.mkdir(parents=True, exist_ok=True)
         logger.debug(f"running _setup_results_directory ... Results directory: {self.results_dir}")
-        
+
         # Create plots subdirectory
         plots_dir = self.results_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
-        
-        # Create trial directories
+
+        # Create trial directories (zero-indexed)
         for trial_num in range(self.config.trials):
-            trial_dir = plots_dir / f"trial_{trial_num + 1}"
+            trial_dir = plots_dir / f"trial_{trial_num}"
             trial_dir.mkdir(exist_ok=True)
         
         # Create optimized model directory
@@ -984,8 +1105,9 @@ class ModelOptimizer:
             request_payload = {
                 "input": {
                     "command": "start_training",
-                    "trial_id": f"trial_{trial.number}",
+                    "trial_id": self.run_name,  # Use full run name for consistent file organization
                     "dataset_name": self.dataset_name,
+                    "run_name": self.run_name,  # Include coordinated run_name for timestamp consistency
                     "hyperparameters": params,
                     "config": {
                         "validation_split": self.config.validation_split,
@@ -1003,8 +1125,8 @@ class ModelOptimizer:
                 }
             }
             payload_size = len(json.dumps(request_payload).encode('utf-8'))
-            logger.debug(f"running _train_via_runpod_service ... 🔄 PAYLOAD SIZE: {payload_size} bytes")
-            logger.debug(f"running _train_via_runpod_service ... DEBUG PAYLOAD: {json.dumps(request_payload, indent=2)}")
+            # logger.debug(f"running _train_via_runpod_service ... 🔄 PAYLOAD SIZE: {payload_size} bytes")
+            # logger.debug(f"running _train_via_runpod_service ... DEBUG PAYLOAD: {json.dumps(request_payload, indent=2)}")
 
             # Implement staggered start mechanism for proper trial completion order
             if trial.number > 0:
@@ -1025,10 +1147,10 @@ class ModelOptimizer:
                 response.raise_for_status()
                 result = response.json()
                 
-                # Log the initial submission response
-                logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Status Code: {response.status_code}")
-                logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Keys: {list(result.keys())}")
-                logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Full response: {json.dumps(result, indent=2)}")
+                # Log the initial submission response - Commented out b/c optimizer now running locally and thus, these are duplicative of the logs returned by api_server.py
+                # logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Status Code: {response.status_code}")
+                # logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Keys: {list(result.keys())}")
+                # logger.info(f"🔍 RUNPOD SUBMIT RESPONSE - Full response: {json.dumps(result, indent=2)}")
                 
                 job_id = result.get('id')
                 if not job_id:
@@ -1046,9 +1168,9 @@ class ModelOptimizer:
                 )
                 self._thread_safe_progress_callback(initial_progress)
 
-                # Poll
+                # Poll with faster interval for real-time plot downloads
                 max_poll_time = self.config.runpod_service_timeout
-                poll_interval = 10
+                poll_interval = 2  # Reduced from 10 to 2 seconds for faster notification detection
                 start_time = time.time()
                 status_url = f"{self.config.runpod_service_endpoint.rsplit('/run', 1)[0]}/status/{job_id}"
 
@@ -1062,7 +1184,15 @@ class ModelOptimizer:
                     # Log what we're getting back from RunPod for debugging
                     logger.info(f"🔍 RUNPOD POLLING - Trial {trial.number} - Status: {job_status}")
                     logger.info(f"🔍 RUNPOD POLLING - Status response keys: {list(status_data.keys())}")
-                    # logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
+
+                    # Extract worker ID for proxy URL construction
+                    worker_id = status_data.get('workerId', status_data.get('worker_id'))
+                    if worker_id:
+                        logger.info(f"🎯 RUNPOD POLLING - Worker ID: {worker_id}")
+                    else:
+                        logger.debug(f"🔍 RUNPOD POLLING - No worker ID found in response")
+
+                    logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
                     
                     # Check for output data
                     output_data = status_data.get('output')
@@ -1110,127 +1240,75 @@ class ModelOptimizer:
                         logger.info(f"📦 RUNPOD RESPONSE KEYS: {list(output.keys())}")
                         logger.info(f"📦 RUNPOD RESPONSE SIZE: {len(str(output))} characters")
                         
-                        # Check for plots_s3 information
-                        if 'plots_s3' in output:
-                            plots_s3_info = output['plots_s3']
-                            logger.info(f"✅ PLOTS_S3 FOUND in RunPod response")
-                            logger.info(f"📊 PLOTS_S3 CONTENT: {plots_s3_info}")
-                            
-                            # Validate plots_s3 structure
-                            required_fields = ['success', 's3_prefix', 'bucket']
-                            missing_fields = [field for field in required_fields if field not in plots_s3_info]
+                        # Check for plots_direct information
+                        if 'plots_direct' in output:
+                            plots_direct_info = output['plots_direct']
+                            logger.info(f"✅ PLOTS_DIRECT FOUND in RunPod response")
+                            logger.info(f"📊 PLOTS_DIRECT CONTENT: {plots_direct_info}")
+
+                            # Validate plots_direct structure
+                            required_fields = ['success', 'available_files']
+                            missing_fields = [field for field in required_fields if field not in plots_direct_info]
                             if missing_fields:
-                                logger.error(f"❌ PLOTS_S3 MISSING FIELDS: {missing_fields}")
+                                logger.error(f"❌ PLOTS_DIRECT MISSING FIELDS: {missing_fields}")
                             else:
-                                logger.info(f"✅ PLOTS_S3 STRUCTURE VALID - All required fields present")
-                                logger.info(f"📂 S3_PREFIX: {plots_s3_info.get('s3_prefix')}")
-                                logger.info(f"🪣 S3_BUCKET: {plots_s3_info.get('bucket')}")
+                                logger.info(f"✅ PLOTS_DIRECT STRUCTURE VALID - All required fields present")
+                                logger.info(f"📂 AVAILABLE_FILES: {len(plots_direct_info.get('available_files', []))} files")
                         else:
-                            logger.warning(f"❌ PLOTS_S3 NOT FOUND in RunPod response")
+                            logger.warning(f"❌ PLOTS_DIRECT NOT FOUND in RunPod response")
                             logger.warning(f"🔍 Available response keys: {list(output.keys())}")
                         
-                        # Check for final_model_s3 information
-                        if 'final_model_s3' in output:
-                            final_model_s3_info = output['final_model_s3']
-                            logger.info(f"✅ FINAL_MODEL_S3 FOUND in RunPod response")
-                            logger.info(f"🎯 FINAL_MODEL_S3 CONTENT: {final_model_s3_info}")
-                            
-                            # Validate final_model_s3 structure
-                            required_fields = ['success', 's3_key', 'bucket', 'model_filename']
-                            missing_fields = [field for field in required_fields if field not in final_model_s3_info]
-                            if missing_fields:
-                                logger.error(f"❌ FINAL_MODEL_S3 MISSING FIELDS: {missing_fields}")
-                            else:
-                                logger.info(f"✅ FINAL_MODEL_S3 STRUCTURE VALID - All required fields present")
-                                logger.info(f"🎯 S3_KEY: {final_model_s3_info.get('s3_key')}")
-                                logger.info(f"🎯 S3_BUCKET: {final_model_s3_info.get('bucket')}")
-                                logger.info(f"🎯 MODEL_FILENAME: {final_model_s3_info.get('model_filename')}")
-                        else:
-                            logger.warning(f"❌ FINAL_MODEL_S3 NOT FOUND in RunPod response")
-                            logger.warning(f"🔍 Available response keys: {list(output.keys())}")
+                        # Note: final_model_direct checks removed - final models are only built after all trials complete
                         
                         # ========================================
-                        # S3 DOWNLOAD ATTEMPT
+                        # DIRECT DOWNLOAD ATTEMPT
                         # ========================================
-                        logger.info(f"📥 INITIATING S3 DOWNLOAD ATTEMPT for Trial {trial.number}")
-                        download_success = self._download_trial_plots_from_s3(output, trial.number)
+                        logger.info(f"📥 INITIATING DIRECT DOWNLOAD ATTEMPT for Trial {trial.number}")
+                        download_success = self._download_trial_plots_from_runpod(output, trial.number, worker_id)
                         
                         if download_success:
-                            logger.info(f"✅ S3 DOWNLOAD SUCCESSFUL for Trial {trial.number}")
+                            logger.info(f"✅ DIRECT DOWNLOAD SUCCESSFUL for Trial {trial.number}")
                             logger.info(f"📁 Plots should now be available locally")
                         else:
-                            logger.warning(f"❌ S3 DOWNLOAD FAILED for Trial {trial.number}")
-                            logger.warning(f"🔍 Check S3 credentials, connectivity, or plot availability")
+                            logger.warning(f"❌ DIRECT DOWNLOAD FAILED for Trial {trial.number}")
+                            logger.warning(f"🔍 Check RunPod worker connectivity or plot availability")
                         
                         # ========================================
-                        # FINAL MODEL S3 DOWNLOAD ATTEMPT
+                        # FINAL MODEL DIRECT DOWNLOAD ATTEMPT
                         # ========================================
-                        logger.info(f"🎯 INITIATING FINAL MODEL S3 DOWNLOAD ATTEMPT for Trial {trial.number}")
-                        final_model_download_success = self._download_final_model_from_s3(output)
+                        logger.info(f"🎯 INITIATING FINAL MODEL DIRECT DOWNLOAD ATTEMPT for Trial {trial.number}")
+                        final_model_download_success = self._download_final_model_from_runpod(output, worker_id)
                         
                         if final_model_download_success:
-                            logger.info(f"🎯 FINAL MODEL S3 DOWNLOAD SUCCESSFUL for Trial {trial.number}")
+                            logger.info(f"🎯 FINAL MODEL DIRECT DOWNLOAD SUCCESSFUL for Trial {trial.number}")
                             logger.info(f"🎯 Final model should now be available locally")
                         else:
-                            logger.info(f"🎯 FINAL MODEL S3 DOWNLOAD SKIPPED/FAILED for Trial {trial.number}")
+                            logger.info(f"🎯 FINAL MODEL DIRECT DOWNLOAD SKIPPED/FAILED for Trial {trial.number}")
                             logger.info(f"🎯 Either no final model available or download failed")
                         
-                        # Report completion to UI
-                        completion_progress = TrialProgress(
-                            trial_id=f"trial_{trial.number}",
-                            trial_number=trial.number,
-                            status="completed",
-                            started_at=initial_progress.started_at,
-                            completed_at=datetime.now().isoformat(),
-                            duration_seconds=time.time() - start_time,
-                            performance={
-                                'accuracy': metrics.get('test_accuracy', 0.0),
-                                'test_loss': metrics.get('test_loss', 0.0),
-                                'total_score': total_score
-                            },
-                            health_metrics=output.get('health_metrics', {}),
-                            architecture=output.get('architecture', {}),
-                            hyperparameters=params
-                        )
-                        self._thread_safe_progress_callback(completion_progress)
+                        # Store metrics for standard completion flow in _objective_function
+                        # Remove manual completion callback to prevent race conditions
+                        self._last_trial_accuracy = metrics.get('test_accuracy', 0.0)
+                        self._last_trial_health_metrics = output.get('health_metrics', {})
                         
-                        # Generate plots if enabled (using returned model_attributes)
+                        # Check for plots created directly on RunPod (new architecture)
                         if self.config.create_optuna_model_plots:
                             try:
-                                logger.debug(f"running _train_via_runpod_service ... Generating plots for RunPod trial {trial.number}")
-                                model_attributes = output.get('model_attributes')
-                                if model_attributes:
-                                    if not self.results_dir:
-                                        logger.error(f"running _train_via_runpod_service ... Results directory not set, cannot generate plots")
-                                        continue
-                                    trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number}"
-                                    trial_plot_dir.mkdir(parents=True, exist_ok=True)
-                                    
-                                    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    
-                                    # RunPod now returns only metrics - no plot generation needed
-                                    logger.debug(f"running _train_via_runpod_service ... RunPod completed trial {trial.number}, plots will be generated locally if needed")
+                                plots_direct_info = output.get('plots_direct')
+                                if plots_direct_info and plots_direct_info.get('success'):
+                                    logger.debug(f"running _train_via_runpod_service ... Trial {trial.number} plots generated directly on RunPod: {plots_direct_info.get('run_name')}")
+                                    logger.debug(f"running _train_via_runpod_service ... Available plots: {len(plots_direct_info.get('available_files', []))} files")
                                 else:
-                                    logger.warning(f"running _train_via_runpod_service ... No model_attributes returned for trial {trial.number}")
+                                    logger.debug(f"running _train_via_runpod_service ... No direct plots generated for trial {trial.number} (normal - plots downloaded separately)")
                             except Exception as e:
-                                logger.error(f"running _train_via_runpod_service ... Failed to generate plots for trial {trial.number}: {e}")
+                                logger.error(f"running _train_via_runpod_service ... Failed to check plot status for trial {trial.number}: {e}")
                         
                         return total_score
 
                     if job_status == 'FAILED':
                         error_logs = status_data.get('error', 'Job failed without details')
-                        
-                        # Report failure to UI
-                        failure_progress = TrialProgress(
-                            trial_id=f"trial_{trial.number}",
-                            trial_number=trial.number,
-                            status="failed",
-                            started_at=initial_progress.started_at,
-                            completed_at=datetime.now().isoformat(),
-                            duration_seconds=time.time() - start_time
-                        )
-                        self._thread_safe_progress_callback(failure_progress)
-                        
+
+                        # Let standard exception handling in _objective_function deal with failure progress
                         raise RuntimeError(f"RunPod job failed: {error_logs}")
 
                     if job_status in ['IN_QUEUE', 'IN_PROGRESS']:
@@ -1311,7 +1389,8 @@ class ModelOptimizer:
             current_epoch = None
             total_epochs = None
             epoch_progress = None
-            
+            latest_update = None  # Initialize to avoid variable scope issues
+
             if progress_updates and isinstance(progress_updates, list) and len(progress_updates) > 0:
                 # Get the most recent progress update
                 latest_update = progress_updates[-1]
@@ -1332,8 +1411,120 @@ class ModelOptimizer:
                 
                 if current_epoch is not None:
                     logger.debug(f"running _report_runpod_progress ... Found progress from RunPod: epoch {current_epoch}/{total_epochs}, progress {epoch_progress:.1%}")
+
+                # Check for real-time plot downloads (only if latest_update is a dict)
+                if isinstance(latest_update, dict):
+                    # Check for new direct download plots ready notification
+                    if (latest_update.get('status') == 'plots_ready_for_download' and
+                        latest_update.get('download_trigger') and
+                        latest_update.get('plots_direct_info')):
+
+                        plots_direct_info = latest_update['plots_direct_info']
+                        available_files = plots_direct_info.get('available_files', [])
+
+                        logger.info(f"🚀 REAL-TIME DIRECT DOWNLOAD - Trial {trial.number}: Received plots ready notification")
+                        logger.info(f"📋 REAL-TIME DIRECT DOWNLOAD - {len(available_files)} files ready for download")
+                        logger.info(f"📡 REAL-TIME DIRECT DOWNLOAD - Stay alive requested: {latest_update.get('stay_alive_requested', False)}")
+
+                        if available_files:
+                            # Download plots immediately while worker is still alive
+                            try:
+                                if self.results_dir:
+                                    trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number}"
+                                    trial_plot_dir.mkdir(parents=True, exist_ok=True)
+
+                                    # Import the direct download function
+                                    from utils.runpod_direct_download import download_specific_files_from_runpod_worker, get_runpod_worker_endpoint
+
+                                    # Get RunPod worker endpoint from API URL
+                                    if not self.config.runpod_service_endpoint:
+                                        raise ValueError("RunPod service endpoint not configured")
+                                    if not self.run_name:
+                                        raise ValueError("Run name not configured")
+                                    worker_endpoint = get_runpod_worker_endpoint(self.config.runpod_service_endpoint)
+
+                                    logger.info(f"🚀 REAL-TIME DIRECT DOWNLOAD - Starting immediate download from: {worker_endpoint}")
+
+                                    success = download_specific_files_from_runpod_worker(
+                                        runpod_endpoint=worker_endpoint,
+                                        run_name=self.run_name,
+                                        file_list=available_files,
+                                        local_dir=str(trial_plot_dir)
+                                    )
+
+                                    if success:
+                                        logger.info(f"✅ REAL-TIME DIRECT DOWNLOAD - Successfully downloaded {len(available_files)} plots for trial {trial.number}")
+                                        # Store successful download info for tracking
+                                        if not hasattr(self, '_recent_downloads'):
+                                            self._recent_downloads = []
+                                        self._recent_downloads.extend(available_files)
+                                        # Track this trial as having plots available
+                                        self._trials_with_plots.add(trial.number)
+                                    else:
+                                        logger.error(f"❌ REAL-TIME DIRECT DOWNLOAD - Failed to download plots for trial {trial.number}")
+
+                            except Exception as e:
+                                logger.error(f"💥 REAL-TIME DIRECT DOWNLOAD - Error during immediate download for trial {trial.number}: {e}")
+
+                    # Also check for legacy S3 uploaded files (fallback only - should not be needed with direct downloads)
+                    plot_generation = latest_update.get('plot_generation')
+                    if plot_generation and isinstance(plot_generation, dict):
+                        uploaded_files = plot_generation.get('uploaded_files', [])
+                        if uploaded_files and plot_generation.get('status') == 'completed':
+                            logger.warning(f"🎨 LEGACY S3 FALLBACK - Trial {trial.number}: Found {len(uploaded_files)} S3 uploaded files (this should not happen with direct downloads)")
+
+                            # Download new plots immediately using legacy S3 approach
+                            try:
+                                if self.results_dir:
+                                    trial_plot_dir = self.results_dir / "plots" / f"trial_{trial.number}"
+                                    trial_plot_dir.mkdir(parents=True, exist_ok=True)
+
+                                    # Import the direct download function
+                                    from utils.runpod_direct_download import download_specific_files_from_runpod_worker, get_runpod_worker_endpoint
+
+                                    # Get RunPod worker endpoint from API URL
+                                    if not self.config.runpod_service_endpoint:
+                                        logger.error(f"❌ REAL-TIME DIRECT DOWNLOAD - RunPod service endpoint not configured")
+                                        return
+                                    if not self.run_name:
+                                        logger.error(f"❌ REAL-TIME DIRECT DOWNLOAD - Run name not configured")
+                                        return
+                                    worker_endpoint = get_runpod_worker_endpoint(self.config.runpod_service_endpoint)
+
+                                    success = download_specific_files_from_runpod_worker(
+                                        runpod_endpoint=worker_endpoint,
+                                        run_name=self.run_name,
+                                        file_list=uploaded_files,
+                                        local_dir=str(trial_plot_dir)
+                                    )
+
+                                    if success:
+                                        # Track downloaded files for progress logging
+                                        downloaded_files = []
+                                        for s3_key in uploaded_files:
+                                            filename = s3_key.split('/')[-1]  # Extract filename from S3 key
+                                            local_file_path = trial_plot_dir / filename
+                                            downloaded_files.append(str(local_file_path))
+
+                                        # Store downloaded files for progress update logging
+                                        if not hasattr(self, '_recent_downloads'):
+                                            self._recent_downloads = []
+                                        self._recent_downloads.extend(downloaded_files)
+                                        # Track this trial as having plots available
+                                        self._trials_with_plots.add(trial.number)
+
+                                        logger.info(f"✅ REAL-TIME PLOTS - Trial {trial.number}: Successfully downloaded {len(uploaded_files)} plot files")
+                                        logger.info(f"✅ REAL-TIME PLOTS - Downloaded files: {downloaded_files}")
+                                    else:
+                                        logger.warning(f"❌ REAL-TIME PLOTS - Trial {trial.number}: Failed to download plot files")
+                                else:
+                                    logger.error(f"❌ REAL-TIME PLOTS - Trial {trial.number}: No results directory set")
+
+                            except Exception as e:
+                                logger.error(f"💥 REAL-TIME PLOTS - Trial {trial.number}: Error downloading plots: {e}")
             
             # Log what we found (or didn't find) for debugging
+            '''
             logger.info(f"🔍 PROGRESS EXTRACT - Trial {trial.number} - Extracted progress: epoch {current_epoch}/{total_epochs}, progress {epoch_progress}")
             logger.info(f"🔍 PROGRESS EXTRACT - Progress updates found: {len(progress_updates) if progress_updates else 0}")
             if progress_updates:
@@ -1343,8 +1534,16 @@ class ModelOptimizer:
                 logger.info(f"🔍 PROGRESS EXTRACT - Full status_data keys: {list(status_data.keys())}")
                 logger.info(f"🔍 PROGRESS EXTRACT - Output keys: {list(output.keys()) if output else 'No output'}")
                 logger.info(f"🔍 PROGRESS EXTRACT - Full status_data: {json.dumps(status_data, indent=2)}")
+            '''
             
-            # Create TrialProgress object with available information
+            # Extract plot generation data for real-time updates
+            plot_generation_data = None
+            if isinstance(latest_update, dict):
+                plot_generation = latest_update.get('plot_generation')
+                if plot_generation and isinstance(plot_generation, dict):
+                    plot_generation_data = plot_generation
+
+            # Create TrialProgress object with available information including plot generation
             trial_progress = TrialProgress(
                 trial_id=f"trial_{trial.number}",
                 trial_number=trial.number,
@@ -1352,7 +1551,8 @@ class ModelOptimizer:
                 current_epoch=current_epoch,
                 total_epochs=total_epochs,
                 epoch_progress=epoch_progress,
-                started_at=datetime.now().isoformat()
+                started_at=datetime.now().isoformat(),
+                plot_generation=plot_generation_data
             )
             
             # Update the _current_epoch_info dictionary that _create_unified_progress relies on
@@ -1386,7 +1586,6 @@ class ModelOptimizer:
             Tuple of (current_epoch, total_epochs, epoch_progress)
         """
         try:
-            import re
             current_epoch = None
             total_epochs = None
             epoch_progress = None
@@ -1402,12 +1601,12 @@ class ModelOptimizer:
             if batch_match:
                 current_batch = int(batch_match.group(1))
                 total_batches = int(batch_match.group(2))
-                epoch_progress = min(current_batch / total_batches, 1.0)
+                epoch_progress = round(min(current_batch / total_batches, 1.0), 2)
             
             # Alternative: look for percentage in message
             percent_match = re.search(r'(\d+(?:\.\d+)?)%', message)
             if percent_match and epoch_progress is None:
-                epoch_progress = float(percent_match.group(1)) / 100.0
+                epoch_progress = round(float(percent_match.group(1)) / 100.0, 2)
             
             logger.debug(f"running _parse_progress_message ... Parsed '{message}' -> epoch {current_epoch}/{total_epochs}, progress {epoch_progress}")
             
@@ -1568,206 +1767,230 @@ class ModelOptimizer:
             logger.error(f"running _calculate_total_score_from_service_response ... Error calculating total score: {e}")
             return float(metrics.get('test_accuracy', 0.0))
     
-    def _download_trial_plots_from_s3(self, output: Dict[str, Any], trial_number: int) -> bool:
+    def _download_trial_plots_from_runpod(self, output: Dict[str, Any], trial_number: int, worker_id: Optional[str] = None) -> bool:
         """
-        Download trial plots from S3 after RunPod trial completion.
-        
+        Download trial plots directly from RunPod worker after trial completion.
+
         Args:
-            output: RunPod service response containing plots_s3 information
+            output: RunPod service response
             trial_number: Trial number for directory organization
-            
+
         Returns:
             True if plots were downloaded successfully, False otherwise
         """
         try:
-            logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION START - Trial {trial_number} =====")
-            logger.info(f"📥 Checking for S3 plots to download for trial {trial_number}")
+            logger.info(f"🔍 ===== DIRECT DOWNLOAD FUNCTION START - Trial {trial_number} =====")
+            logger.info(f"📥 Starting direct download for trial {trial_number} plots")
             logger.info(f"🔑 Available RunPod response keys: {list(output.keys())}")
-            
-            # Check if plots were uploaded to S3
-            plots_s3_info = output.get('plots_s3')
-            if not plots_s3_info:
-                logger.warning(f"❌ No S3 plots information found for trial {trial_number}")
-                logger.warning(f"💡 This means either:")
-                logger.warning(f"   - Plot generation was disabled")
-                logger.warning(f"   - RunPod handler didn't create plots_s3_info")
-                logger.warning(f"   - Plots failed to upload to S3")
-                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (NO DOWNLOAD) =====")
-                return False
-            
-            # ========================================
-            # VALIDATE S3 INFORMATION
-            # ========================================
-            logger.info(f"✅ S3 plots information found for trial {trial_number}")
-            logger.info(f"📊 S3 Info Details: {plots_s3_info}")
-            
-            # Extract S3 prefix from plots_s3 info
-            s3_prefix = plots_s3_info.get('s3_prefix')
-            if not s3_prefix:
-                logger.error(f"❌ No S3 prefix found in plots_s3 info for trial {trial_number}")
-                logger.error(f"📊 Available plots_s3 keys: {list(plots_s3_info.keys())}")
-                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (NO PREFIX) =====")
-                return False
-            
-            logger.info(f"📂 S3 Prefix: {s3_prefix}")
-            
+
             # Determine local directory for plots
             if not self.results_dir:
                 logger.error(f"❌ Results directory not set, cannot download plots for trial {trial_number}")
-                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (NO RESULTS DIR) =====")
+                logger.info(f"🔍 ===== DIRECT DOWNLOAD FUNCTION END - Trial {trial_number} (NO RESULTS DIR) =====")
                 return False
-            
+
             local_plots_dir = self.results_dir / "plots" / f"trial_{trial_number}"
             logger.info(f"📁 Local download directory: {local_plots_dir}")
-            
+
             # ========================================
-            # ATTEMPT S3 DOWNLOAD
+            # ATTEMPT DIRECT DOWNLOAD FROM RUNPOD
             # ========================================
-            logger.info(f"🚀 STARTING S3 DOWNLOAD for trial {trial_number}")
-            logger.info(f"📂 FROM: s3://40ub9vhaa7/{s3_prefix}")
-            logger.info(f"📁 TO: {local_plots_dir}")
-            
-            # Import the S3 download utility
-            from utils.s3_transfer import download_from_runpod_s3
-            
-            # Download plots from S3
-            success = download_from_runpod_s3(
-                s3_prefix=s3_prefix,
-                local_dir=str(local_plots_dir)
-            )
-            
+            logger.info(f"🚀 STARTING DIRECT DOWNLOAD for trial {trial_number}")
+
+            # Get RunPod worker endpoint from API URL
+            if not self.config.runpod_service_endpoint:
+                raise ValueError("RunPod service endpoint not configured")
+            if not self.run_name:
+                raise ValueError("Run name not configured")
+            worker_endpoint = get_runpod_worker_endpoint(self.config.runpod_service_endpoint)
+            logger.info(f"🔗 RunPod worker endpoint: {worker_endpoint}")
+            logger.info(f"🏷️ Run name: {self.run_name}")
+
+            # Use available_files from plots_direct_info to download specific files
+            plots_direct_info = output.get('plots_direct', {})
+            available_files = plots_direct_info.get('available_files', [])
+
+            if available_files:
+                logger.info(f"📋 Using available_files list: {len(available_files)} files")
+                logger.debug(f"📋 Files to download: {available_files}")
+
+                # Download entire directory using new batch RunPod API approach
+                api_key = os.getenv('RUNPOD_API_KEY')
+                if api_key and self.config.runpod_service_endpoint:
+                    logger.info(f"🚀 Using new batch directory download via RunPod API")
+                    logger.info(f"📦 Downloading entire directory as single zip file (faster and more reliable)")
+                    success = download_directory_via_runpod_api(
+                        runpod_api_url=self.config.runpod_service_endpoint,
+                        runpod_api_key=api_key,
+                        run_name=self.run_name,
+                        local_dir=str(local_plots_dir)
+                    )
+                else:
+                    logger.warning(f"❌ Missing API key or endpoint for RunPod API download")
+                    # Fallback to old method (will likely fail)
+                    success = download_specific_files_from_runpod_worker(
+                        runpod_endpoint=worker_endpoint,
+                        run_name=self.run_name,
+                        file_list=available_files,
+                        local_dir=str(local_plots_dir),
+                        worker_id=worker_id
+                    )
+            else:
+                logger.warning(f"❌ No available_files in plots_direct_info, falling back to discovery")
+                # Fallback to batch directory download using new RunPod API approach
+                api_key = os.getenv('RUNPOD_API_KEY')
+                if api_key and self.config.runpod_service_endpoint:
+                    logger.info(f"🚀 Fallback: Using batch directory download via RunPod API")
+                    success = download_directory_via_runpod_api(
+                        runpod_api_url=self.config.runpod_service_endpoint,
+                        runpod_api_key=api_key,
+                        run_name=self.run_name,
+                        local_dir=str(local_plots_dir)
+                    )
+                else:
+                    logger.warning(f"❌ Missing API key or endpoint for RunPod API download")
+                    # Fallback to old method (will likely fail due to worker shutdown)
+                    success = download_files_from_runpod_worker(
+                        runpod_endpoint=worker_endpoint,
+                        run_name=self.run_name,
+                        local_dir=str(local_plots_dir),
+                        file_patterns=['*.png', '*.json', '*.yaml', '*.txt'],  # Plot file types
+                        worker_id=worker_id
+                    )
+
             # ========================================
             # REPORT DOWNLOAD RESULTS
             # ========================================
             if success:
-                logger.info(f"🎉 S3 DOWNLOAD SUCCESSFUL for trial {trial_number}")
-                logger.info(f"📁 Plots downloaded to: {local_plots_dir}")
-                
-                # Count downloaded files
-                try:
-                    if local_plots_dir.exists():
-                        plot_files = list(local_plots_dir.glob("*"))
-                        logger.info(f"📊 Downloaded {len(plot_files)} plot files")
-                        logger.info(f"📄 First few files: {[f.name for f in plot_files[:5]]}")
-                    else:
-                        logger.warning(f"⚠️ Local plots directory doesn't exist after download: {local_plots_dir}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Error counting downloaded files: {e}")
-                
-                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (SUCCESS) =====")
+                logger.info(f"✅ DIRECT DOWNLOAD SUCCESSFUL for trial {trial_number}")
+                logger.info(f"📁 Plot files downloaded to: {local_plots_dir}")
+                # Track this trial as having plots available
+                self._trials_with_plots.add(trial_number)
+                logger.info(f"🔍 ===== DIRECT DOWNLOAD FUNCTION END - Trial {trial_number} (SUCCESS) =====")
                 return True
             else:
-                logger.error(f"💥 S3 DOWNLOAD FAILED for trial {trial_number}")
+                logger.error(f"💥 DIRECT DOWNLOAD FAILED for trial {trial_number}")
                 logger.error(f"🔍 Possible causes:")
-                logger.error(f"   - S3 credentials invalid")
+                logger.error(f"   - RunPod worker not accessible")
                 logger.error(f"   - Network connectivity issues")
-                logger.error(f"   - S3 prefix doesn't exist: {s3_prefix}")
-                logger.error(f"   - Permission issues")
-                logger.info(f"🔍 ===== S3 DOWNLOAD FUNCTION END - Trial {trial_number} (FAILED) =====")
+                logger.error(f"   - Run name not found on worker")
+                logger.error(f"   - Files not available on worker")
+                logger.info(f"🔍 ===== DIRECT DOWNLOAD FUNCTION END - Trial {trial_number} (FAILED) =====")
                 return False
-                
+
         except Exception as e:
-            logger.error(f"Error downloading trial {trial_number} plots from S3: {e}")
+            logger.error(f"Error downloading trial {trial_number} plots directly from RunPod: {e}")
             return False
     
-    def _download_final_model_from_s3(self, runpod_output: Dict[str, Any]) -> bool:
+    def _download_final_model_from_runpod(self, runpod_output: Dict[str, Any], worker_id: Optional[str] = None) -> bool:
         """
-        Download final model from S3 if available in RunPod response
-        
+        Download final model directly from RunPod worker via API endpoints
+
         Args:
-            runpod_output: The complete RunPod response containing final_model_s3 info
-            
+            runpod_output: The complete RunPod response containing final_model_direct info
+
         Returns:
             True if download successful, False otherwise
         """
         try:
-            logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION START =====")
-            logger.info(f"🎯 Checking for S3 final model to download")
+            logger.info(f"🎯 ===== FINAL MODEL DIRECT DOWNLOAD FUNCTION START =====")
+            logger.info(f"🎯 Checking for direct download final model")
             logger.info(f"🎯 Available RunPod response keys: {list(runpod_output.keys())}")
-            
-            # Check if final model was uploaded to S3
-            final_model_s3_info = runpod_output.get('final_model_s3')
-            if not final_model_s3_info:
-                logger.info(f"🎯 No S3 final model information found")
+
+            # Check if final model is available for direct download
+            final_model_direct_info = runpod_output.get('final_model_direct')
+            if not final_model_direct_info:
+                logger.info(f"🎯 No direct download final model information found")
                 logger.info(f"🎯 This means either:")
                 logger.info(f"🎯   - Final model building was disabled")
-                logger.info(f"🎯   - RunPod handler didn't create final_model_s3_info")
-                logger.info(f"🎯   - Final model failed to upload to S3")
-                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (NO DOWNLOAD) =====")
+                logger.info(f"🎯   - RunPod handler didn't create final_model_direct_info")
+                logger.info(f"🎯   - Final model failed to build")
+                logger.info(f"🎯 ===== FINAL MODEL DIRECT DOWNLOAD FUNCTION END (NO DOWNLOAD) =====")
                 return False
-            
+
             # ========================================
-            # VALIDATE S3 INFORMATION
+            # VALIDATE DIRECT DOWNLOAD INFORMATION
             # ========================================
-            logger.info(f"✅ S3 final model information found")
-            logger.info(f"🎯 S3 Info Details: {final_model_s3_info}")
-            
-            # Extract S3 key from final_model_s3 info
-            s3_key = final_model_s3_info.get('s3_key')
-            if not s3_key:
-                logger.error(f"❌ No S3 key found in final_model_s3 info")
-                logger.error(f"🎯 Available final_model_s3 keys: {list(final_model_s3_info.keys())}")
-                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (NO KEY) =====")
+            logger.info(f"✅ Direct download final model information found")
+            logger.info(f"🎯 Direct Info Details: {final_model_direct_info}")
+
+            # Extract file path from final_model_direct info
+            file_path = final_model_direct_info.get('file_path')
+            if not file_path:
+                logger.error(f"❌ No file path found in final_model_direct info")
+                logger.error(f"🎯 Available final_model_direct keys: {list(final_model_direct_info.keys())}")
+                logger.info(f"🎯 ===== FINAL MODEL DIRECT DOWNLOAD FUNCTION END (NO PATH) =====")
                 return False
-            
-            model_filename = final_model_s3_info.get('model_filename')
+
+            model_filename = final_model_direct_info.get('model_filename')
             if not model_filename:
-                logger.error(f"❌ No model filename found in final_model_s3 info")
+                logger.error(f"❌ No model filename found in final_model_direct info")
                 return False
-                
-            logger.info(f"🎯 S3 Key: {s3_key}")
+
+            logger.info(f"🎯 File Path: {file_path}")
             logger.info(f"🎯 Model Filename: {model_filename}")
-            
+
             # ========================================
             # CREATE LOCAL DOWNLOAD DIRECTORY
             # ========================================
             if not self.results_dir:
                 logger.error(f"❌ No results directory set, cannot download final model")
                 return False
-                
+
             local_model_dir = self.results_dir / "optimized_model"
             local_model_dir.mkdir(parents=True, exist_ok=True)
-            local_model_path = local_model_dir / model_filename
-            
-            logger.info(f"🎯 Local model download path: {local_model_path}")
-            
+
+            logger.info(f"🎯 Local model download directory: {local_model_dir}")
+
             # ========================================
-            # ATTEMPT S3 DOWNLOAD
+            # ATTEMPT DIRECT DOWNLOAD
             # ========================================
-            logger.info(f"🎯 STARTING FINAL MODEL S3 DOWNLOAD")
-            logger.info(f"🎯 FROM: s3://40ub9vhaa7/{s3_key}")
-            logger.info(f"🎯 TO: {local_model_path}")
-            
-            # Import the S3 download utility
-            from utils.s3_transfer import download_from_runpod_s3
-            
-            # Create temporary directory for download
-            import tempfile
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Download final model from S3 to temp directory
-                success = download_from_runpod_s3(
-                    s3_prefix=s3_key.rsplit('/', 1)[0],  # Get directory part of S3 key
-                    local_dir=temp_dir
+            logger.info(f"🎯 STARTING FINAL MODEL DIRECT DOWNLOAD")
+
+            # Extract RunPod worker endpoint
+            if not self.config.runpod_service_endpoint:
+                logger.error(f"❌ No RunPod service endpoint configured")
+                return False
+
+            if not self.config.runpod_service_endpoint:
+                raise ValueError("RunPod service endpoint not configured")
+            if not self.run_name:
+                raise ValueError("Run name not configured")
+            worker_endpoint = get_runpod_worker_endpoint(self.config.runpod_service_endpoint)
+            logger.info(f"🎯 Worker endpoint: {worker_endpoint}")
+            logger.info(f"🎯 FROM: {worker_endpoint}/download/{self.run_name}/{file_path}")
+            logger.info(f"🎯 TO: {local_model_dir}")
+
+            # Download final model using new RunPod API approach
+            api_key = os.getenv('RUNPOD_API_KEY')
+            if api_key and self.config.runpod_service_endpoint:
+                logger.info(f"🔄 Using new RunPod API approach for final model download")
+                success = download_files_via_runpod_api(
+                    runpod_api_url=self.config.runpod_service_endpoint,
+                    runpod_api_key=api_key,
+                    run_name=self.run_name,
+                    local_dir=str(local_model_dir),
+                    file_list=[file_path]
                 )
-                
-                if success:
-                    # Move the downloaded file to final location
-                    temp_model_path = Path(temp_dir) / model_filename
-                    if temp_model_path.exists():
-                        import shutil
-                        shutil.move(str(temp_model_path), str(local_model_path))
-                        success = True
-                    else:
-                        logger.error(f"🎯 Downloaded file not found at expected path: {temp_model_path}")
-                        success = False
-            
+            else:
+                logger.warning(f"❌ Missing API key or endpoint for RunPod API download")
+                # Fallback to old method (will likely fail)
+                success = download_specific_files_from_runpod_worker(
+                    runpod_endpoint=worker_endpoint,
+                    run_name=self.run_name,
+                    file_list=[file_path],
+                    local_dir=str(local_model_dir),
+                    worker_id=worker_id
+                )
+
             # ========================================
             # REPORT DOWNLOAD RESULTS
             # ========================================
             if success:
-                logger.info(f"🎯 FINAL MODEL S3 DOWNLOAD SUCCESSFUL")
+                local_model_path = local_model_dir / model_filename
+                logger.info(f"🎯 FINAL MODEL DIRECT DOWNLOAD SUCCESSFUL")
                 logger.info(f"🎯 Final model downloaded to: {local_model_path}")
-                
+
                 # Verify file exists and get size
                 try:
                     if local_model_path.exists():
@@ -1776,22 +1999,26 @@ class ModelOptimizer:
                         logger.info(f"🎯 Downloaded file: {local_model_path.name}")
                     else:
                         logger.warning(f"🎯 Local model file doesn't exist after download: {local_model_path}")
+                        # Check if file exists with any name in the directory
+                        downloaded_files = list(local_model_dir.glob("*"))
+                        if downloaded_files:
+                            logger.info(f"🎯 Files found in download directory: {[f.name for f in downloaded_files]}")
                         return False
                 except Exception as e:
                     logger.warning(f"🎯 Error verifying downloaded file: {e}")
-                    
-                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (SUCCESS) =====")
+
+                logger.info(f"🎯 ===== FINAL MODEL DIRECT DOWNLOAD FUNCTION END (SUCCESS) =====")
                 return True
-                
+
             else:
-                logger.error(f"🎯 FINAL MODEL S3 DOWNLOAD FAILED")
-                logger.error(f"🎯 Check S3 credentials, connectivity, or model availability")
-                logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (FAILED) =====")
+                logger.error(f"🎯 FINAL MODEL DIRECT DOWNLOAD FAILED")
+                logger.error(f"🎯 Check RunPod worker connectivity or model availability")
+                logger.info(f"🎯 ===== FINAL MODEL DIRECT DOWNLOAD FUNCTION END (FAILED) =====")
                 return False
-                
+
         except Exception as e:
-            logger.error(f"🎯 Error downloading final model from S3: {e}")
-            logger.info(f"🎯 ===== FINAL MODEL S3 DOWNLOAD FUNCTION END (ERROR) =====")
+            logger.error(f"🎯 Error downloading final model from RunPod worker: {e}")
+            logger.info(f"🎯 ===== FINAL MODEL DIRECT DOWNLOAD FUNCTION END (ERROR) =====")
             return False
     
     def _train_locally_for_trial(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
@@ -1872,7 +2099,10 @@ class ModelOptimizer:
             logger.debug(f"running _train_locally_for_trial ... - Creating ModelBuilder with verified config...")
             
             # Create ModelBuilder with trial number, shared timestamp, results directory, and optimization config
-            model_builder = ModelBuilder(self.dataset_config, model_config, trial.number, self.run_timestamp, self.results_dir, self.config)
+            model_builder = ModelBuilder(self.dataset_config, self.run_timestamp, model_config, trial.number, self.results_dir, self.config)
+
+            # Store for later access to plot generation data
+            self._current_model_builder = model_builder
             
             # Build model
             model_builder.build_model()
@@ -1924,11 +2154,11 @@ class ModelOptimizer:
                     "total_plots": total_plots,
                     "plot_progress": overall_progress
                 }
-                
+
                 # Update current trial progress with plot generation status
                 if self._current_trial_progress:
                     self._current_trial_progress.plot_generation = plot_generation_data
-                
+
                 logger.debug(f"running plot_progress_callback ... Trial {trial.number}: Plot progress - {current_plot_name} ({completed_plots}/{total_plots}, {overall_progress*100:.1f}%)")
 
             # Train the model
@@ -1941,15 +2171,24 @@ class ModelOptimizer:
             # Calculate training time
             training_time_minutes = (time.time() - trial_start_time) / 60
             
-            # Mark plot generation as completed
+            # Mark plot generation as completed and include uploaded files for real-time download
             if self._current_trial_progress:
-                self._current_trial_progress.plot_generation = {
+                plot_generation_data = {
                     "status": "completed",
                     "current_plot": "All plots complete",
                     "completed_plots": self._current_trial_progress.plot_generation.get("total_plots", 0) if self._current_trial_progress.plot_generation else 0,
                     "total_plots": self._current_trial_progress.plot_generation.get("total_plots", 0) if self._current_trial_progress.plot_generation else 0,
                     "plot_progress": 1.0
                 }
+
+                # Try to get uploaded files from model_builder if available
+                if hasattr(model_builder, '_last_plot_s3_result') and model_builder._last_plot_s3_result:
+                    plot_generation_data["uploaded_files"] = model_builder._last_plot_s3_result.get("uploaded_files", [])
+                    plot_generation_data["s3_prefix"] = model_builder._last_plot_s3_result.get("s3_prefix", "")
+                    plot_generation_data["bucket"] = model_builder._last_plot_s3_result.get("bucket", "")
+                    logger.debug(f"running _train_locally_for_trial ... Including {len(plot_generation_data.get('uploaded_files', []))} uploaded files in progress update")
+
+                self._current_trial_progress.plot_generation = plot_generation_data
                 
                 # Update the trial progress in the history to include the completed plot generation
                 logger.debug(f"running _train_locally_for_trial ... Updating trial {trial.number} in history with completed plot generation")
@@ -1997,12 +2236,12 @@ class ModelOptimizer:
                 if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
                     objective_weight = 1.0 - self.config.health_weight
                     health_weight = self.config.health_weight
-                    total_score = objective_weight * test_accuracy + health_weight * overall_health
+                    total_score = round(objective_weight * test_accuracy + health_weight * overall_health, 4)
                 else:
-                    total_score = test_accuracy
+                    total_score = round(test_accuracy, 4)
             else:
                 # For other objectives, use test_accuracy as fallback
-                total_score = test_accuracy
+                total_score = round(test_accuracy, 4)
             
             logger.debug(f"running _train_locally_for_trial ... Trial {trial.number}: Local fallback total score: {total_score:.4f}")
             
@@ -2077,28 +2316,18 @@ class ModelOptimizer:
             logger.debug(f"running ModelOptimizer.optimize ... Showing 'Initializing GPU' status")
             self.progress_callback(gpu_init_progress)
         
-        # Decide Optuna parallelism: only >1 when using RunPod service
-        proposed_jobs: int = (
-            self.config.concurrent_workers
-            if (self.config.use_runpod_service and self.config.concurrent)
-            else 1
-        )
-        # Cap by number of trials to avoid oversubscribing the executor
-        n_jobs: int = min(proposed_jobs, self.config.trials)
-
-        logger.debug(
-            "running ModelOptimizer.optimize ... Optuna n_jobs=%s (concurrent=%s, workers=%s, runpod=%s, trials=%s)",
-            n_jobs, self.config.concurrent, self.config.concurrent_workers, self.config.use_runpod_service, self.config.trials
-        )
-
-        if not self.config.use_runpod_service and (
-            self.config.concurrent or self.config.concurrent_workers != 1
-        ):
-            logger.debug(
-                "running ModelOptimizer.optimize ... Local execution detected; "
-                "overriding concurrency (concurrent=%s, concurrent_workers=%s) → n_jobs=1",
-                self.config.concurrent, self.config.concurrent_workers
-            )
+        # Determine execution mode: sequential vs concurrent
+        if self.config.use_runpod_service and self.config.concurrent:
+            # RunPod mode with concurrent workers
+            n_jobs = min(self.config.concurrent_workers, self.config.trials)
+            logger.debug(f"running ModelOptimizer.optimize ... RunPod CONCURRENT mode: {n_jobs} workers for {self.config.trials} trials")
+        else:
+            # Sequential mode (either local execution or RunPod sequential)
+            n_jobs = 1
+            if self.config.use_runpod_service:
+                logger.debug(f"running ModelOptimizer.optimize ... RunPod SEQUENTIAL mode: trials will run one-by-one")
+            else:
+                logger.debug(f"running ModelOptimizer.optimize ... LOCAL SEQUENTIAL mode: trials will run locally one-by-one")
 
 
         # Run optimization
@@ -2124,10 +2353,10 @@ class ModelOptimizer:
         # Save optimization results
         self._save_results(results)
         
-        # Build final model with best hyperparameters
-        final_model_path = self._build_final_model(results)
-        if final_model_path:
-            results.best_model_path = final_model_path
+        # Final model building is handled separately via the /build_final_model endpoint
+        # This prevents redundant model building after each optimization run
+        logger.debug("running ModelOptimizer.optimize ... Skipping final model building during optimization")
+        logger.debug("running ModelOptimizer.optimize ... Final model building should be handled separately via API endpoint")
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
@@ -2230,6 +2459,11 @@ class ModelOptimizer:
             
             # Train using automatically determined execution method
             total_score = self.train(trial, params)
+
+            # Store the last model builder for plot generation data extraction
+            # This is needed for RunPod execution to access plot S3 results
+            if hasattr(self, '_current_model_builder'):
+                self._last_model_builder = self._current_model_builder
             
             # Track trial completion in progress aggregation
             if self.progress_callback:
@@ -2237,6 +2471,24 @@ class ModelOptimizer:
                 # Extract architecture information for display
                 architecture_info = self._extract_architecture_info(params)
                 
+                # Extract plot generation data if available (for RunPod execution)
+                plot_generation_data = None
+                if hasattr(self, '_last_model_builder') and self._last_model_builder:
+                    model_builder = self._last_model_builder
+                    if hasattr(model_builder, '_last_plot_s3_result') and model_builder._last_plot_s3_result:
+                        s3_result = model_builder._last_plot_s3_result
+                        plot_generation_data = {
+                            'status': 'completed',
+                            'uploaded_files': s3_result.get('uploaded_files', []),
+                            's3_prefix': s3_result.get('s3_prefix', ''),
+                            'bucket': s3_result.get('bucket', ''),
+                            'total_plots': len(s3_result.get('uploaded_files', [])),
+                            'completed_plots': len(s3_result.get('uploaded_files', [])),
+                            'current_plot': 'All plots complete',
+                            'plot_progress': 1.0
+                        }
+                        logger.debug(f"🎨 TRIAL COMPLETION - Including plot generation data with {len(plot_generation_data['uploaded_files'])} uploaded files")
+
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{trial.number}",
                     trial_number=trial.number,
@@ -2250,7 +2502,8 @@ class ModelOptimizer:
                         'total_score': total_score,
                         'accuracy': self._last_trial_accuracy
                     },
-                    health_metrics=getattr(self, '_last_trial_health_metrics', None)
+                    health_metrics=getattr(self, '_last_trial_health_metrics', None),
+                    plot_generation=plot_generation_data
                 )
                 
                 # 🔍 DEBUG: Log what's actually in the TrialProgress being sent to frontend
@@ -2414,7 +2667,11 @@ class ModelOptimizer:
             Path to the saved final model, or None if training failed
         """
         logger.debug("running _train_final_model_via_runpod_service ... Starting RunPod final model training")
-        
+
+        # Mark final model building as started
+        self._final_model_building = True
+        self._final_model_available = False
+
         try:
             api_key = os.getenv('RUNPOD_API_KEY')
             if not api_key:
@@ -2425,6 +2682,7 @@ class ModelOptimizer:
                 "input": {
                     "command": "start_final_model_training",
                     "dataset_name": self.dataset_name,
+                    "run_name": self.run_name,
                     "best_params": results.best_params,
                     "config": {
                         "mode": self.config.mode,
@@ -2479,7 +2737,14 @@ class ModelOptimizer:
                     
                     status_data = status_response.json()
                     job_status = status_data.get('status', 'UNKNOWN')
-                    
+
+                    # Extract worker ID for proxy URL construction
+                    worker_id = status_data.get('workerId', status_data.get('worker_id'))
+                    if worker_id:
+                        logger.info(f"🎯 FINAL MODEL POLLING - Worker ID: {worker_id}")
+                    else:
+                        logger.debug(f"🔍 FINAL MODEL POLLING - No worker ID found in response")
+
                     logger.debug(f"running _train_final_model_via_runpod_service ... Final model job {job_id} status: {job_status}")
                     
                     if job_status == 'COMPLETED':
@@ -2490,86 +2755,105 @@ class ModelOptimizer:
                             # Report completion progress
                             self._report_final_model_progress("Completed", 1.0)
                             
-                            # Generate final model plots if enabled
+                            # Download final model plots created directly on RunPod (new architecture)
                             if self.config.create_final_model_plots:
                                 try:
-                                    logger.debug(f"running _train_final_model_via_runpod_service ... Generating plots for final model")
-                                    model_attributes = output.get('model_attributes')
-                                    if model_attributes:
-                                        if not self.results_dir:
-                                            logger.error(f"running _train_final_model_via_runpod_service ... Results directory not set, cannot generate plots")
-                                        else:
-                                            final_model_plot_dir = self.results_dir / "plots" / "final_model"
-                                            final_model_plot_dir.mkdir(parents=True, exist_ok=True)
-                                            
-                                            run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                            
-                                            # Reconstruct objects needed for plot generation from RunPod response
-                                            model_data = output.get('model_data')
-                                            training_history = output.get('training_history')
-                                            dataset_data = output.get('dataset_data')
-                                            
-                                            if model_data and training_history and dataset_data:
-                                                # Deserialize model from bytes
-                                                import tempfile
-                                                import tensorflow as tf
-                                                import numpy as np
-                                                
-                                                with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as tmp_file:
-                                                    tmp_file.write(model_data)
-                                                    tmp_file.flush()
-                                                    model = tf.keras.models.load_model(tmp_file.name) # type: ignore
-                                                    os.unlink(tmp_file.name)  # Clean up
-                                                
-                                                # Plots will be generated by model_builder.py after training completion
-                                                logger.debug(f"running _train_final_model_via_runpod_service ... Plots will be generated by local model_builder, skipping duplicate generation")
+                                    plots_direct_info = output.get('plots_direct')
+                                    if plots_direct_info and plots_direct_info.get('success'):
+                                        logger.info(f"📊 Downloading final model plots using batch download approach...")
+                                        logger.debug(f"running _train_final_model_via_runpod_service ... Final model plots generated directly on RunPod: {plots_direct_info.get('run_name')}")
+                                        logger.debug(f"running _train_final_model_via_runpod_service ... Available plots: {len(plots_direct_info.get('available_files', []))} files")
+
+                                        # Create final model optimized_model directory for plots
+                                        if self.results_dir:
+                                            final_model_plots_dir = self.results_dir / "optimized_model"
+                                            final_model_plots_dir.mkdir(parents=True, exist_ok=True)
+
+                                            # Use same batch download approach as trial plots
+                                            api_key = os.getenv('RUNPOD_API_KEY')
+                                            if api_key and self.config.runpod_service_endpoint:
+                                                logger.info(f"🚀 Using batch directory download for final model plots")
+                                                logger.info(f"📦 Downloading final model plots to: {final_model_plots_dir}")
+
+                                                # Use the run name from the plots_direct_info
+                                                final_model_run_name = plots_direct_info.get('run_name')
+
+                                                plots_success = download_directory_via_runpod_api(
+                                                    runpod_api_url=self.config.runpod_service_endpoint,
+                                                    runpod_api_key=api_key,
+                                                    run_name=final_model_run_name,
+                                                    local_dir=str(final_model_plots_dir)
+                                                )
+
+                                                if plots_success:
+                                                    logger.info(f"✅ Final model plots downloaded successfully to: {final_model_plots_dir}")
+                                                else:
+                                                    logger.warning(f"⚠️ Failed to download final model plots via batch download")
                                             else:
-                                                logger.warning(f"running _train_final_model_via_runpod_service ... Missing required data for final model plot generation (model_data={bool(model_data)}, history={bool(training_history)}, data={bool(dataset_data)})")
+                                                logger.warning(f"❌ Missing API key or endpoint for final model plots download")
+                                        else:
+                                            logger.error(f"❌ Results directory not available for final model plots download")
                                     else:
-                                        logger.warning(f"running _train_final_model_via_runpod_service ... No model_attributes returned for final model")
+                                        logger.debug(f"running _train_final_model_via_runpod_service ... No direct plots generated for final model")
                                 except Exception as e:
-                                    logger.error(f"running _train_final_model_via_runpod_service ... Failed to generate final model plots: {e}")
+                                    logger.error(f"running _train_final_model_via_runpod_service ... Failed to download final model plots: {e}")
                             
-                            # Check for S3 upload info and download model artifacts
-                            s3_upload = output.get('s3_upload')
+                            # Check for direct download info and download model artifacts
+                            final_model_direct = output.get('final_model_direct')
                             model_path = output.get('final_model_path')
-                            
-                            if s3_upload and s3_upload.get('success'):
-                                logger.debug(f"running _train_final_model_via_runpod_service ... S3 upload successful, downloading artifacts")
-                                
-                                # Import S3 transfer utilities
-                                from utils.s3_transfer import download_from_runpod_s3, cleanup_s3_files
-                                
-                                s3_prefix = s3_upload.get('s3_prefix')
-                                if s3_prefix and self.results_dir:
+
+                            if final_model_direct and final_model_direct.get('success'):
+                                logger.debug(f"running _train_final_model_via_runpod_service ... Direct download available, downloading artifacts")
+
+                                file_path = final_model_direct.get('file_path')
+                                model_filename = final_model_direct.get('model_filename')
+
+                                if file_path and model_filename and self.results_dir:
                                     # Create local optimized_model directory
                                     local_model_dir = self.results_dir / "optimized_model"
                                     local_model_dir.mkdir(parents=True, exist_ok=True)
-                                    
-                                    # Download from S3
-                                    download_success = download_from_runpod_s3(s3_prefix, str(local_model_dir))
-                                    
+
+                                    # Download directly from RunPod worker
+                                    if not self.config.runpod_service_endpoint:
+                                        logger.error(f"❌ RunPod service endpoint not configured")
+                                        return None
+                                    if not self.run_name:
+                                        logger.error(f"❌ Run name not configured")
+                                        return None
+                                    worker_endpoint = get_runpod_worker_endpoint(self.config.runpod_service_endpoint)
+                                    download_success = download_specific_files_from_runpod_worker(
+                                        runpod_endpoint=worker_endpoint,
+                                        run_name=self.run_name,
+                                        file_list=[file_path],
+                                        local_dir=str(local_model_dir),
+                                        worker_id=worker_id
+                                    )
+
                                     if download_success:
                                         # Find the downloaded .keras model file
                                         keras_files = list(local_model_dir.rglob("*.keras"))
                                         if keras_files:
                                             local_model_path = str(keras_files[0])
                                             logger.debug(f"running _train_final_model_via_runpod_service ... Downloaded final model to: {local_model_path}")
-                                            
-                                            # Clean up S3 files after successful download
-                                            cleanup_s3_files(s3_prefix)
-                                            
+
+
+                                            # Mark final model as completed and available
+                                            self._final_model_building = False
+                                            self._final_model_available = True
                                             return local_model_path
                                         else:
-                                            logger.warning(f"running _train_final_model_via_runpod_service ... No .keras file found after S3 download")
+                                            logger.warning(f"running _train_final_model_via_runpod_service ... No .keras file found after direct download")
                                     else:
-                                        logger.error(f"running _train_final_model_via_runpod_service ... Failed to download from S3")
+                                        logger.error(f"running _train_final_model_via_runpod_service ... Failed to download via direct download")
                                 else:
-                                    logger.error(f"running _train_final_model_via_runpod_service ... Missing S3 prefix or results directory")
+                                    logger.error(f"running _train_final_model_via_runpod_service ... Missing file path/filename or results directory")
                             
                             # Fallback to original model path (remote path in container)
                             if model_path:
                                 logger.debug(f"running _train_final_model_via_runpod_service ... Final model saved at (remote): {model_path}")
+                                # Mark final model as completed and available
+                                self._final_model_building = False
+                                self._final_model_available = True
                                 return model_path
                             else:
                                 logger.warning(f"running _train_final_model_via_runpod_service ... No model path returned")
@@ -2577,7 +2861,7 @@ class ModelOptimizer:
                         else:
                             error_msg = output.get('error', 'Unknown error during final model training')
                             logger.error(f"running _train_final_model_via_runpod_service ... Final model training failed: {error_msg}")
-                            return None
+                            raise RuntimeError(f"Final model training failed: {error_msg}")
                     
                     elif job_status in ['FAILED', 'CANCELLED', 'TIMED_OUT']:
                         output = status_data.get('output', {})
@@ -2586,11 +2870,11 @@ class ModelOptimizer:
                         # Enhanced error logging for debugging
                         logger.error(f"running _train_final_model_via_runpod_service ... Final model training failed: {error_msg}")
                         logger.error(f"running _train_final_model_via_runpod_service ... Full RunPod response: {json.dumps(status_data, indent=2)}")
-                        
+
                         if 'logs' in output:
                             logger.error(f"running _train_final_model_via_runpod_service ... RunPod logs: {output['logs']}")
-                        
-                        return None
+
+                        raise RuntimeError(f"Final model training failed: {error_msg}")
                     
                     elif job_status == 'IN_PROGRESS':
                         # Extract real-time progress updates from RunPod (similar to trial progress)
@@ -2659,6 +2943,9 @@ class ModelOptimizer:
                 
         except Exception as e:
             logger.error(f"running _train_final_model_via_runpod_service ... RunPod final model training failed: {e}")
+            # Reset final model building status on failure
+            self._final_model_building = False
+            self._final_model_available = False
             if self.config.runpod_service_fallback_local:
                 logger.warning(f"running _train_final_model_via_runpod_service ... Falling back to local execution for final model")
                 return self._build_final_model_locally(results)
@@ -2667,16 +2954,20 @@ class ModelOptimizer:
     def _build_final_model(self, results: OptimizationResult) -> Optional[str]:
         """
         Build and train the final model using the best hyperparameters from optimization.
-        Always builds locally - S3 transfer handled by the container/handler.
-        
+        Routes to RunPod or local execution based on configuration.
+
         Args:
             results: Optimization results containing best hyperparameters
-            
+
         Returns:
             Path to the saved final model, or None if building failed
         """
-        logger.debug("running _build_final_model ... Building final model locally")
-        return self._build_final_model_locally(results)
+        if self.config.use_runpod_service:
+            logger.debug("running _build_final_model ... Building final model via RunPod service")
+            return self._train_final_model_via_runpod_service(results)
+        else:
+            logger.debug("running _build_final_model ... Building final model locally")
+            return self._build_final_model_locally(results)
 
     def _build_final_model_locally(self, results: OptimizationResult) -> Optional[str]:
         """
@@ -2691,16 +2982,17 @@ class ModelOptimizer:
         """
         try:
             logger.debug("running _build_final_model_locally ... Building final model locally with best hyperparameters")
-            
+
+            # Mark final model building as started
+            self._final_model_building = True
+            self._final_model_available = False
+
             # Report progress: Starting final model building
             self._report_final_model_progress("Initializing", 0.0)
-            
-            # Import here to avoid circular imports
-            from model_builder import ModelBuilder
-            
-            # Create optimized run name
-            optimized_run_name = f"optimized_{self.run_name or self.dataset_name}"
-            logger.debug(f"running _build_final_model ... Using optimized run name: {optimized_run_name}")
+                                    
+            # Use the existing run name (no prefix needed since path structure handles this)
+            optimized_run_name = self.run_name or self.dataset_name
+            logger.debug(f"running _build_final_model ... Using run name for final model: {optimized_run_name}")
             
             logger.debug(f"running _build_final_model ... Training with best params: {results.best_params}")
             
@@ -2716,10 +3008,10 @@ class ModelOptimizer:
             
             # Create ModelBuilder instance with dataset config and model config
             model_builder = ModelBuilder(
-                self.dataset_config, 
-                model_config, 
+                self.dataset_config,
+                self.run_timestamp,
+                model_config,
                 None,  # trial_number
-                None,  # run_timestamp  
                 self.results_dir,
                 self.config
             )
@@ -2731,7 +3023,6 @@ class ModelOptimizer:
             self._report_final_model_progress("Loading data", 0.10)
             
             # Load data using dataset manager
-            from dataset_manager import DatasetManager
             dataset_manager = DatasetManager()
             data = dataset_manager.load_dataset(self.dataset_name)
             
@@ -2775,6 +3066,7 @@ class ModelOptimizer:
                 epoch_progress_callback=epoch_progress_callback
             )
             test_loss, test_accuracy = model_builder.evaluate(data=data)
+            test_accuracy = round(test_accuracy, 4)
             
             # Report progress: Saving model
             self._report_final_model_progress("Saving model", 0.90)
@@ -2794,38 +3086,25 @@ class ModelOptimizer:
             if training_result and 'model_builder' in training_result:
                 model_builder = training_result['model_builder']
                 
-                # The model should be saved in the trained_models directory
-                # We need to move it to our optimization results directory
+                # Model is already saved to the correct location by ModelBuilder.save_model()
                 saved_model_path = training_result.get('model_path')
                 
                 if saved_model_path and Path(saved_model_path).exists():
-                    # Copy the model to the optimization results optimized_model directory
-                    if not self.results_dir:
-                        logger.error(f"running _build_final_model ... Results directory not set")
-                        return None
-                        
-                    optimized_model_dir = self.results_dir / "optimized_model"
-                    optimized_model_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    final_model_path = optimized_model_dir / Path(saved_model_path).name
-                    
-                    # Copy the model file
-                    import shutil
-                    shutil.copy2(saved_model_path, final_model_path)
-                    
-                    # Copy the metadata file too if it exists
-                    metadata_src = Path(saved_model_path).parent / f"{Path(saved_model_path).stem}_metadata.json"
-                    if metadata_src.exists():
-                        metadata_dst = optimized_model_dir / metadata_src.name
-                        shutil.copy2(metadata_src, metadata_dst)
-                    
-                    logger.debug(f"running _build_final_model ... Final model saved to: {final_model_path}")
+                    # Model is already saved to the correct location by ModelBuilder.save_model()
+                    # Just verify it's in the expected optimized_model directory
+                    final_model_path = Path(saved_model_path)
+
+                    logger.debug(f"running _build_final_model ... Final model available at: {final_model_path}")
                     
                     # Generate final model plots if enabled
                     if self.config.create_final_model_plots:
                         try:
                             logger.debug(f"running _build_final_model ... Generating plots for final model")
-                            final_model_plot_dir = self.results_dir / "plots" / "final_model"
+                            if self.results_dir:
+                                final_model_plot_dir = Path(self.results_dir) / "plots" / "final_model"
+                            else:
+                                logger.error("Results directory not set")
+                                raise ValueError("Results directory not set")
                             final_model_plot_dir.mkdir(parents=True, exist_ok=True)
                             
                             run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2840,17 +3119,29 @@ class ModelOptimizer:
                     
                     # Report progress: Complete
                     self._report_final_model_progress("Completed", 1.0)
-                    
+
+                    # Mark final model as completed and available
+                    self._final_model_building = False
+                    self._final_model_available = True
                     return str(final_model_path)
                 else:
                     logger.error(f"running _build_final_model ... Model training completed but no valid model path found")
+                    # Reset final model building status on failure
+                    self._final_model_building = False
+                    self._final_model_available = False
                     return None
             else:
                 logger.error(f"running _build_final_model ... Model training failed or returned invalid result")
+                # Reset final model building status on failure
+                self._final_model_building = False
+                self._final_model_available = False
                 return None
-                
+
         except Exception as e:
             logger.error(f"running _build_final_model ... Failed to build final model: {e}")
+            # Reset final model building status on failure
+            self._final_model_building = False
+            self._final_model_available = False
             return None
 
 
@@ -2960,8 +3251,7 @@ def optimize_model(
     
     # Create unified run name if not provided using centralized function
     if run_name is None:
-        from data_classes.configs import generate_unified_run_name
-        run_name = generate_unified_run_name(
+        run_name = create_run_name(
             dataset_name=opt_config.dataset_name,
             mode=opt_config.mode,
             optimize_for=opt_config.optimize_for

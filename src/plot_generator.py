@@ -186,42 +186,7 @@ class PlotGenerator:
         # Log summary
         self._log_generation_summary(analysis_results, test_loss, test_accuracy)
         
-        # Upload plots to S3 if actually running in RunPod container
-        if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
-            logger.debug("running generate_compreshensive_plots ... Detected RunPod container environment")
-            logger.debug(f"Uploading plots to S3 (RunPod environment detected)")
-            try:
-                from utils.s3_transfer import upload_to_runpod_s3
-                
-                # Upload the plot directory to S3 using same structure as local
-                # Extract the relative path from optimization_results onward
-                # Handle both RunPod container paths (/app/...) and local test paths
-                plot_dir_str = str(plot_dir)
-                if "optimization_results" in plot_dir_str:
-                    # Find the optimization_results part and extract relative path from there
-                    opt_results_index = plot_dir_str.find("optimization_results")
-                    relative_part = plot_dir_str[opt_results_index + len("optimization_results"):].lstrip("/")
-                    s3_prefix = f"optimization_results/{relative_part}" if relative_part else "optimization_results"
-                else:
-                    # Fallback: use the directory name structure
-                    s3_prefix = f"optimization_results/{plot_dir.name}"
-                s3_result = upload_to_runpod_s3(
-                    local_dir=str(plot_dir),
-                    s3_prefix=s3_prefix
-                )
-                
-                if s3_result:
-                    logger.info(f"✅ Plots uploaded to S3: s3://40ub9vhaa7/{s3_prefix}")
-                    # Store S3 info in analysis results
-                    analysis_results['plots_s3'] = s3_result
-                else:
-                    logger.warning(f"⚠️ Failed to upload plots to S3")
-                    
-            except Exception as e:
-                logger.error(f"Failed to upload plots to S3: {e}")
-        
-        else:
-            logger.debug("running generate_comprehensive_plots ... Running in local environment, skipping S3 upload")
+        # S3 upload removed - now using direct downloads
         return analysis_results
     
     def generate_confusion_matrix(

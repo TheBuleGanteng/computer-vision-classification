@@ -523,7 +523,8 @@ class TrainingHistoryAnalyzer:
         
         # Create timestamp if not provided
         if run_timestamp is None:
-            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            # run_timestamp should always be provided from optimizer.py
+            raise ValueError("run_timestamp should always be provided from optimizer.py")
         
         # Clean dataset name
         dataset_name_clean = dataset_name.replace(" ", "_").replace("(", "").replace(")", "").lower()

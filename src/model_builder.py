@@ -239,7 +239,7 @@ class ModelBuilder:
     - Better logging and performance monitoring
     """
     
-    def __init__(self, dataset_config: DatasetConfig, model_config: Optional[ModelConfig] = None, trial_number: Optional[int] = None, run_timestamp: Optional[str] = None, results_dir: Optional[Path] = None, optimization_config: Optional['OptimizationConfig'] = None) -> None:
+    def __init__(self, dataset_config: DatasetConfig, run_timestamp: str, model_config: Optional[ModelConfig] = None, trial_number: Optional[int] = None, results_dir: Optional[Path] = None, optimization_config: Optional['OptimizationConfig'] = None) -> None:
         """
         Initialize ModelBuilder with enhanced configuration and GPU proxy setup
         
@@ -254,7 +254,7 @@ class ModelBuilder:
         self.dataset_config: DatasetConfig = dataset_config
         self.model_config: ModelConfig = model_config or ModelConfig()
         self.trial_number: Optional[int] = trial_number
-        self.run_timestamp: Optional[str] = run_timestamp
+        self.run_timestamp: str = run_timestamp
         self.results_dir: Optional[Path] = results_dir
         self.optimization_config: Optional['OptimizationConfig'] = optimization_config
         self.model: Optional[keras.Model] = None
@@ -1824,11 +1824,13 @@ class ModelBuilder:
             if validation_data is not None:
                 test_data = {'x_test': validation_data[0], 'y_test': validation_data[1]}
                 test_loss, test_accuracy = self.model.evaluate(validation_data[0], validation_data[1], verbose=0)
+                test_accuracy = round(test_accuracy, 4)
             else:
                 # Use a sample from training data as test data
                 sample_size = min(1000, len(training_data[0]))
                 test_data = {'x_test': training_data[0][:sample_size], 'y_test': training_data[1][:sample_size]}
                 test_loss, test_accuracy = self.model.evaluate(test_data['x_test'], test_data['y_test'], verbose=0)
+                test_accuracy = round(test_accuracy, 4)
             
             # Use comprehensive PlotGenerator (delayed import to avoid circular dependency)
             from plot_generator import PlotGenerator
@@ -1851,7 +1853,7 @@ class ModelBuilder:
                 data=test_data,
                 test_loss=test_loss,
                 test_accuracy=test_accuracy,
-                run_timestamp=self.run_timestamp or datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
+                run_timestamp=self.run_timestamp,
                 plot_dir=plot_dir,
                 log_detailed_predictions=True,
                 max_predictions_to_show=20,
@@ -1869,6 +1871,11 @@ class ModelBuilder:
             else:
                 logger.warning("running _generate_training_plots ... No plots were generated successfully")
             
+            # Store S3 upload result for progress updates (if plots were uploaded to S3)
+            if 'plots_s3' in analysis_results:
+                self._last_plot_s3_result = analysis_results['plots_s3']
+                logger.debug(f"running _generate_training_plots ... Stored S3 result with {len(self._last_plot_s3_result.get('uploaded_files', []))} files for progress updates")
+
             logger.info(f"running _generate_training_plots ... Successfully generated training plots in: {plot_dir}")
             
         except Exception as e:
@@ -1929,11 +1936,11 @@ class ModelBuilder:
         """Extract loss and accuracy from evaluation results"""
         if isinstance(evaluation_results, list):
             test_loss = float(evaluation_results[0])
-            test_accuracy = float(evaluation_results[1]) if len(evaluation_results) > 1 else 0.0
+            test_accuracy = round(float(evaluation_results[1]), 4) if len(evaluation_results) > 1 else 0.0
         else:
             test_loss = float(evaluation_results)
             test_accuracy = 0.0
-        
+
         return test_loss, test_accuracy
     
     
@@ -2022,20 +2029,20 @@ class ModelBuilder:
         # Check if we're actually in RunPod container environment (not just endpoint configured)
         # RunPod containers have /app directory and RUNPOD_ENDPOINT_ID set
         if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
-            logger.debug("running _determine_save_directory ... Detected RunPod container environment")            
+            logger.debug("running _determine_save_directory ... Detected RunPod container environment")
             # Use /app/optimization_results structure for RunPod to match local behavior
             if run_name:
-                save_dir = Path("/app/optimization_results") / run_name / "models"
+                save_dir = Path("/app/optimization_results") / run_name / "optimized_model"
             else:
-                save_dir = Path("/app/optimization_results") / "default_run" / "models"
+                save_dir = Path("/app/optimization_results") / "default_run" / "optimized_model"
         else:
-            logger.debug("running _determine_save_directory ... running in local environment")            
-            # Local execution - use legacy paths
-            if run_name and run_name.startswith("optimized_"):
-                # For optimized runs, save to optimized_model directory
-                save_dir = project_root / "optimized_model"
+            logger.debug("running _determine_save_directory ... running in local environment")
+            # Local execution - determine if this is a final optimized model or training run
+            if run_name:
+                # For optimization runs, use optimization_results structure
+                save_dir = project_root / "optimization_results" / run_name / "optimized_model"
             else:
-                # For regular runs, save to trained_models directory
+                # For regular training runs, save to trained_models directory
                 save_dir = project_root / "trained_models"
         
         # Create directory if it doesn't exist
@@ -2092,12 +2099,11 @@ class ModelBuilder:
         
         logger.debug("running save_model ... Starting optimized model saving...")
         
-        # Create timestamp if not provided
-        if run_timestamp is None:
-            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        
+        # Use the run timestamp from optimizer if not provided
+        effective_timestamp = run_timestamp or self.run_timestamp
+
         filename = self._generate_optimized_filename(
-            run_timestamp=run_timestamp, 
+            run_timestamp=effective_timestamp, 
             test_accuracy=test_accuracy, 
             run_name=run_name
             )
@@ -2116,7 +2122,7 @@ class ModelBuilder:
             self.model.save(final_filepath)
             
             # Save additional metadata
-            self._save_model_metadata(save_dir, filename, test_accuracy, run_timestamp, run_name)
+            self._save_model_metadata(save_dir, filename, test_accuracy, effective_timestamp, run_name)
             
             logger.debug(f"running save_model ... Model saved successfully")
             # Inline model save summary logging
@@ -2135,44 +2141,7 @@ class ModelBuilder:
             else:
                 logger.debug(f"running save_model ... - File size: Unknown")
             
-            # Upload to S3 if actually running in RunPod container
-            if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
-                logger.debug("running save_model ... Detected RunPod container environment, attempting S3 upload")
-                logger.debug(f"running save_model ... Uploading model to S3 (RunPod environment detected)")
-                try:
-                    from utils.s3_transfer import upload_to_runpod_s3
-                    from pathlib import Path
-                    
-                    # Upload the model directory to S3 using same structure as local
-                    # Extract the relative path from optimization_results onward  
-                    # Handle both RunPod container paths (/app/...) and local test paths
-                    save_dir_str = str(save_dir)
-                    if "optimization_results" in save_dir_str:
-                        # Find the optimization_results part and extract relative path from there
-                        opt_results_index = save_dir_str.find("optimization_results")
-                        relative_part = save_dir_str[opt_results_index + len("optimization_results"):].lstrip("/")
-                        s3_prefix = f"optimization_results/{relative_part}" if relative_part else "optimization_results"
-                    else:
-                        # Fallback: use the directory name structure
-                        s3_prefix = f"optimization_results/{save_dir.name}"
-                    s3_result = upload_to_runpod_s3(
-                        local_dir=str(save_dir),
-                        s3_prefix=s3_prefix
-                    )
-                    
-                    if s3_result:
-                        logger.info(f"✅ Model uploaded to S3: s3://40ub9vhaa7/{s3_prefix}")
-                        # Store S3 info for later retrieval
-                        if not hasattr(self, '_s3_uploads'):
-                            self._s3_uploads = {}
-                        self._s3_uploads['model'] = s3_result
-                    else:
-                        logger.warning(f"⚠️ Failed to upload model to S3")
-                        
-                except Exception as e:
-                    logger.error(f"Failed to upload model to S3: {e}")
-            else:
-                logger.debug("running save_model ... Not in RunPod container environment, skipping S3 upload")
+            # S3 upload removed - now using direct downloads
             return str(final_filepath)
             
         except Exception as e:
@@ -2302,6 +2271,7 @@ def create_and_train_model(
     load_model_path: Optional[str] = None,
     test_size: float = 0.4,
     run_name: Optional[str] = None,
+    run_timestamp: Optional[str] = None,
     enable_performance_monitoring: bool = True,
     use_multi_gpu: bool = False,
     progress_callback: Optional[Callable] = None,
@@ -2314,13 +2284,14 @@ def create_and_train_model(
     This function now focuses purely on model building, training, and evaluation.
     """
     
-    # Enhanced timestamp generation
-    if run_name:
+    # Use provided timestamp or extract from run_name as fallback
+    if run_timestamp:
+        logger.debug(f"running create_and_train_model ... Using provided timestamp: {run_timestamp}")
+    elif run_name:
         run_timestamp = run_name.split('_')[0]
         logger.debug(f"running create_and_train_model ... Using timestamp from run_name: {run_timestamp}")
     else:
-        run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        logger.debug(f"running create_and_train_model ... Generated new timestamp: {run_timestamp}")
+        raise ValueError("Either run_timestamp or run_name must be provided")
     
     # Enhanced validation
     if data is None and dataset_name is None:
@@ -2390,7 +2361,7 @@ def _handle_model_loading_refactored(
         raise FileNotFoundError(f"Model file not found: {load_model_path}")
     
     # Create ModelBuilder with timestamp for TensorBoard logging
-    builder = ModelBuilder(dataset_config, None, None, run_timestamp)
+    builder = ModelBuilder(dataset_config, run_timestamp)
     
     with TimedOperation("model loading", "refactored_model_builder"):
         builder.model = keras.models.load_model(load_model_path)
@@ -2414,6 +2385,7 @@ def _handle_model_loading_refactored(
         'run_timestamp': run_timestamp,
         'architecture_type': architecture_type,
         'dataset_name': dataset_name_clean,
+        'test_data': {'x_test': data.get('x_test'), 'y_test': data.get('y_test')},
         'refactored': True  # Indicate this is the refactored version
     }
 
@@ -2452,7 +2424,7 @@ def _handle_model_training_refactored(
                 logger.warning(f"running _handle_model_training_refactored ... Unknown config parameter: {key}")
     
     # Create ModelBuilder with timestamp for TensorBoard logging
-    builder = ModelBuilder(dataset_config, model_config, None, run_timestamp)
+    builder = ModelBuilder(dataset_config, run_timestamp, model_config)
     
     # Training pipeline without plot generation
     with TimedOperation("refactored model training pipeline", "refactored_model_builder"):
@@ -2488,6 +2460,7 @@ def _handle_model_training_refactored(
         'run_timestamp': run_timestamp,
         'architecture_type': architecture_type,
         'dataset_name': dataset_name_clean,
+        'test_data': {'x_test': data.get('x_test'), 'y_test': data.get('y_test')},
         'refactored': True,  # Indicate this is the refactored version
         'gpu_proxy_used': builder.gpu_proxy_available and model_config.use_gpu_proxy,
         'performance_monitoring': enable_performance_monitoring

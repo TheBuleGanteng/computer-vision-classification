@@ -10,37 +10,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import os
-from datetime import datetime
 from utils.logger import logger
-
-
-def generate_unified_run_name(dataset_name: str, mode: str, optimize_for: str) -> str:
-    """
-    Generate a unified run name using consistent logic across the entire codebase.
-    
-    This function ensures that local execution, RunPod execution, and S3 storage
-    all use identical directory structures by creating the same run_name.
-    
-    Args:
-        dataset_name: Name of the dataset (e.g., 'mnist', 'cifar10')
-        mode: Optimization mode ('simple' or 'health')
-        optimize_for: Optimization objective (e.g., 'val_accuracy')
-    
-    Returns:
-        Unified run name string (e.g., '2024-01-15-14:30:22_mnist_health')
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    dataset_clean = dataset_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-    
-    if mode == 'health':
-        run_name = f"{timestamp}_{dataset_clean}_health"
-    elif mode == 'simple':
-        run_name = f"{timestamp}_{dataset_clean}_simple-{optimize_for}"
-    else:
-        run_name = f"{timestamp}_{dataset_clean}_{mode}"
-    
-    logger.debug(f"Generated unified run_name: {run_name}")
-    return run_name
 
 
 def _get_default_runpod_endpoint() -> Optional[str]:
@@ -129,9 +99,9 @@ class OptimizationConfig(BaseModel):
     health_monitoring_frequency: int = Field(1, description="Health monitoring frequency")
     max_bias_change_per_epoch: float = Field(10.0, description="Maximum bias change per epoch")
     runpod_service_endpoint: Optional[str] = Field(default_factory=_get_default_runpod_endpoint, description="RunPod service endpoint URL (auto-configured from RUNPOD_ENDPOINT_ID)")
-    runpod_service_timeout: int = Field(600, description="RunPod service timeout in seconds")
+    runpod_service_timeout: int = Field(1800, description="RunPod service timeout in seconds")  # 30 minutes for health mode
     runpod_service_fallback_local: bool = Field(True, description="Fallback to local execution if RunPod fails")
-    concurrent: bool = Field(True, description="Enable concurrent execution")
+    concurrent: bool = Field(False, description="Enable concurrent execution")
     
     # Training parameters
     batch_size: int = Field(32, description="Training batch size")
@@ -167,7 +137,7 @@ class OptimizationConfig(BaseModel):
     create_comparison_plots: bool = Field(True, description="Create comparison plots")
     plot_generation: str = Field("all", pattern="^(all|best|none)$", description="Plot generation mode")
     create_optuna_model_plots: bool = Field(True, description="Create Optuna model plots")
-    create_final_model_plots: bool = Field(False, description="Create final model plots")
+    create_final_model_plots: bool = Field(True, description="Create final model plots")
     
     # Individual plot flags - LOCAL MODEL REQUIRED
     show_activation_maps: bool = Field(True, description="Show activation maps")

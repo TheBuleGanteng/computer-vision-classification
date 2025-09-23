@@ -141,13 +141,19 @@ def setup_logging(
         # Also silence other commonly verbose libraries
         logging.getLogger('PIL').setLevel(logging.WARNING)
         logging.getLogger('fontTools').setLevel(logging.WARNING)
+
+        # Silence boto3/botocore verbose debug logs
+        logging.getLogger('boto3').setLevel(logging.WARNING)
+        logging.getLogger('botocore').setLevel(logging.WARNING)
+        logging.getLogger('botocore.httpsession').setLevel(logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
         
         # Optionally silence TensorFlow verbose logs (uncomment if needed)
         # logging.getLogger('tensorflow').setLevel(logging.ERROR)
         # logging.getLogger('tensorflow.python.platform').setLevel(logging.ERROR)
         
         setup_logger = logging.getLogger(__name__)
-        setup_logger.info("Matplotlib and PIL verbose logging silenced (WARNING level and above will still show)")
+        setup_logger.info("Third-party library verbose logging silenced: matplotlib, PIL, boto3/botocore (WARNING level and above will still show)")
     
     # Log the setup completion
     setup_logger = logging.getLogger(__name__)
@@ -155,7 +161,7 @@ def setup_logging(
     setup_logger.info(f"Log file: {log_file_path_resolved}")
     
     if silence_matplotlib:
-        setup_logger.info("Third-party library verbose logging silenced (matplotlib, PIL)")
+        setup_logger.info("Third-party library verbose logging silenced (matplotlib, PIL, boto3/botocore)")
     
     if file_handler:
         # Force a test write to ensure file logging works

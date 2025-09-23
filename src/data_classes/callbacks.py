@@ -115,6 +115,17 @@ class UnifiedProgress:
     
     # Final model building progress
     final_model_building: Optional[Dict[str, Any]] = None
+
+    # Plot generation and file upload progress
+    plot_generation: Optional[Dict[str, Any]] = None
+    downloaded_files: Optional[List[str]] = None
+    available_plots: Optional[List[str]] = None  # List of completed trials with plots
+
+    # Optuna Trials section status
+    optuna_trials_status: Optional[str] = None  # "running", "completed", "pending"
+
+    # Final Model section status
+    final_model_status: Optional[str] = None  # "pending", "running", "completed", "available"
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API serialization"""
@@ -132,7 +143,12 @@ class UnifiedProgress:
             'current_trial_id': self.current_trial_id,
             'current_trial_status': self.current_trial_status,
             'status_message': self.status_message,
-            'final_model_building': self.final_model_building
+            'final_model_building': self.final_model_building,
+            'plot_generation': self.plot_generation,
+            'downloaded_files': self.downloaded_files,
+            'available_plots': self.available_plots,
+            'optuna_trials_status': self.optuna_trials_status,
+            'final_model_status': self.final_model_status
         }
 
 
@@ -216,14 +232,22 @@ class EpochProgressCallback(keras.callbacks.Callback):
             logger.info(f"EpochProgressCallback.on_epoch_begin ... Cancellation detected, stopping training")
             self.model.stop_training = True
             return
-        
+
+        # Check if this trial is already marked as completed to avoid race conditions
+        if self.optimizer_instance and hasattr(self.optimizer_instance, '_trial_statuses'):
+            current_trial_status = self.optimizer_instance._trial_statuses.get(self.trial_number)
+            if current_trial_status in ['completed', 'failed', 'pruned']:
+                logger.debug(f"EpochProgressCallback.on_epoch_begin ... Trial {self.trial_number} already {current_trial_status}, stopping training")
+                self.model.stop_training = True
+                return
+
         self.current_epoch = epoch + 1  # Convert 0-based to 1-based
         self.current_batch = 0
-        
+
         # Try to get total batches from params
         if hasattr(self, 'params') and self.params:
             self.total_batches = self.params.get('steps', 0)
-        
+
         self._update_progress(0.0)
         logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} started")
     
@@ -234,20 +258,42 @@ class EpochProgressCallback(keras.callbacks.Callback):
             logger.info(f"EpochProgressCallback.on_batch_end ... Cancellation detected, stopping training")
             self.model.stop_training = True
             return
-        
+
+        # Check if this trial is already marked as completed to avoid race conditions
+        if self.optimizer_instance and hasattr(self.optimizer_instance, '_trial_statuses'):
+            current_trial_status = self.optimizer_instance._trial_statuses.get(self.trial_number)
+            if current_trial_status in ['completed', 'failed', 'pruned']:
+                logger.debug(f"EpochProgressCallback.on_batch_end ... Trial {self.trial_number} already {current_trial_status}, stopping training")
+                self.model.stop_training = True
+                return
+
         self.current_batch = batch + 1  # Convert 0-based to 1-based
-        
+
         if self.total_batches > 0:
             batch_progress = min(self.current_batch / self.total_batches, 1.0)
             self._update_progress(batch_progress)
     
     def on_epoch_end(self, epoch, logs=None):
         """Called at the end of each epoch"""
+        # Check if this trial is already marked as completed to avoid race conditions
+        if self.optimizer_instance and hasattr(self.optimizer_instance, '_trial_statuses'):
+            current_trial_status = self.optimizer_instance._trial_statuses.get(self.trial_number)
+            if current_trial_status in ['completed', 'failed', 'pruned']:
+                logger.debug(f"EpochProgressCallback.on_epoch_end ... Trial {self.trial_number} already {current_trial_status}, skipping epoch end update")
+                return
+
         self._update_progress(1.0)
         logger.debug(f"🔍 EPOCH PROGRESS: Trial {self.trial_number}, Epoch {self.current_epoch}/{self.total_epochs} completed")
     
     def _update_progress(self, epoch_progress: float):
         """Update epoch progress and trigger unified progress update"""
+        # Check if this trial is already marked as completed to avoid race conditions
+        if self.optimizer_instance and hasattr(self.optimizer_instance, '_trial_statuses'):
+            current_trial_status = self.optimizer_instance._trial_statuses.get(self.trial_number)
+            if current_trial_status in ['completed', 'failed', 'pruned']:
+                logger.debug(f"EpochProgressCallback._update_progress ... Trial {self.trial_number} already {current_trial_status}, skipping progress update")
+                return
+
         # Update epoch info in the optimizer
         if self.optimizer_instance and hasattr(self.optimizer_instance, '_current_epoch_info'):
             self.optimizer_instance._current_epoch_info[self.trial_number] = {
@@ -255,16 +301,23 @@ class EpochProgressCallback(keras.callbacks.Callback):
                 'total_epochs': self.total_epochs,
                 'epoch_progress': epoch_progress
             }
-            
-            # Trigger unified progress update every 10 batches or at epoch boundaries
-            if (epoch_progress == 0.0 or epoch_progress == 1.0 or 
-                (self.current_batch > 0 and self.current_batch % 10 == 0)):
+
+            # Trigger unified progress update every 3 batches or at epoch boundaries (increased frequency)
+            if (epoch_progress == 0.0 or epoch_progress == 1.0 or
+                (self.current_batch > 0 and self.current_batch % 3 == 0)):
                 self._trigger_unified_progress_update()
     
     def _trigger_unified_progress_update(self):
         """Trigger a unified progress update with current epoch information"""
         if self.optimizer_instance and hasattr(self.optimizer_instance, 'progress_callback') and self.optimizer_instance.progress_callback:
             try:
+                # Check if this trial is already marked as completed, failed, or pruned
+                # If so, don't send epoch progress updates to avoid race conditions
+                current_trial_status = self.optimizer_instance._trial_statuses.get(self.trial_number)
+                if current_trial_status in ['completed', 'failed', 'pruned']:
+                    logger.debug(f"EpochProgressCallback._trigger_unified_progress_update ... Trial {self.trial_number} already {current_trial_status}, skipping epoch update")
+                    return
+
                 # Create a mock trial progress for aggregation
                 trial_progress = TrialProgress(
                     trial_id=f"trial_{self.trial_number}",

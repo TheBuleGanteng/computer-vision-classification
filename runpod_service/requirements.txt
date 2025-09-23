@@ -8,7 +8,6 @@ seaborn
 plotly
 opencv-python
 pydantic
-fastapi
 uvicorn
 requests
 pyyaml
@@ -17,3 +16,4 @@ runpod
 kagglehub
 psutil
 boto3
+pytz
