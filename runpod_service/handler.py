@@ -831,6 +831,29 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             optimization_config=optimization_config
         )
 
+        # Save trained trial model to plots directory for later copying (similar to local approach)
+        if model_builder and hasattr(model_builder, 'model') and model_builder.model:
+            try:
+                # Create model filename similar to final model training approach
+                dataset_name = request['dataset_name']
+                model_filename = f"final_model_{dataset_name}_trial_{trial_id}.keras"
+
+                # Get plots directory path (same place where plots are saved)
+                plots_dir = Path("/tmp/plots") / trial_id
+                model_path_in_plots = plots_dir / model_filename
+
+                # Save model to plots directory so it gets downloaded with plots
+                model_builder.model.save(model_path_in_plots)
+
+                logger.info(f"running start_training ... Trial model saved: {model_path_in_plots}")
+                logger.info(f"running start_training ... Trial model will be included in plots download")
+
+            except Exception as e:
+                logger.error(f"running start_training ... Failed to save trial model: {e}")
+                # Don't fail the entire request if model saving fails
+        else:
+            logger.warning(f"running start_training ... No model found to save for trial {trial_id}")
+
         # Skip model attributes extraction - RunPod now returns only metrics
         logger.debug(f"running start_training ... Skipping model attributes extraction (metrics-only response)")
         model_attributes = None

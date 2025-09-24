@@ -33,6 +33,7 @@ import shutil
 import sys
 import tempfile
 import tensorflow as tf  # type: ignore
+from tensorflow import keras  # type: ignore
 import threading
 import time
 import traceback
@@ -80,10 +81,11 @@ _load_env_file()
 @dataclass
 class OptimizationResult:
     """Results from optimization process"""
-    
+
     # Best trial results
     best_total_score: float
     best_params: Dict[str, Any]
+    best_trial_number: Optional[int] = None
     best_model_path: Optional[str] = None
     
     # Optimization metadata
@@ -516,6 +518,7 @@ class ModelOptimizer:
             completed_trials=aggregated_progress.completed_trials,
             failed_trials=aggregated_progress.failed_trials,
             current_best_total_score=aggregated_progress.current_best_total_score,
+            current_best_total_score_trial_number=aggregated_progress.current_best_total_score_trial_number,
             current_best_accuracy=self._best_trial_accuracy,  # Track raw accuracy separately
             average_duration_per_trial=average_duration,
             estimated_time_remaining=aggregated_progress.estimated_time_remaining,
@@ -816,6 +819,7 @@ class ModelOptimizer:
                     
                     # Update the progress aggregator with current best value
                     self._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
+                    self._progress_aggregator.get_current_best_trial_number = lambda: best_trial_number
                     
                     # Create aggregated progress
                     aggregated_progress = self._progress_aggregator.aggregate_progress(
@@ -875,6 +879,7 @@ class ModelOptimizer:
             # Get current aggregated progress
             best_trial_number, best_trial_value = self.get_best_trial_info()
             self._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
+            self._progress_aggregator.get_current_best_trial_number = lambda: best_trial_number
             
             # During final model building, there's no current trial, so use the last completed trial
             last_trial_progress = None
@@ -2216,7 +2221,10 @@ class ModelOptimizer:
             # Store the raw accuracy and comprehensive health metrics for trial progress
             self._last_trial_accuracy = test_accuracy
             self._last_trial_health_metrics = comprehensive_metrics
-            
+
+            # Save trial model for potential use in final model building (replicate RunPod approach)
+            self._save_trial_model(trial.number, model_builder.model, params, test_accuracy, comprehensive_metrics)
+
             # 🔍 DEBUG: Log all health metrics being stored for frontend display
             logger.info(f"🔍 HEALTH METRICS DEBUG - Trial {trial.number}:")
             logger.info(f"  📊 Raw comprehensive_metrics keys: {list(comprehensive_metrics.keys())}")
@@ -2263,6 +2271,59 @@ class ModelOptimizer:
             logger.error(f"running _train_locally_for_trial ... Local training fallback failed for trial {trial.number}: {e}")
             raise
 
+    def _save_trial_model(self, trial_number: int, model: keras.Model, params: Dict[str, Any], test_accuracy: float, comprehensive_metrics: Dict[str, Any]) -> None:
+        """
+        Save trial model to disk for later use in final model building.
+        This replicates the RunPod approach where trial models are preserved.
+
+        Args:
+            trial_number: Optuna trial number
+            model: Trained Keras model
+            params: Hyperparameters used for this trial
+            test_accuracy: Final test accuracy
+            comprehensive_metrics: Complete health metrics
+        """
+        try:
+            # Check if results_dir is available
+            if self.results_dir is None:
+                logger.error(f"running _save_trial_model ... Results directory not set, cannot save trial {trial_number} model")
+                return
+
+            # Create trial_models directory if it doesn't exist
+            trial_models_dir = Path(self.results_dir) / "trial_models"
+            trial_models_dir.mkdir(exist_ok=True)
+
+            # Create trial-specific directory
+            trial_dir = trial_models_dir / f"trial_{trial_number:03d}"
+            trial_dir.mkdir(exist_ok=True)
+
+            # Save the model in Keras format
+            model_filename = f"trial_{trial_number:03d}_acc_{test_accuracy:.4f}_model.keras"
+            model_path = trial_dir / model_filename
+            model.save(str(model_path))
+
+            # Save metadata about this trial
+            metadata = {
+                "trial_number": trial_number,
+                "model_filename": model_filename,
+                "test_accuracy": test_accuracy,
+                "hyperparameters": params,
+                "comprehensive_metrics": comprehensive_metrics,
+                "timestamp": datetime.now().isoformat(),
+                "run_name": self.run_name
+            }
+
+            metadata_path = trial_dir / f"trial_{trial_number:03d}_metadata.json"
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2, default=str)
+
+            logger.debug(f"running _save_trial_model ... Trial {trial_number}: Model saved to {model_path}")
+            logger.debug(f"running _save_trial_model ... Trial {trial_number}: Metadata saved to {metadata_path}")
+
+        except Exception as e:
+            logger.error(f"running _save_trial_model ... Failed to save trial {trial_number} model: {e}")
+            # Don't raise - this should not interrupt optimization
+
     def optimize(self) -> OptimizationResult:
         """
         Run optimization study to find best hyperparameters
@@ -2303,6 +2364,7 @@ class ModelOptimizer:
                 completed_trials=[],
                 failed_trials=[],
                 current_best_total_score=None,
+                current_best_total_score_trial_number=None,
                 current_best_accuracy=None,
                 average_duration_per_trial=None,
                 estimated_time_remaining=None,
@@ -2353,10 +2415,22 @@ class ModelOptimizer:
         # Save optimization results
         self._save_results(results)
         
-        # Final model building is handled separately via the /build_final_model endpoint
-        # This prevents redundant model building after each optimization run
-        logger.debug("running ModelOptimizer.optimize ... Skipping final model building during optimization")
-        logger.debug("running ModelOptimizer.optimize ... Final model building should be handled separately via API endpoint")
+        # Check if automatic final model building is enabled
+        if self.config.save_best_model:
+            logger.debug("running ModelOptimizer.optimize ... save_best_model=True, building final model automatically")
+            try:
+                final_model_path = self._build_final_model(results)
+                if final_model_path:
+                    logger.info(f"✅ Final model built and saved automatically to: {final_model_path}")
+                    results.best_model_path = final_model_path
+                else:
+                    logger.warning("⚠️ Final model building completed but no model path returned")
+            except Exception as e:
+                logger.error(f"❌ Automatic final model building failed: {e}")
+                logger.error("💡 Final model can still be built manually via /build_final_model endpoint")
+        else:
+            logger.debug("running ModelOptimizer.optimize ... save_best_model=False, skipping automatic final model building")
+            logger.debug("running ModelOptimizer.optimize ... Final model can be built manually via /build_final_model endpoint")
         
         logger.debug(f"running ModelOptimizer.optimize ... Optimization completed successfully")
         
@@ -2567,6 +2641,7 @@ class ModelOptimizer:
             return OptimizationResult(
                 best_total_score=0.0,
                 best_params={},
+                best_trial_number=None,  # No successful trials
                 total_trials=len(self.study.trials),
                 successful_trials=0,
                 optimization_time_hours=optimization_time / 3600,
@@ -2599,6 +2674,7 @@ class ModelOptimizer:
         return OptimizationResult(
             best_total_score=self.study.best_value,
             best_params=best_params,
+            best_trial_number=self.study.best_trial.number,
             total_trials=len(self.study.trials),
             successful_trials=len(completed_trials),
             optimization_time_hours=optimization_time / 3600,
@@ -2951,6 +3027,97 @@ class ModelOptimizer:
                 return self._build_final_model_locally(results)
             raise RuntimeError(f"RunPod final model training failed: {e}")
 
+    def _build_final_model_via_runpod_copy(self, results: OptimizationResult) -> Optional[str]:
+        """
+        Build final model for RunPod by copying the best trial model and plots.
+        This matches the improved local approach - no retraining, just copy the best existing model.
+
+        Args:
+            results: Optimization results containing best trial information
+
+        Returns:
+            Path to the saved final model, or None if copying failed
+        """
+        logger.debug("running _build_final_model_via_runpod_copy ... Building final model by copying best trial")
+
+        if not self.results_dir:
+            logger.error("running _build_final_model_via_runpod_copy ... Results directory not set")
+            raise RuntimeError("Results directory not set")
+
+        best_trial_number = results.best_trial_number
+        if best_trial_number is None:
+            logger.error("running _build_final_model_via_runpod_copy ... Best trial number not available")
+            raise RuntimeError("Best trial number not available in optimization results")
+
+        logger.info(f"running _build_final_model_via_runpod_copy ... Copying model and plots from best trial: {best_trial_number}")
+
+        # Create optimized_model directory
+        optimized_model_dir = Path(self.results_dir) / "optimized_model"
+        optimized_model_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find best trial's plots directory (where RunPod downloads include both plots and models)
+        trial_plots_dir = Path(self.results_dir) / "plots" / f"trial_{best_trial_number}"
+
+        if not trial_plots_dir.exists():
+            logger.error(f"running _build_final_model_via_runpod_copy ... Best trial plots directory not found: {trial_plots_dir}")
+            raise FileNotFoundError(f"Best trial plots directory not found: {trial_plots_dir}")
+
+        logger.info(f"running _build_final_model_via_runpod_copy ... Found best trial directory: {trial_plots_dir}")
+
+        # Find the Keras model file in the trial directory
+        keras_model_files = list(trial_plots_dir.glob("*.keras"))
+        if not keras_model_files:
+            logger.error(f"running _build_final_model_via_runpod_copy ... No Keras model found in trial directory: {trial_plots_dir}")
+            raise FileNotFoundError(f"No Keras model found in best trial directory")
+
+        source_model_path = keras_model_files[0]  # Take the first one
+        logger.info(f"running _build_final_model_via_runpod_copy ... Found source model: {source_model_path}")
+
+        # Copy model to optimized_model directory
+        model_filename = f"final_model_{self.dataset_config.name}.keras"
+        final_model_path = optimized_model_dir / model_filename
+
+        try:
+            import shutil
+            shutil.copy2(source_model_path, final_model_path)
+            logger.info(f"running _build_final_model_via_runpod_copy ... Model copied to: {final_model_path}")
+
+            # Copy all plots from trial directory to optimized_model directory
+            plots_copied = 0
+            for plot_file in trial_plots_dir.glob("*"):
+                if plot_file.is_file() and plot_file.suffix.lower() in ['.png', '.jpg', '.jpeg', '.svg', '.pdf']:
+                    dest_file = optimized_model_dir / plot_file.name
+                    shutil.copy2(plot_file, dest_file)
+                    plots_copied += 1
+
+            logger.info(f"running _build_final_model_via_runpod_copy ... Copied {plots_copied} plot files to optimized_model directory")
+
+            # Create metadata file with final model info
+            metadata = {
+                "model_path": str(final_model_path),
+                "source_trial": best_trial_number,
+                "best_total_score": results.best_total_score,
+                "dataset_name": self.dataset_config.name,
+                "optimization_mode": str(self.config.mode),
+                "optimize_for": str(self.config.optimize_for),
+                "trials": results.total_trials,
+                "training_completed_at": datetime.now().isoformat(),
+                "approach": "copy_best_trial_runpod"
+            }
+
+            metadata_file = optimized_model_dir / "optimization_metadata.json"
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            logger.info(f"running _build_final_model_via_runpod_copy ... Created metadata file: {metadata_file}")
+            logger.info(f"running _build_final_model_via_runpod_copy ... ✅ Final model built successfully by copying from trial {best_trial_number}")
+
+            return str(final_model_path)
+
+        except Exception as e:
+            logger.error(f"running _build_final_model_via_runpod_copy ... Failed to copy model and plots: {e}")
+            raise RuntimeError(f"Failed to copy best trial model and plots: {e}")
+
     def _build_final_model(self, results: OptimizationResult) -> Optional[str]:
         """
         Build and train the final model using the best hyperparameters from optimization.
@@ -2963,25 +3130,25 @@ class ModelOptimizer:
             Path to the saved final model, or None if building failed
         """
         if self.config.use_runpod_service:
-            logger.debug("running _build_final_model ... Building final model via RunPod service")
-            return self._train_final_model_via_runpod_service(results)
+            logger.debug("running _build_final_model ... Building final model via RunPod copy approach")
+            return self._build_final_model_via_runpod_copy(results)
         else:
             logger.debug("running _build_final_model ... Building final model locally")
             return self._build_final_model_locally(results)
 
     def _build_final_model_locally(self, results: OptimizationResult) -> Optional[str]:
         """
-        Build and train the final model locally using the best hyperparameters from optimization.
-        Uses the existing ModelBuilder functionality and saves to the correct optimization results directory.
-        
+        Build final model locally by copying the best trial model.
+        This matches the RunPod approach - no retraining, just copy the best existing model.
+
         Args:
-            results: Optimization results containing best hyperparameters
-            
+            results: Optimization results containing best trial information
+
         Returns:
             Path to the saved final model, or None if building failed
         """
         try:
-            logger.debug("running _build_final_model_locally ... Building final model locally with best hyperparameters")
+            logger.debug("running _build_final_model_locally ... Building final model by copying best trial model")
 
             # Mark final model building as started
             self._final_model_building = True
@@ -2989,156 +3156,239 @@ class ModelOptimizer:
 
             # Report progress: Starting final model building
             self._report_final_model_progress("Initializing", 0.0)
-                                    
-            # Use the existing run name (no prefix needed since path structure handles this)
-            optimized_run_name = self.run_name or self.dataset_name
-            logger.debug(f"running _build_final_model ... Using run name for final model: {optimized_run_name}")
-            
-            logger.debug(f"running _build_final_model ... Training with best params: {results.best_params}")
-            
-            # Create ModelConfig from best hyperparameters
-            model_config = ModelConfig()
-            for param_name, param_value in results.best_params.items():
-                if hasattr(model_config, param_name):
-                    setattr(model_config, param_name, param_value)
-                    logger.debug(f"running _build_final_model ... Set {param_name} = {param_value}")
-            
-            # Report progress: Creating model builder
-            self._report_final_model_progress("Creating model", 0.05)
-            
-            # Create ModelBuilder instance with dataset config and model config
-            model_builder = ModelBuilder(
-                self.dataset_config,
-                self.run_timestamp,
-                model_config,
-                None,  # trial_number
-                self.results_dir,
-                self.config
-            )
-            
-            # Build, train, and evaluate the model
-            model_builder.build_model()
-            
-            # Report progress: Loading data
-            self._report_final_model_progress("Loading data", 0.10)
-            
-            # Load data using dataset manager
-            dataset_manager = DatasetManager()
-            data = dataset_manager.load_dataset(self.dataset_name)
-            
-            # Get number of epochs from model config for progress tracking
-            total_epochs = getattr(model_config, 'epochs', 5)
-            
-            # Create callbacks for epoch and plot progress tracking
-            def epoch_progress_callback(current_epoch: int, epoch_progress: float):
-                # Training takes 15% to 75% of total progress (60% total)
-                # Each epoch gets equal portion of that 60%
-                epoch_contribution = 0.60 / total_epochs
-                base_progress = 0.15 + ((current_epoch - 1) * epoch_contribution)
-                current_epoch_progress = base_progress + (epoch_progress * epoch_contribution)
-                
-                step_name = f"Training epoch {current_epoch}/{total_epochs}"
-                if epoch_progress < 1.0:
-                    detailed_info = f"{epoch_progress:.1%} complete"
-                else:
-                    detailed_info = "completed"
-                    
-                self._report_final_model_progress(step_name, current_epoch_progress, detailed_info)
-            
-            def plot_progress_callback(current_plot_name: str, completed_plots: int, total_plots: int, plot_progress: float):
-                # Plot generation takes 75% to 90% of total progress (15% total)
-                base_progress = 0.75
-                plot_contribution = 0.15 * plot_progress
-                total_progress = base_progress + plot_contribution
-                
-                step_name = f"Generating plots ({completed_plots}/{total_plots})"
-                detailed_info = current_plot_name
-                
-                self._report_final_model_progress(step_name, total_progress, detailed_info)
-            
-            # Report progress: Starting training
-            self._report_final_model_progress(f"Training epoch 1/{total_epochs}", 0.15, "starting")
-            
-            # Train with progress callbacks
-            model_builder.train(
-                data=data,
-                plot_progress_callback=plot_progress_callback,
-                epoch_progress_callback=epoch_progress_callback
-            )
-            test_loss, test_accuracy = model_builder.evaluate(data=data)
-            test_accuracy = round(test_accuracy, 4)
-            
-            # Report progress: Saving model
-            self._report_final_model_progress("Saving model", 0.90)
-            
-            # Save the model
-            model_path = model_builder.save_model(
-                test_accuracy=test_accuracy,
-                run_name=optimized_run_name
-            )
-            
-            training_result = {
-                'model_builder': model_builder,
-                'model_path': model_path
-            }
-            
-            # Get the model path from the training result
-            if training_result and 'model_builder' in training_result:
-                model_builder = training_result['model_builder']
-                
-                # Model is already saved to the correct location by ModelBuilder.save_model()
-                saved_model_path = training_result.get('model_path')
-                
-                if saved_model_path and Path(saved_model_path).exists():
-                    # Model is already saved to the correct location by ModelBuilder.save_model()
-                    # Just verify it's in the expected optimized_model directory
-                    final_model_path = Path(saved_model_path)
 
-                    logger.debug(f"running _build_final_model ... Final model available at: {final_model_path}")
-                    
-                    # Generate final model plots if enabled
-                    if self.config.create_final_model_plots:
-                        try:
-                            logger.debug(f"running _build_final_model ... Generating plots for final model")
-                            if self.results_dir:
-                                final_model_plot_dir = Path(self.results_dir) / "plots" / "final_model"
-                            else:
-                                logger.error("Results directory not set")
-                                raise ValueError("Results directory not set")
-                            final_model_plot_dir.mkdir(parents=True, exist_ok=True)
-                            
-                            run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            
-                            # Use the model_builder to get the necessary data for plotting
-                            # Note: This assumes the training data is accessible
-                            # TODO: May need to reload training data for final model plotting
-                            logger.warning(f"running _build_final_model ... Final model plot generation not fully implemented - needs training data access")
-                            
-                        except Exception as e:
-                            logger.error(f"running _build_final_model ... Failed to generate final model plots: {e}")
-                    
-                    # Report progress: Complete
-                    self._report_final_model_progress("Completed", 1.0)
+            # Find the best trial model from the saved trial models
+            self._report_final_model_progress("Finding best trial model", 0.10)
 
-                    # Mark final model as completed and available
-                    self._final_model_building = False
-                    self._final_model_available = True
-                    return str(final_model_path)
-                else:
-                    logger.error(f"running _build_final_model ... Model training completed but no valid model path found")
-                    # Reset final model building status on failure
-                    self._final_model_building = False
-                    self._final_model_available = False
-                    return None
+            # Check if results_dir is available
+            if self.results_dir is None:
+                logger.error("running _build_final_model_locally ... Results directory not set")
+                raise RuntimeError("Results directory not set")
+
+            trial_models_dir = Path(self.results_dir) / "trial_models"
+            if not trial_models_dir.exists():
+                logger.error(f"running _build_final_model_locally ... Trial models directory not found: {trial_models_dir}")
+                raise FileNotFoundError("No trial models were saved during optimization")
+
+            # Get the best trial number from results
+            best_trial_number = getattr(results, 'best_trial_number', None)
+            if best_trial_number is None:
+                logger.warning("running _build_final_model_locally ... Best trial number not found in results, will search by accuracy")
             else:
-                logger.error(f"running _build_final_model ... Model training failed or returned invalid result")
-                # Reset final model building status on failure
-                self._final_model_building = False
-                self._final_model_available = False
-                return None
+                logger.debug(f"running _build_final_model_locally ... from results, best_trial_number is: {best_trial_number}")
+
+            # Find the best trial model directory
+            best_trial_dir: Optional[Path] = None
+            best_model_path: Optional[Path] = None
+
+            if best_trial_number is not None:
+                # Try to find the specific trial directory
+                trial_dir = trial_models_dir / f"trial_{best_trial_number:03d}"
+                if trial_dir.exists():
+                    best_trial_dir = trial_dir
+                    logger.debug(f"running _build_final_model_locally ... Found best trial directory: {best_trial_dir}")
+                else:
+                    logger.warning(f"running _build_final_model_locally ... Best trial directory not found: {trial_dir}")
+
+            if best_trial_dir is None:
+                # Fallback: find the trial with highest accuracy from all metadata files
+                logger.debug("running _build_final_model_locally ... Searching for best trial by accuracy")
+                best_accuracy = -1.0
+
+                for trial_dir in trial_models_dir.iterdir():
+                    if not trial_dir.is_dir() or not trial_dir.name.startswith("trial_"):
+                        continue
+
+                    metadata_files = list(trial_dir.glob("trial_*_metadata.json"))
+                    if not metadata_files:
+                        continue
+
+                    try:
+                        with open(metadata_files[0], 'r') as f:
+                            metadata = json.load(f)
+
+                        trial_accuracy = metadata.get('test_accuracy', 0.0)
+                        if trial_accuracy > best_accuracy:
+                            best_accuracy = trial_accuracy
+                            best_trial_dir = trial_dir
+                            logger.debug(f"running _build_final_model_locally ... New best trial found: {trial_dir.name} (accuracy: {trial_accuracy:.4f})")
+                    except Exception as e:
+                        logger.warning(f"running _build_final_model_locally ... Failed to read metadata from {metadata_files[0]}: {e}")
+
+            if best_trial_dir is None:
+                logger.error("running _build_final_model_locally ... No valid trial models found")
+                raise FileNotFoundError("No valid trial models found")
+
+            # Find the model file in the best trial directory
+            self._report_final_model_progress("Locating best model file", 0.20)
+
+            # Type assertion: best_trial_dir is guaranteed to be non-None at this point
+            assert best_trial_dir is not None
+            model_files = list(best_trial_dir.glob("*.keras"))
+            if not model_files:
+                logger.error(f"running _build_final_model_locally ... No Keras model files found in {best_trial_dir}")
+                raise FileNotFoundError("No Keras model files found in best trial directory")
+
+            best_model_path = model_files[0]  # Take the first (should be only one)
+            logger.debug(f"running _build_final_model_locally ... Found best model: {best_model_path}")
+
+            # Load the metadata to get accuracy and other info
+            metadata_files = list(best_trial_dir.glob("trial_*_metadata.json"))
+            metadata: Dict[str, Any] = {}  # Initialize metadata as empty dict
+            if metadata_files:
+                with open(metadata_files[0], 'r') as f:
+                    metadata = json.load(f)
+                test_accuracy = metadata.get('test_accuracy', 0.0)
+                logger.debug(f"running _build_final_model_locally ... Best model accuracy: {test_accuracy:.4f}")
+            else:
+                logger.warning("running _build_final_model_locally ... No metadata found, using default accuracy")
+                test_accuracy = 0.0
+
+            # Create optimized_model directory
+            self._report_final_model_progress("Preparing final model directory", 0.30)
+
+            # Type assertion: self.results_dir is guaranteed to be non-None at this point
+            assert self.results_dir is not None
+            optimized_model_dir = Path(self.results_dir) / "optimized_model"
+            optimized_model_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate final model filename
+            if self.run_name:
+                optimized_run_name = self.run_name
+            else:
+                # self.results_dir is guaranteed to be non-None at this point
+                optimized_run_name = self.results_dir.name
+
+            final_model_filename = f"{optimized_run_name}_acc_{test_accuracy:.4f}_model.keras"
+            final_model_path = optimized_model_dir / final_model_filename
+
+            # Copy the best model to optimized_model directory
+            self._report_final_model_progress("Copying best model", 0.50)
+
+            shutil.copy2(best_model_path, final_model_path)
+
+            logger.debug(f"running _build_final_model_locally ... Model copied from {best_model_path} to {final_model_path}")
+
+            # Create model metadata for the final model
+            self._report_final_model_progress("Creating model metadata", 0.70)
+
+            final_metadata = {
+                "filename": final_model_filename,
+                "timestamp": self.run_timestamp,
+                "run_name": optimized_run_name,
+                "test_accuracy": test_accuracy,
+                "dataset_name": self.dataset_config.name,
+                "model_config": {
+                    "epochs": results.best_params.get('epochs', 5),
+                    "architecture_type": "image",  # Hardcoded for now, could be dynamic
+                    "num_classes": self.dataset_config.num_classes,
+                    "input_shape": list(self.dataset_config.input_shape)
+                },
+                "source_trial": {
+                    "trial_number": metadata.get('trial_number', 0),
+                    "source_model_path": str(best_model_path)
+                }
+            }
+
+            metadata_filename = f"{optimized_run_name}_acc_{test_accuracy:.4f}_model_metadata.json"
+            metadata_path = optimized_model_dir / metadata_filename
+
+            with open(metadata_path, 'w') as f:
+                json.dump(final_metadata, f, indent=2)
+
+            logger.debug(f"running _build_final_model_locally ... Metadata saved to {metadata_path}")
+
+            # Create best_hyperparameters.yaml file for consistency
+            self._report_final_model_progress("Creating hyperparameters file", 0.80)
+
+            hyperparams_data = {
+                'dataset': self.dataset_name,
+                'optimization_mode': self.config.mode,
+                'objective': str(self.config.objective),
+                'health_weight': getattr(self.config, 'health_weight', None),
+                'best_total_score': results.best_total_score,
+                'hyperparameters': results.best_params,
+                'execution_method': 'local'
+            }
+
+            hyperparams_path = optimized_model_dir / "best_hyperparameters.yaml"
+            with open(hyperparams_path, 'w') as f:
+                yaml.dump(hyperparams_data, f, default_flow_style=False)
+
+            logger.debug(f"running _build_final_model_locally ... Hyperparameters saved to {hyperparams_path}")
+
+            # Copy plots from best trial to optimized_model directory
+            self._report_final_model_progress("Copying best trial plots", 0.85)
+
+            if best_trial_number is not None:
+                try:
+                    # Find trial plots directory
+                    trial_plots_dir = Path(self.results_dir) / "plots" / f"trial_{best_trial_number}"
+
+                    if trial_plots_dir.exists():
+                        # Copy all plots from trial directory to optimized_model directory
+                        plot_files_copied = 0
+                        for plot_file in trial_plots_dir.glob("*"):
+                            if plot_file.is_file():
+                                dest_file = optimized_model_dir / plot_file.name
+                                shutil.copy2(plot_file, dest_file)
+                                plot_files_copied += 1
+                                logger.debug(f"running _build_final_model_locally ... Copied plot: {plot_file.name}")
+
+                        logger.info(f"running _build_final_model_locally ... ✅ Copied {plot_files_copied} plots from trial {best_trial_number}")
+                    else:
+                        logger.warning(f"running _build_final_model_locally ... Trial plots directory not found: {trial_plots_dir}")
+
+                except Exception as e:
+                    logger.warning(f"running _build_final_model_locally ... Failed to copy trial plots: {e}")
+                    # Don't fail the entire operation if plot copying fails
+            else:
+                # Fallback: try to get trial number from metadata if we found trial by accuracy search
+                trial_number_from_metadata = metadata.get('trial_number', None)
+                if trial_number_from_metadata is not None:
+                    try:
+                        trial_plots_dir = Path(self.results_dir) / "plots" / f"trial_{trial_number_from_metadata}"
+                        if trial_plots_dir.exists():
+                            plot_files_copied = 0
+                            for plot_file in trial_plots_dir.glob("*"):
+                                if plot_file.is_file():
+                                    dest_file = optimized_model_dir / plot_file.name
+                                    shutil.copy2(plot_file, dest_file)
+                                    plot_files_copied += 1
+                                    logger.debug(f"running _build_final_model_locally ... Copied plot: {plot_file.name}")
+
+                            logger.info(f"running _build_final_model_locally ... ✅ Copied {plot_files_copied} plots from trial {trial_number_from_metadata} (found by accuracy search)")
+                        else:
+                            logger.warning(f"running _build_final_model_locally ... Trial plots directory not found: {trial_plots_dir}")
+                    except Exception as e:
+                        logger.warning(f"running _build_final_model_locally ... Failed to copy trial plots from metadata: {e}")
+                else:
+                    logger.debug("running _build_final_model_locally ... No trial number available from metadata either")
+
+            # Verify final model file exists and is valid
+            self._report_final_model_progress("Verifying final model", 0.90)
+
+            if final_model_path.exists():
+                file_size_mb = final_model_path.stat().st_size / (1024*1024)
+                logger.debug(f"running _build_final_model_locally ... ✅ Final model confirmed at: {final_model_path} ({file_size_mb:.1f} MB)")
+            else:
+                logger.error(f"running _build_final_model_locally ... ❌ Final model file does not exist after copying: {final_model_path}")
+                raise FileNotFoundError("Final model file does not exist after copying")
+
+            # Report progress: Complete
+            self._report_final_model_progress("Completed", 1.0)
+
+            # Mark final model as completed and available
+            self._final_model_building = False
+            self._final_model_available = True
+
+            logger.info(f"running _build_final_model_locally ... ✅ Final model successfully built by copying best trial model")
+            logger.info(f"running _build_final_model_locally ... Final model path: {final_model_path}")
+
+            return str(final_model_path)
 
         except Exception as e:
-            logger.error(f"running _build_final_model ... Failed to build final model: {e}")
+            logger.error(f"running _build_final_model_locally ... Failed to build final model: {e}")
             # Reset final model building status on failure
             self._final_model_building = False
             self._final_model_available = False

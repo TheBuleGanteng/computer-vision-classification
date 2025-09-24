@@ -37,6 +37,7 @@ import time
 import traceback
 from typing import Dict, Any, List, Optional, Union
 import uuid
+from streamlit import progress
 import uvicorn
 import zipfile
 
@@ -47,6 +48,7 @@ from dataset_manager import DatasetManager
 from model_visualizer import create_model_visualizer
 from optimizer import optimize_model, ModelOptimizer, OptimizationResult
 from utils.logger import logger
+from utils.clear_logs import clear_logs_directory
 # S3 imports removed - using direct downloads from RunPod workers
 
 
@@ -890,6 +892,7 @@ class OptimizationJob:
                 "completed_trials": completed_count,
                 "success_rate": completed_count / total_trials if total_trials > 0 else 0.0,
                 "best_total_score": round(unified_progress.current_best_total_score, 4) if unified_progress.current_best_total_score is not None else None,
+                "best_total_score_trial_number": unified_progress.current_best_total_score_trial_number if unified_progress.current_best_total_score_trial_number is not None else None,
                 "best_accuracy": round(unified_progress.current_best_accuracy, 4) if unified_progress.current_best_accuracy is not None else None,
                 "trials_performed": completed_count,
                 "average_duration_per_trial": unified_progress.average_duration_per_trial,
@@ -915,12 +918,11 @@ class OptimizationJob:
             # 🔍 UNIFIED PROGRESS DEBUG: Log all data being sent to UI
             logger.info(f"🚀 running _handle_unified_progress ... UNIFIED PROGRESS UPDATE:")
             logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
-            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')}")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')} from trial: {progress_update.get('best_total_score_trial_number', 'None')}")
             logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
             logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
             logger.info(f"  ⏱️ Epoch Info:")
-            logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')}")
-            logger.info(f"    - Total Epochs: {progress_update.get('total_epochs', 'None')}")
+            logger.info(f"    - Current Epoch: {progress_update.get('current_epoch', 'None')} / {progress_update.get('total_epochs', 'None')}")
             logger.info(f"    - Epoch Progress: {progress_update.get('epoch_progress', 'None')}")
             logger.info(f"  🏗️ Final Model Building:")
             logger.info(f"    - Status: {progress_update.get('final_model_building', {}).get('status', 'None')}")
@@ -1040,7 +1042,7 @@ class OptimizationJob:
             # 🔍 COMPREHENSIVE DEBUG: Log all progress data being sent to UI
             logger.info(f"🔍 FULL PROGRESS UPDATE DEBUG:")
             logger.info(f"  📊 Trial Info: {current_trial}/{total_trials} trials (completed: {completed_count}, running: {running_count}, failed: {failed_count})")
-            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')}")
+            logger.info(f"  📊 Best Score: {progress_update.get('best_total_score', 'None')} from trial: {progress_update.get('best_total_score_trial_number', 'None')}")
             logger.info(f"  📊 Elapsed Time: {progress_update.get('elapsed_time', 'None')}s")
             logger.info(f"  📊 Status Message: {progress_update.get('status_message', 'None')}")
             logger.info(f"  📊 Epoch Info:")
@@ -1303,7 +1305,14 @@ class OptimizationJob:
                     logger.error(f"❌ Final model failed: {final_model_error}")
             else:
                 logger.warning(f"⚠️ No final model status found in result")
-            
+
+            # Mark job as completed
+            self.status = JobStatus.COMPLETED
+            self.completed_at = datetime.now().isoformat()
+            logger.info(f"🎉 OPTIMIZATION COMPLETE: Job {self.job_id} finished successfully")
+            logger.info(f"🏆 Best score achieved: {getattr(result, 'best_total_score', 'N/A')}")
+            logger.info(f"⏱️ Total optimization time: {datetime.now().isoformat()}")
+
         except Exception as e:
             # Handle any optimization errors
             self.error = str(e)
@@ -3646,6 +3655,10 @@ if __name__ == "__main__":
     For production deployment, use:
     uvicorn api_server:app --host 0.0.0.0 --port 8000
     """
+    # Clear logs directory on startup
+    print("Clearing logs directory on server startup...")
+    clear_logs_directory()
+
     # Ensure logging is set up before server starts
     logger.info("FastAPI server starting - all logs will be written to logs/non-cron.log")
     logger.debug("running api_server.__main__ ... Starting FastAPI development server")

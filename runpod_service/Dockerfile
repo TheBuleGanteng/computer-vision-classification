@@ -27,7 +27,7 @@ COPY datasets/ /app/datasets/
 
 # Copy handler and service files
 COPY runpod_service/handler.py /app/
-COPY runpod_service/deploy.sh /app/
+COPY runpod_service/deploy_simple.sh /app/
 
 # Create logs directory for consistency with main project
 RUN mkdir -p /app/logs

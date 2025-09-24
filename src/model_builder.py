@@ -673,7 +673,7 @@ class ModelBuilder:
         """
         Enhanced training with optimized GPU proxy execution
         """
-        # For multi-GPU, model building happens inside _train_locally_optimized
+        # For multi-GPU, model building happens inside _train_locally
         # For single-GPU, build model here if not already built
         if not use_multi_gpu and self.model is None:
             logger.debug("running train ... No model found, building model first...")
@@ -683,7 +683,7 @@ class ModelBuilder:
         
         # Execute local training
         logger.debug("running train ... Using local training execution")
-        return self._train_locally_optimized(data, validation_split, use_multi_gpu, plot_progress_callback, epoch_progress_callback, create_plots)
+        return self._train_locally(data, validation_split, use_multi_gpu, plot_progress_callback, epoch_progress_callback, create_plots)
     
     
     def _should_use_gpu_proxy(self) -> bool:
@@ -1479,7 +1479,7 @@ class ModelBuilder:
         
         return max(1000, int(total_params))  # Minimum of 1000 parameters
     
-    def _train_locally_optimized(
+    def _train_locally(
         self, 
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
@@ -1489,9 +1489,9 @@ class ModelBuilder:
         create_plots: bool = True
     ) -> keras.callbacks.History:
         """
-        Optimized local training execution with PROPER multi-GPU implementation
+        Local training execution with multi-GPU support when available, falls back to CPU when no GPU detected
         """
-        logger.debug("running _train_locally_optimized ... Starting optimized local training")
+        logger.debug("running _train_locally ... Starting optimized local training")
         
         # Log performance information
         self.perf_logger.log_data_info(
@@ -1541,16 +1541,16 @@ class ModelBuilder:
             self._is_model_suitable_for_multi_gpu()
         )
         
-        logger.debug(f"running _train_locally_optimized ... Available GPUs: {len(available_gpus)}")
-        logger.debug(f"running _train_locally_optimized ... Multi-GPU requested: {use_multi_gpu}")
-        logger.debug(f"running _train_locally_optimized ... Will use multi-GPU: {should_use_multi_gpu}")
+        logger.debug(f"running _train_locally ... Available GPUs: {len(available_gpus)}")
+        logger.debug(f"running _train_locally ... Multi-GPU requested: {use_multi_gpu}")
+        logger.debug(f"running _train_locally ... Will use multi-GPU: {should_use_multi_gpu}")
         
         # Apply manual validation split for consistency
         validation_split_value = validation_split or self.model_config.validation_split
-        logger.debug(f"running _train_locally_optimized ... validation_split_value: {validation_split_value}")
+        logger.debug(f"running _train_locally ... validation_split_value: {validation_split_value}")
         
         if validation_split_value > 0:
-            logger.debug("running _train_locally_optimized ... Applying manual validation split")
+            logger.debug("running _train_locally ... Applying manual validation split")
             
             x_train = data['x_train']
             y_train = data['y_train']
@@ -1561,39 +1561,39 @@ class ModelBuilder:
             x_val_manual = x_train[split_idx:]
             y_val_manual = y_train[split_idx:]
             
-            logger.debug(f"running _train_locally_optimized ... Training samples: {len(x_train_manual)}")
-            logger.debug(f"running _train_locally_optimized ... Validation samples: {len(x_val_manual)}")
+            logger.debug(f"running _train_locally ... Training samples: {len(x_train_manual)}")
+            logger.debug(f"running _train_locally ... Validation samples: {len(x_val_manual)}")
             
             training_data = (x_train_manual, y_train_manual)
             validation_data = (x_val_manual, y_val_manual)
         else:
-            logger.debug("running _train_locally_optimized ... No validation split")
+            logger.debug("running _train_locally ... No validation split")
             training_data = (data['x_train'], data['y_train'])
             validation_data = None
         
         # Proper multi-GPU model building and training
         if should_use_multi_gpu:
-            logger.debug("running _train_locally_optimized ... Using MirroredStrategy for multi-GPU training")
+            logger.debug("running _train_locally ... Using MirroredStrategy for multi-GPU training")
             strategy = tf.distribute.MirroredStrategy()
-            logger.debug(f"running _train_locally_optimized ... Strategy devices: {strategy.extended.worker_devices}")
-            logger.debug(f"running _train_locally_optimized ... Number of replicas: {strategy.num_replicas_in_sync}")
+            logger.debug(f"running _train_locally ... Strategy devices: {strategy.extended.worker_devices}")
+            logger.debug(f"running _train_locally ... Number of replicas: {strategy.num_replicas_in_sync}")
             
             with strategy.scope():
                 # CRITICAL FIX: Build model components directly inside strategy scope
                 # Do NOT call self.build_model() which may have its own strategy logic
                 self.model = None  # Reset any existing model
                 
-                logger.debug("running _train_locally_optimized ... Building model components inside strategy scope")
+                logger.debug("running _train_locally ... Building model components inside strategy scope")
                 
                 # Detect data type
                 data_type = self._detect_data_type_enhanced()
                 
                 # Build appropriate model architecture directly
                 if data_type == "text":
-                    logger.debug("running _train_locally_optimized ... Building TEXT model inside strategy")
+                    logger.debug("running _train_locally ... Building TEXT model inside strategy")
                     self.model = self._build_text_model_optimized()
                 else:
-                    logger.debug("running _train_locally_optimized ... Building CNN model inside strategy")
+                    logger.debug("running _train_locally ... Building CNN model inside strategy")
                     self.model = self._build_cnn_model_optimized()
                 
                 # Compile model directly inside strategy scope
@@ -1603,7 +1603,7 @@ class ModelBuilder:
                 if self.model is None:
                     raise RuntimeError("Failed to build model inside strategy scope")
                 
-                logger.debug("running _train_locally_optimized ... Model built and compiled inside strategy scope")
+                logger.debug("running _train_locally ... Model built and compiled inside strategy scope")
                 
                 # Scale batch size for multi-GPU (optional optimization)
                 # ENHANCED: Ensure minimum effective batch size for multi-GPU
@@ -1617,14 +1617,14 @@ class ModelBuilder:
                     min_total_batch_size
                 )
 
-                logger.debug(f"running _train_locally_optimized ... Multi-GPU batch size optimization:")
-                logger.debug(f"running _train_locally_optimized ... - Original batch size: {original_batch_size}")
-                logger.debug(f"running _train_locally_optimized ... - Min per GPU: {min_batch_size_per_gpu}")
-                logger.debug(f"running _train_locally_optimized ... - GPUs: {strategy.num_replicas_in_sync}")
-                logger.debug(f"running _train_locally_optimized ... - Final batch size: {scaled_batch_size}")
-                logger.debug(f"running _train_locally_optimized ... - Per GPU batch size: {scaled_batch_size // strategy.num_replicas_in_sync}")
-                logger.debug(f"running _train_locally_optimized ... About to start training with scaled_batch_size: {scaled_batch_size}")
-                logger.debug(f"running _train_locally_optimized ... Training data shapes: {training_data[0].shape}, {training_data[1].shape}")
+                logger.debug(f"running _train_locally ... Multi-GPU batch size optimization:")
+                logger.debug(f"running _train_locally ... - Original batch size: {original_batch_size}")
+                logger.debug(f"running _train_locally ... - Min per GPU: {min_batch_size_per_gpu}")
+                logger.debug(f"running _train_locally ... - GPUs: {strategy.num_replicas_in_sync}")
+                logger.debug(f"running _train_locally ... - Final batch size: {scaled_batch_size}")
+                logger.debug(f"running _train_locally ... - Per GPU batch size: {scaled_batch_size // strategy.num_replicas_in_sync}")
+                logger.debug(f"running _train_locally ... About to start training with scaled_batch_size: {scaled_batch_size}")
+                logger.debug(f"running _train_locally ... Training data shapes: {training_data[0].shape}, {training_data[1].shape}")
 
                 with TimedOperation("multi-GPU model training", "model_builder"):
                     if validation_data:
@@ -1647,7 +1647,7 @@ class ModelBuilder:
                             callbacks=callbacks_list
                         )
         else:
-            logger.debug("running _train_locally_optimized ... Using single-GPU training")
+            logger.debug("running _train_locally ... Using single-GPU training")
             
             # Build model normally for single GPU
             if self.model is None:
@@ -1676,7 +1676,7 @@ class ModelBuilder:
                         callbacks=callbacks_list
                     )
         
-        logger.debug("running _train_locally_optimized ... Training completed")
+        logger.debug("running _train_locally ... Training completed")
         
         # TYPE SAFETY: Ensure training history was created
         if self.training_history is None:
@@ -1686,7 +1686,7 @@ class ModelBuilder:
         if create_plots:
             self._generate_training_plots(training_data, validation_data, plot_progress_callback)
         else:
-            logger.debug("running _train_locally_optimized ... Skipping plot generation (create_plots=False)")
+            logger.debug("running _train_locally ... Skipping plot generation (create_plots=False)")
         
         return self.training_history
 
@@ -2119,11 +2119,18 @@ class ModelBuilder:
         
         try:
             # Save with optimized settings
+            logger.debug(f"running save_model ... About to save model to: {final_filepath}")
             self.model.save(final_filepath)
-            
+
+            # Immediate verification that file was created
+            if final_filepath.exists():
+                logger.debug(f"running save_model ... ✅ Model file created successfully")
+            else:
+                logger.error(f"running save_model ... ❌ Model file was not created after save() call")
+
             # Save additional metadata
             self._save_model_metadata(save_dir, filename, test_accuracy, effective_timestamp, run_name)
-            
+
             logger.debug(f"running save_model ... Model saved successfully")
             # Inline model save summary logging
             logger.debug(f"running save_model ... Model save summary:")

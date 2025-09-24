@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Union
 import tensorflow as tf
-from tensorflow import keras
+from tensorflow import keras # type: ignore
 
 from utils.logger import logger
 
@@ -84,6 +84,7 @@ class AggregatedProgress:
     completed_trials: List[int]
     failed_trials: List[int]
     current_best_total_score: Optional[float]
+    current_best_total_score_trial_number: Optional[int]
     estimated_time_remaining: Optional[float]
 
 
@@ -99,6 +100,7 @@ class UnifiedProgress:
     completed_trials: List[int]
     failed_trials: List[int]
     current_best_total_score: Optional[float]  # Optimization objective (accuracy or weighted score)
+    current_best_total_score_trial_number: Optional[int]  # Trial number that achieved the best score
     current_best_accuracy: Optional[float]     # Raw accuracy for comparison
     average_duration_per_trial: Optional[float]  # Average duration in seconds
     estimated_time_remaining: Optional[float]
@@ -179,15 +181,17 @@ class ConcurrentProgressAggregator:
         # Calculate ETA using the current trial statuses
         estimated_time_remaining = self.calculate_eta(all_trial_statuses)
         
-        # Get current best value (this will be implemented in the callback)
+        # Get current best value and trial number (this will be implemented in the callback)
         current_best_value = self.get_current_best_total_score()
-        
+        current_best_trial_number = self.get_current_best_trial_number()
+
         return AggregatedProgress(
             total_trials=self.total_trials,
             running_trials=running_trials,
             completed_trials=completed_trials,
             failed_trials=failed_trials,
             current_best_total_score=current_best_value,
+            current_best_total_score_trial_number=current_best_trial_number,
             estimated_time_remaining=estimated_time_remaining
         )
     
@@ -207,6 +211,10 @@ class ConcurrentProgressAggregator:
     
     def get_current_best_total_score(self) -> Optional[float]:
         """Get current best value - placeholder for now"""
+        return None  # Will be populated by the ModelOptimizer instance
+
+    def get_current_best_trial_number(self) -> Optional[int]:
+        """Get current best trial number - placeholder for now"""
         return None  # Will be populated by the ModelOptimizer instance
 
 
@@ -304,7 +312,8 @@ class EpochProgressCallback(keras.callbacks.Callback):
 
             # Trigger unified progress update every 3 batches or at epoch boundaries (increased frequency)
             if (epoch_progress == 0.0 or epoch_progress == 1.0 or
-                (self.current_batch > 0 and self.current_batch % 3 == 0)):
+                (self.current_batch > 0 and self.current_batch % 300 == 0)):
+                logger.debug(f"EpochProgressCallback._update_progress ... Triggering unified progress update at batch {self.current_batch}/{self.total_batches} with epoch progress {epoch_progress:.2f}")
                 self._trigger_unified_progress_update()
     
     def _trigger_unified_progress_update(self):
@@ -332,6 +341,7 @@ class EpochProgressCallback(keras.callbacks.Callback):
                 # Get best trial info for aggregation
                 best_trial_number, best_trial_value = self.optimizer_instance.get_best_trial_info()
                 self.optimizer_instance._progress_aggregator.get_current_best_total_score = lambda: best_trial_value
+                self.optimizer_instance._progress_aggregator.get_current_best_trial_number = lambda: best_trial_number
                 
                 # Create aggregated progress using the progress aggregator
                 aggregated_progress = self.optimizer_instance._progress_aggregator.aggregate_progress(
