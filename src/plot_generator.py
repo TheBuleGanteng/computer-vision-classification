@@ -211,8 +211,8 @@ class PlotGenerator:
         try:
             logger.debug(f"running generate_confusion_matrix ... Generating confusion matrix analysis")
             
-            # Get predictions efficiently
-            predictions = model.predict(data['x_test'], verbose=0, batch_size=64)
+            # Get predictions efficiently - standardized batch size to reduce retracing
+            predictions = model.predict(data['x_test'], verbose=0, batch_size=32)
             
             # Convert labels efficiently
             true_labels, predicted_labels = self._convert_labels_for_analysis(data['y_test'], predictions)
@@ -521,8 +521,8 @@ class PlotGenerator:
         try:
             logger.debug(f"running generate_detailed_predictions ... Generating detailed prediction analysis")
             
-            # Efficient prediction generation
-            predictions = model.predict(data['x_test'], verbose=0, batch_size=128)
+            # Efficient prediction generation - standardized batch size to reduce retracing
+            predictions = model.predict(data['x_test'], verbose=0, batch_size=32)
             
             # Convert labels efficiently
             true_labels, predicted_labels = self._convert_labels_for_analysis(data['y_test'], predictions)

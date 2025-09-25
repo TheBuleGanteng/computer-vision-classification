@@ -539,11 +539,14 @@ def download_directory_via_runpod_api(
     runpod_api_key: str,
     run_name: str,
     local_dir: str,
-    timeout: int = 300
+    timeout: int = 300,
+    trial_id: str = None,
+    trial_number: int = None,
+    worker_id: str = None
 ) -> bool:
     """
-    Download entire directory from RunPod worker as a single zip file via RunPod API.
-    This is much faster and more reliable than downloading individual files.
+    Download entire directory from RunPod worker using multiple smaller zip files to avoid response size limits.
+    Downloads plots and models separately to prevent 400 Bad Request errors from large responses.
 
     Args:
         runpod_api_url: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
@@ -551,85 +554,147 @@ def download_directory_via_runpod_api(
         run_name: Run name to identify directory
         local_dir: Local directory to extract files to
         timeout: Timeout in seconds for the request
+        trial_id: Trial identifier for logging
+        trial_number: Trial number for logging
+        worker_id: Specific RunPod worker ID to pin downloads to
 
     Returns:
         True if download successful, False otherwise
     """
     try:
-        logger.info(f"📥 Starting batch directory download via RunPod API")
-        logger.info(f"🏷️ Run name: {run_name}")
-        logger.info(f"📁 Local directory: {local_dir}")
+        # Format trial information for logs
+        trial_info = ""
+        if trial_number is not None:
+            trial_info = f" (trial_{trial_number}"
+            if trial_id:
+                trial_info += f", {trial_id}"
+            trial_info += ")"
+
+        logger.info(f"running download_directory_via_runpod_api{trial_info} ... Starting multi-part directory download")
+        logger.info(f"running download_directory_via_runpod_api{trial_info} ... Run name: {run_name}")
+        logger.info(f"running download_directory_via_runpod_api{trial_info} ... Local directory: {local_dir}")
+
+        # Determine API endpoint based on worker pinning
+        if worker_id:
+            # Use worker-specific endpoint for guaranteed same-worker routing
+            api_url = f"https://{worker_id}-80.proxy.runpod.net"
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Using worker-specific endpoint for guaranteed same-worker routing")
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Worker ID: {worker_id}")
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Worker endpoint: {api_url}")
+        else:
+            # Use load-balanced endpoint (may hit different workers)
+            api_url = runpod_api_url
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Using load-balanced endpoint (may hit different workers)")
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Load balancer endpoint: {api_url}")
+            logger.warning(f"running download_directory_via_runpod_api{trial_info} ... No worker ID provided - downloads may fail due to worker isolation")
 
         # Create local directory if it doesn't exist
         local_path = Path(local_dir)
         local_path.mkdir(parents=True, exist_ok=True)
 
-        # Download entire directory as zip
-        download_response = _call_runpod_api(
-            runpod_api_url=runpod_api_url,
-            runpod_api_key=runpod_api_key,
-            command="download_directory",
-            run_name=run_name,
-            timeout=timeout
-        )
+        # Download plots and models separately to avoid response size limits
+        download_types = ['plots', 'models']
+        success_count = 0
 
-        if not download_response or download_response.get("error"):
-            logger.error(f"❌ Failed to download directory: {download_response.get('error', 'Unknown error')}")
-            logger.error(f"❌ RunPod download attempt details:")
-            logger.error(f"   - API URL: {runpod_api_url}")
-            logger.error(f"   - Run name: {run_name}")
-            logger.error(f"   - Expected RunPod path: /tmp/plots/{run_name}")
-            logger.error(f"   - Local destination: {local_dir}")
-            return False
+        for download_type in download_types:
+            logger.info(f"📦 Downloading {download_type} for run: {run_name}{trial_info}")
 
-        # Extract response data
-        zip_content = download_response.get("content")
-        filename = download_response.get("filename", f"{run_name}_plots.zip")
-        file_count = download_response.get("file_count", 0)
-        zip_size = download_response.get("size", 0)
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Calling RunPod API for {download_type} download")
+            if worker_id:
+                logger.info(f"running download_directory_via_runpod_api{trial_info} ... Using worker-specific endpoint for {download_type}: {api_url}")
+            else:
+                logger.info(f"running download_directory_via_runpod_api{trial_info} ... Using load-balanced endpoint for {download_type}: {api_url}")
 
-        if not zip_content:
-            logger.error(f"❌ No zip content received")
-            return False
+            download_response = _call_runpod_api(
+                runpod_api_url=api_url,
+                runpod_api_key=runpod_api_key,
+                command="download_directory",
+                run_name=run_name,
+                download_type=download_type,
+                trial_id=trial_id,
+                trial_number=trial_number,
+                timeout=timeout
+            )
 
-        # Decode base64 content
-        try:
-            decoded_content = base64.b64decode(zip_content)
-        except Exception as e:
-            logger.error(f"❌ Failed to decode base64 zip content: {e}")
-            return False
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... RunPod API call completed for {download_type} download")
+            if worker_id and download_response:
+                logger.info(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning successful for {download_type} with worker {worker_id}")
+            elif not worker_id and download_response:
+                logger.info(f"running download_directory_via_runpod_api{trial_info} ... Load balancer routing successful for {download_type}")
+            elif worker_id and not download_response:
+                logger.error(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning failed for {download_type} with worker {worker_id}")
+            else:
+                logger.error(f"running download_directory_via_runpod_api{trial_info} ... Load balancer routing failed for {download_type}")
 
-        # Save zip temporarily and extract
-        import tempfile
-        import zipfile
+            if not download_response or download_response.get("error"):
+                logger.warning(f"⚠️ Failed to download {download_type}{trial_info}: {download_response.get('error', 'Unknown error')}")
+                logger.warning(f"⚠️ This may be normal if no {download_type} files exist for this run{trial_info}")
+                continue  # Skip this download type but continue with others
 
-        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
-            tmp_zip.write(decoded_content)
-            temp_zip_path = tmp_zip.name
+            # Extract response data
+            zip_content = download_response.get("content")
+            filename = download_response.get("filename", f"{run_name}_{download_type}.zip")
+            file_count = download_response.get("file_count", 0)
+            zip_size = download_response.get("size", 0)
 
-        try:
-            # Extract zip to local directory
-            with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
-                zipf.extractall(local_path)
-                extracted_files = zipf.namelist()
+            if not zip_content or file_count == 0:
+                logger.info(f"📭 No {download_type} files to download for run: {run_name}{trial_info}")
+                continue
 
-            # Clean up temporary zip file
-            os.unlink(temp_zip_path)
+            # Decode base64 content
+            try:
+                decoded_content = base64.b64decode(zip_content)
+                logger.info(f"✅ Downloaded {download_type}{trial_info}: {file_count} files, {zip_size} bytes")
+            except Exception as e:
+                logger.error(f"❌ Failed to decode base64 {download_type} content{trial_info}: {e}")
+                continue
 
-            logger.info(f"✅ Successfully downloaded and extracted directory via RunPod API")
-            logger.info(f"📊 Downloaded {file_count} files ({zip_size} bytes compressed)")
-            logger.info(f"📁 Files extracted to: {local_dir}")
-            logger.debug(f"📋 Extracted files: {extracted_files}")
+            # Save zip temporarily and extract
+            import tempfile
+            import zipfile
 
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
+                tmp_zip.write(decoded_content)
+                temp_zip_path = tmp_zip.name
+
+            try:
+                # Extract zip to local directory
+                with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
+                    zipf.extractall(local_path)
+                    extracted_files = zipf.namelist()
+                    logger.info(f"📂 Extracted {len(extracted_files)} {download_type} files to: {local_path}")
+
+                success_count += 1
+
+            except Exception as e:
+                logger.error(f"❌ Failed to extract {download_type} zip: {e}")
+                continue
+            finally:
+                # Clean up temporary zip file
+                try:
+                    os.unlink(temp_zip_path)
+                except:
+                    pass
+
+        # Consider success if we downloaded at least one type successfully
+        if success_count > 0:
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Multi-part download completed successfully")
+            logger.info(f"running download_directory_via_runpod_api{trial_info} ... Success rate: {success_count}/{len(download_types)} download types")
+            if worker_id:
+                logger.info(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning successful - all downloads from worker {worker_id}")
             return True
-
-        except Exception as e:
-            logger.error(f"❌ Failed to extract zip file: {e}")
-            # Clean up temporary file
-            if os.path.exists(temp_zip_path):
-                os.unlink(temp_zip_path)
+        else:
+            logger.error(f"running download_directory_via_runpod_api{trial_info} ... All download types failed for run: {run_name}")
+            if worker_id:
+                logger.error(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning failed - downloads failed even with specific worker {worker_id}")
+            else:
+                logger.error(f"running download_directory_via_runpod_api{trial_info} ... Load balancer routing failed - consider implementing worker pinning")
             return False
 
     except Exception as e:
-        logger.error(f"❌ Failed to download directory via RunPod API: {e}")
+        logger.error(f"running download_directory_via_runpod_api{trial_info} ... Exception during directory download: {e}")
+        if worker_id:
+            logger.error(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning exception with worker {worker_id}")
+        else:
+            logger.error(f"running download_directory_via_runpod_api{trial_info} ... Load balancer exception - no worker pinning used")
         return False

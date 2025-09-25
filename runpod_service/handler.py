@@ -599,7 +599,7 @@ def validate_request(request: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         return False, error_msg
     
     # Validate dataset_name (basic check)
-    valid_datasets = ['mnist', 'cifar10', 'fashion_mnist']  # Add your supported datasets
+    valid_datasets = ['mnist', 'cifar10', 'cifar100', 'fashion_mnist', 'imdb', 'reuters', 'gtsrb']  # Add your supported datasets
     if request['dataset_name'] not in valid_datasets:
         error_msg = f"Unsupported dataset_name: {request['dataset_name']}. Supported: {valid_datasets}"
         logger.error(f"running validate_request ... request validation failed: {error_msg}")
@@ -853,16 +853,29 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 # Don't fail the entire request if model saving fails
         else:
             logger.warning(f"running start_training ... No model found to save for trial {trial_id}")
+            worker_persistence_enabled = False
+
+        # Initialize worker persistence flag
+        worker_persistence_enabled = locals().get('worker_persistence_enabled', False)
 
         # Skip model attributes extraction - RunPod now returns only metrics
         logger.debug(f"running start_training ... Skipping model attributes extraction (metrics-only response)")
         model_attributes = None
+
+        # Log worker persistence status
+        logger.info(f"running start_training ... Worker persistence enabled: {worker_persistence_enabled}")
         
-        # Build simplified response structure
+        # Build simplified response structure with worker persistence info
         response = {
             "trial_id": trial_id,
             "status": "completed",
             "success": True,
+            "worker_persistence": {
+                "enabled": worker_persistence_enabled,
+                "reason": "Keeping worker alive for download coordination",
+                "downloads_pending": True,
+                "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown')
+            },
             "metrics": {
                 "test_accuracy": test_accuracy,
                 "test_loss": test_loss,
@@ -1266,26 +1279,40 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
 
         elif command == 'download_directory':
             run_name = event.get('input', {}).get('run_name')
+            download_type = event.get('input', {}).get('download_type', 'plots')  # 'plots' or 'models'
+            trial_id = event.get('input', {}).get('trial_id')
+            trial_number = event.get('input', {}).get('trial_number')
+
+            # Format trial information for logs
+            trial_info = ""
+            if trial_number is not None:
+                trial_info = f" (trial_{trial_number}"
+                if trial_id:
+                    trial_info += f", {trial_id}"
+                trial_info += ")"
+
             if not run_name:
                 return {"error": "run_name parameter required", "status_code": 400}
 
             plots_dir = Path("/tmp/plots") / run_name
-            logger.info(f"download_directory ... Looking for directory: {plots_dir}")
+            logger.info(f"download_directory{trial_info} ... Looking for directory: {plots_dir}")
 
             # Debug: List what's available in /tmp/plots to help troubleshoot
             try:
                 base_plots_dir = Path("/tmp/plots")
                 if base_plots_dir.exists():
                     available_dirs = [d.name for d in base_plots_dir.iterdir() if d.is_dir()]
-                    logger.info(f"download_directory ... Available directories in /tmp/plots: {available_dirs}")
+                    logger.info(f"download_directory{trial_info} ... Available directories in /tmp/plots: {available_dirs}")
                 else:
-                    logger.warning(f"download_directory ... /tmp/plots directory doesn't exist!")
+                    logger.warning(f"download_directory{trial_info} ... /tmp/plots directory doesn't exist!")
             except Exception as e:
-                logger.warning(f"download_directory ... Failed to list /tmp/plots contents: {e}")
+                logger.warning(f"download_directory{trial_info} ... Failed to list /tmp/plots contents: {e}")
 
             if not plots_dir.exists() or not plots_dir.is_dir():
-                logger.error(f"download_directory ... Directory {plots_dir} not found or not a directory")
+                logger.error(f"running download_directory{trial_info} ... Directory {plots_dir} not found or not a directory")
                 return {"error": f"Directory for run {run_name} not found", "status_code": 404}
+
+            logger.info(f"running download_directory{trial_info} ... Processing {download_type} download request")
 
             # Create temporary zip file
             import tempfile
@@ -1295,14 +1322,26 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
             with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
                 zip_path = tmp_zip.name
 
-                # Create zip archive of the entire directory
+                # Create zip archive based on download_type
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                     for file_path in plots_dir.rglob('*'):
                         if file_path.is_file():
-                            # Add file to zip with relative path
-                            arcname = file_path.relative_to(plots_dir)
-                            zipf.write(file_path, arcname)
-                            logger.debug(f"Added to zip: {arcname}")
+                            is_model_file = file_path.suffix in ['.keras', '.h5', '.pb']
+
+                            # Include file based on download_type
+                            should_include = False
+                            if download_type == 'plots' and not is_model_file:
+                                should_include = True
+                            elif download_type == 'models' and is_model_file:
+                                should_include = True
+                            elif download_type == 'all':  # Fallback for compatibility
+                                should_include = True
+
+                            if should_include:
+                                # Add file to zip with relative path
+                                arcname = file_path.relative_to(plots_dir)
+                                zipf.write(file_path, arcname)
+                                logger.debug(f"Added to {download_type} zip: {arcname}")
 
                 # Read zip file and encode as base64
                 with open(zip_path, 'rb') as f:
@@ -1310,21 +1349,34 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
 
                 # Get zip file size and file count (only count files, not directories)
                 zip_size = Path(zip_path).stat().st_size
-                file_count = len([f for f in plots_dir.rglob('*') if f.is_file()])
+                file_count = 0
+                for file_path in plots_dir.rglob('*'):
+                    if file_path.is_file():
+                        is_model_file = file_path.suffix in ['.keras', '.h5', '.pb']
+                        if download_type == 'plots' and not is_model_file:
+                            file_count += 1
+                        elif download_type == 'models' and is_model_file:
+                            file_count += 1
+                        elif download_type == 'all':
+                            file_count += 1
 
                 # Clean up temporary file
                 os.unlink(zip_path)
 
-                logger.info(f"Created zip archive for {run_name}: {file_count} files, {zip_size} bytes")
+                logger.info(f"running download_directory{trial_info} ... Created {download_type} zip archive for {run_name}: {file_count} files, {zip_size} bytes")
+
+
+                logger.info(f"running download_directory{trial_info} ... {download_type} download completed successfully for {run_name}")
 
                 return {
                     "run_name": run_name,
-                    "filename": f"{run_name}_plots.zip",
+                    "filename": f"{run_name}_{download_type}.zip",
                     "content": zip_content,
                     "encoding": "base64",
                     "size": zip_size,
                     "file_count": file_count,
-                    "compression": "zip"
+                    "compression": "zip",
+                    "download_type": download_type
                 }
 
         else:

@@ -322,7 +322,6 @@ class RunPodServiceClient:
                     "mode": request.mode,
                     "objective": request.optimize_for,
                     "trials": request.trials,
-                    "plot_generation": request.plot_generation,
                     "create_optuna_model_plots": request.create_optuna_model_plots,
                     "validation_split": request.validation_split,
                     "test_size": request.test_size,
@@ -542,23 +541,25 @@ class RunPodServiceClient:
             results_dir = Path("optimization_results") / run_name
             results_dir.mkdir(parents=True, exist_ok=True)
 
-            logger.info(f"📥 running _download_direct_artifacts ... Downloading RunPod artifacts to: {results_dir}")
+            logger.info(f"running _download_direct_artifacts ... Downloading RunPod artifacts to: {results_dir}")
+            logger.info(f"running _download_direct_artifacts ... Using old working individual file download method")
+            logger.info(f"running _download_direct_artifacts ... This downloads plots with trial models included in available_files")
 
-            # Import direct download functions
+            # Import direct download functions (REVERTED TO WORKING METHOD)
             from utils.runpod_direct_download import download_specific_files_from_runpod_worker, get_runpod_worker_endpoint
 
             # Get worker endpoint
             worker_endpoint = get_runpod_worker_endpoint(self.endpoint_url)
             logger.debug(f"🔗 running _download_direct_artifacts ... Worker endpoint: {worker_endpoint}")
 
-            # Download plots if available
+            # Download plots if available (includes keras models!)
             if plots_direct_info and plots_direct_info.get("success"):
                 available_files = plots_direct_info.get("available_files", [])
                 if available_files:
                     plots_dir = results_dir / "plots"
                     plots_dir.mkdir(exist_ok=True)
 
-                    logger.info(f"📊 running _download_direct_artifacts ... Downloading {len(available_files)} plot files")
+                    logger.info(f"📊 running _download_direct_artifacts ... Downloading {len(available_files)} plot files (includes keras models)")
 
                     success = download_specific_files_from_runpod_worker(
                         runpod_endpoint=worker_endpoint,
@@ -595,6 +596,8 @@ class RunPodServiceClient:
                     else:
                         logger.error("❌ running _download_direct_artifacts ... Failed to download model")
 
+            logger.info(f"running _download_direct_artifacts ... Download process completed")
+            logger.info(f"running _download_direct_artifacts ... Results available in: {results_dir}")
             return str(results_dir)
 
         except Exception as e:
@@ -1309,9 +1312,23 @@ class OptimizationJob:
             # Mark job as completed
             self.status = JobStatus.COMPLETED
             self.completed_at = datetime.now().isoformat()
+
+            # Calculate actual elapsed time from start to completion
+            if self.started_at:
+                start_time = datetime.fromisoformat(self.started_at.replace('Z', '+00:00'))
+                end_time = datetime.fromisoformat(self.completed_at.replace('Z', '+00:00'))
+                elapsed_seconds = (end_time - start_time).total_seconds()
+                elapsed_formatted = f"{elapsed_seconds:.1f}s"
+                if elapsed_seconds >= 60:
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = elapsed_seconds % 60
+                    elapsed_formatted = f"{minutes}m {seconds:.1f}s"
+            else:
+                elapsed_formatted = "unknown"
+
             logger.info(f"🎉 OPTIMIZATION COMPLETE: Job {self.job_id} finished successfully")
             logger.info(f"🏆 Best score achieved: {getattr(result, 'best_total_score', 'N/A')}")
-            logger.info(f"⏱️ Total optimization time: {datetime.now().isoformat()}")
+            logger.info(f"⏱️ Total optimization time: {elapsed_formatted}")
 
         except Exception as e:
             # Handle any optimization errors
@@ -1934,7 +1951,8 @@ class OptimizationAPI:
         async def list_job_plots(job_id: str):
             """List available plots for all trials in a job"""
             return await self._list_job_plots(job_id)
-        
+
+
         logger.debug("running OptimizationAPI._register_routes ... All API endpoints registered")
                
     async def _start_optimization(self, request: OptimizationRequest, background_tasks: BackgroundTasks) -> JobResponse:

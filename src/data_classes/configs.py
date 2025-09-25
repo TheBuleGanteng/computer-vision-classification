@@ -66,12 +66,6 @@ class OptimizationObjective(Enum):
         return objective in health_only
 
 
-class PlotGenerationMode(Enum):
-    """Plot generation modes"""
-    ALL = "all"
-    BEST = "best"
-    NONE = "none"
-
 
 class OptimizationConfig(BaseModel):
     """
@@ -132,10 +126,8 @@ class OptimizationConfig(BaseModel):
     early_stopping_patience: int = Field(5, description="Early stopping patience")
     
     # Output settings
-    save_best_model: bool = Field(True, description="Save best model")
     save_optimization_history: bool = Field(True, description="Save optimization history")
     create_comparison_plots: bool = Field(True, description="Create comparison plots")
-    plot_generation: str = Field("all", pattern="^(all|best|none)$", description="Plot generation mode")
     create_optuna_model_plots: bool = Field(True, description="Create Optuna model plots")
     create_final_model_plots: bool = Field(True, description="Create final model plots")
     
@@ -190,12 +182,6 @@ class OptimizationConfig(BaseModel):
         """Convert mode string to enum"""
         return OptimizationMode.SIMPLE if self.mode == "simple" else OptimizationMode.HEALTH
         
-    @property
-    def plot_generation_enum(self) -> PlotGenerationMode:
-        """Convert plot_generation string to enum"""
-        mapping = {"all": PlotGenerationMode.ALL, "best": PlotGenerationMode.BEST, "none": PlotGenerationMode.NONE}
-        return mapping.get(self.plot_generation, PlotGenerationMode.ALL)
-    
     # Backward compatibility aliases
     @property
     def n_trials(self) -> int:
@@ -214,7 +200,6 @@ class OptimizationConfig(BaseModel):
         
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
-        logger.debug(f"running OptimizationConfig.model_post_init ... Plot generation mode: {self.plot_generation}")
         
         # Log RunPod endpoint configuration
         if self.use_runpod_service:

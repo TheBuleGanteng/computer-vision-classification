@@ -652,8 +652,6 @@ class OptimizationConfig:
     use_runpod_service: bool = True            # Local vs RunPod execution
     concurrent: bool = False                   # Enable concurrent execution
     concurrent_workers: int = 2                # Multi-worker coordination
-    plot_generation: str = "all"               # Plot generation mode (all|best|none)
-    save_best_model: bool = True               # Save final Keras model
     target_gpus_per_worker: int = 2            # GPUs per RunPod worker
 ```
 
@@ -720,7 +718,7 @@ This testing plan validates the current distributed architecture with local Optu
 2. **Manual Verification**: You run the test and confirm file downloads/behavior
 3. **Success Criteria**: Verification of expected files downloaded to disk + correct logs
 
-### **Test 1: Local Execution (Baseline)**
+### **Test 1: Local Execution (Baseline)** ✅ **VERIFIED**
 **Configuration**: `use_runpod_service=False`
 **Purpose**: Verify complete local execution works correctly
 
@@ -743,7 +741,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Keras model file present: `optimized_mnist_acc_*.keras`
 - ✅ All plot files present (confusion matrix, training progress, etc.)
 
-### **Test 2: Single RunPod Worker (Sequential)**
+### **Test 2: Single RunPod Worker (Sequential)** ✅ **VERIFIED**
 **Configuration**: `use_runpod_service=True, concurrent=True, concurrent_workers=1`
 **Purpose**: Verify single worker behaves same as concurrent=False
 
@@ -768,7 +766,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Final model + plots batch downloaded (15+ files)
 - ✅ Files organized: `plots/` (trials) + `optimized_model/` (final)
 
-### **Test 3: Dual RunPod Workers (Concurrent)**
+### **Test 3: Dual RunPod Workers (Concurrent)** ✅ **VERIFIED**
 **Configuration**: `use_runpod_service=True, concurrent=True, concurrent_workers=2`
 **Purpose**: Verify concurrent execution with multiple workers
 
@@ -793,77 +791,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Final model assembly via best trial copying
 - ✅ Complete file organization: trials + final model
 
-### **Test 4: Plot Generation Mode - BEST Only**
-**Configuration**: `plot_generation="best"`
-**Purpose**: Verify only best trial plots are generated
-
-**Test Script**: `test_curl_plots_best.sh`
-```bash
-#!/bin/bash
-curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json" -d '{
-    "dataset_name":"mnist",
-    "trials":3,
-    "max_epochs_per_trial":6,
-    "use_runpod_service":true,
-    "concurrent":false,
-    "plot_generation":"best"
-}'
-```
-
-**Expected Results**:
-- ✅ Only best trial generates plots (not all trials)
-- ✅ Final model plots still generated (comprehensive set)
-- ✅ `plots/` directory contains only best trial plots
-- ✅ `optimized_model/` contains final model + plots
-
-### **Test 5: Plot Generation Mode - NONE**
-**Configuration**: `plot_generation="none"`
-**Purpose**: Verify no plots are generated
-
-**Test Script**: `test_curl_plots_none.sh`
-```bash
-#!/bin/bash
-curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json" -d '{
-    "dataset_name":"mnist",
-    "trials":2,
-    "max_epochs_per_trial":6,
-    "use_runpod_service":true,
-    "concurrent":false,
-    "plot_generation":"none"
-}'
-```
-
-**Expected Results**:
-- ✅ No trial plots generated or downloaded
-- ✅ No final model plots generated
-- ✅ `plots/` directory empty or doesn't exist
-- ✅ `optimized_model/` contains only Keras model file (no plots)
-- ✅ Job completes successfully despite no plots
-
-### **Test 6: Save Best Model - DISABLED**
-**Configuration**: `save_best_model=False`
-**Purpose**: Verify Keras model is not saved when disabled
-
-**Test Script**: `test_curl_no_model.sh`
-```bash
-#!/bin/bash
-curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json" -d '{
-    "dataset_name":"mnist",
-    "trials":2,
-    "max_epochs_per_trial":6,
-    "use_runpod_service":true,
-    "concurrent":false,
-    "save_best_model":false
-}'
-```
-
-**Expected Results**:
-- ✅ Trial plots generated and downloaded normally
-- ✅ Final model plots generated normally
-- ✅ No Keras model file in `optimized_model/` directory
-- ✅ Only plot files present in final download
-
-### **Test 7: Multi-GPU Concurrent Workers**
+### **Test 4: Multi-GPU Concurrent Workers** ✅ **VERIFIED**
 **Configuration**: `use_runpod_service=True, concurrent=True, concurrent_workers=2, target_gpus_per_worker=2`
 **Purpose**: Test multiple GPUs per worker with concurrent execution
 
@@ -887,7 +815,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Faster training due to multi-GPU acceleration
 - ✅ Normal plot and model download behavior
 
-### **Test 8: Multi-GPU Sequential Workers**
+### **Test 5: Multi-GPU Sequential Workers**
 **Configuration**: `use_runpod_service=True, concurrent=False, target_gpus_per_worker=2`
 **Purpose**: Test multiple GPUs per worker without concurrency
 
@@ -909,7 +837,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ TensorFlow MirroredStrategy acceleration
 - ✅ Normal download behavior with GPU acceleration
 
-### **Test 9: Higher Trial Count**
+### **Test 6: Higher Trial Count**
 **Configuration**: `trials=4` (increased from default 2)
 **Purpose**: Verify system handles higher trial counts correctly
 
@@ -933,7 +861,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Best trial identified from 4 candidates
 - ✅ Final model + plots downloaded normally
 
-### **Test 10: Extended Training Epochs**
+### **Test 7: Extended Training Epochs**
 **Configuration**: `max_epochs_per_trial=10` (increased from default 6)
 **Purpose**: Verify system handles longer training periods correctly
 
@@ -956,7 +884,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ GPU utilization maintained for full training duration
 - ✅ Model performance potentially improved with longer training
 
-### **Test 11: Direct Optimizer Call (Programmatic)**
+### **Test 8: Direct Optimizer Call (Programmatic)**
 **Configuration**: Direct `optimizer.py` call bypassing API server
 **Purpose**: Test programmatic usage without API layer
 
@@ -1000,7 +928,7 @@ print(f"Best score: {result.best_total_score}")
 4. Only tests passing both phases are considered complete
 
 **Phase 3 - UI Testing**:
-1. Repeat all 11 test configurations via Web UI interface
+1. Repeat all 8 test configurations via Web UI interface
 2. Verify UI updates and progress display for all scenarios
 3. Confirm UI behavior matches API behavior across all test cases
 
@@ -1008,11 +936,8 @@ print(f"Best score: {result.best_total_score}")
 1. **Local Execution** (`use_runpod_service=false`)
 2. **Single RunPod Worker** (`concurrent_workers=1`)
 3. **Dual RunPod Workers** (`concurrent_workers=2`)
-4. **Plot Generation - BEST** (`plot_generation="best"`)
-5. **Plot Generation - NONE** (`plot_generation="none"`)
-6. **Save Model Disabled** (`save_best_model=false`)
-7. **Multi-GPU Concurrent** (`concurrent_workers=2, target_gpus_per_worker=2`)
-8. **Multi-GPU Sequential** (`concurrent=false, target_gpus_per_worker=2`)
-9. **Higher Trial Count** (`trials=4`)
-10. **Extended Training** (`max_epochs_per_trial=10`)
-11. **Direct Optimizer Call** (Programmatic usage)
+4. **Multi-GPU Concurrent** (`concurrent_workers=2, target_gpus_per_worker=2`)
+5. **Multi-GPU Sequential** (`concurrent=false, target_gpus_per_worker=2`)
+6. **Higher Trial Count** (`trials=4`)
+7. **Extended Training** (`max_epochs_per_trial=10`)
+8. **Direct Optimizer Call** (Programmatic usage)

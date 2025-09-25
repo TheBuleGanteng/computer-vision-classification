@@ -10,14 +10,13 @@ Modules:
 """
 
 # Import commonly used classes for convenience
-from .configs import OptimizationConfig, OptimizationMode, OptimizationObjective, PlotGenerationMode
+from .configs import OptimizationConfig, OptimizationMode, OptimizationObjective
 from .callbacks import TrialProgress, AggregatedProgress, UnifiedProgress
 
 __all__ = [
     'OptimizationConfig',
-    'OptimizationMode', 
+    'OptimizationMode',
     'OptimizationObjective',
-    'PlotGenerationMode',
     'TrialProgress',
     'AggregatedProgress',
     'UnifiedProgress'

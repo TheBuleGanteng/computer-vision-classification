@@ -28,6 +28,7 @@ import copy
 from dataset_manager import DatasetConfig, DatasetManager
 import datetime
 import os
+import random
 from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
 from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
 from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
@@ -1406,6 +1407,8 @@ class ModelBuilder:
         Returns:
             True if model is complex enough to benefit from multi-GPU
         """
+        logger.debug("running _is_model_suitable_for_multi_gpu ... starting function")
+        
         # Check if model has sufficient complexity for multi-GPU benefits
         min_params_for_multi_gpu = 100_000  # Minimum parameters to benefit from multi-GPU
         min_epochs_for_multi_gpu = 15      # Minimum epochs to amortize multi-GPU overhead
@@ -1514,20 +1517,23 @@ class ModelBuilder:
                     self.progress_callback = progress_callback
                     self.current_epoch = 0
                     self.total_epochs = 0
-                    
+
                 def on_train_begin(self, logs=None):
                     self.total_epochs = self.params.get('epochs', 0) if self.params else 0
-                    
+
                 def on_epoch_begin(self, epoch, logs=None):
                     self.current_epoch = epoch + 1  # Convert to 1-based
                     self.progress_callback(self.current_epoch, 0.0)  # Start of epoch
-                    
+
                 def on_batch_end(self, batch, logs=None):
                     if hasattr(self, 'params') and self.params:
-                        total_batches = self.params.get('steps', 1)
-                        batch_progress = (batch + 1) / total_batches
-                        self.progress_callback(self.current_epoch, batch_progress)
-                        
+                        # Apply same modulo frequency control as local operation (% 300)
+                        # Only send progress updates every 300 batches to reduce RunPod log spam
+                        if batch > 0 and batch % 300 == 0:
+                            total_batches = self.params.get('steps', 1)
+                            batch_progress = (batch + 1) / total_batches
+                            self.progress_callback(self.current_epoch, batch_progress)
+
                 def on_epoch_end(self, epoch, logs=None):
                     self.progress_callback(self.current_epoch, 1.0)  # End of epoch
             
@@ -1577,33 +1583,77 @@ class ModelBuilder:
             strategy = tf.distribute.MirroredStrategy()
             logger.debug(f"running _train_locally ... Strategy devices: {strategy.extended.worker_devices}")
             logger.debug(f"running _train_locally ... Number of replicas: {strategy.num_replicas_in_sync}")
-            
+
+            # IMPROVED FIX: Build model completely outside strategy scope first for absolute consistency
+            logger.debug("running _train_locally ... Building template model outside strategy scope")
+
+            # Set deterministic seeds before any model building
+            config_seed = hash(str(self.model_config.__dict__)) % (2**31)
+            random.seed(config_seed)
+            np.random.seed(config_seed % (2**31))
+            tf.random.set_seed(config_seed % (2**31))
+
+            logger.debug(f"running _train_locally ... Using deterministic seed: {config_seed}")
+
+            # Build template model outside strategy scope
+            data_type = self._detect_data_type_enhanced()
+            template_model = None
+
+            if data_type == "text":
+                logger.debug("running _train_locally ... Building TEXT template model")
+                template_model = self._build_text_model_optimized()
+            else:
+                logger.debug("running _train_locally ... Building CNN template model")
+                template_model = self._build_cnn_model_optimized()
+
+            if template_model is None:
+                raise RuntimeError("Failed to build template model outside strategy scope")
+
+            # Get template model architecture details for verification
+            template_config = template_model.get_config()
+            template_weights_shapes = [w.shape for w in template_model.get_weights()] if template_model.built else []
+            param_count = template_model.count_params()
+            model_layers = len(template_model.layers)
+
+            logger.info(f"running _train_locally ... Template model built with {param_count:,} parameters across {model_layers} layers")
+            logger.info(f"running _train_locally ... Template model architecture frozen with seed {config_seed}")
+
             with strategy.scope():
-                # CRITICAL FIX: Build model components directly inside strategy scope
-                # Do NOT call self.build_model() which may have its own strategy logic
-                self.model = None  # Reset any existing model
-                
-                logger.debug("running _train_locally ... Building model components inside strategy scope")
-                
-                # Detect data type
-                data_type = self._detect_data_type_enhanced()
-                
-                # Build appropriate model architecture directly
+                # Reset any existing model
+                self.model = None
+
+                # Recreate model inside strategy scope using exact same architecture
+                # Reset seeds to same values for identical replication
+                random.seed(config_seed)
+                np.random.seed(config_seed % (2**31))
+                tf.random.set_seed(config_seed % (2**31))
+
+                logger.debug("running _train_locally ... Replicating template model inside strategy scope")
+
+                # Create new model from template configuration for distributed training
                 if data_type == "text":
-                    logger.debug("running _train_locally ... Building TEXT model inside strategy")
                     self.model = self._build_text_model_optimized()
                 else:
-                    logger.debug("running _train_locally ... Building CNN model inside strategy")
                     self.model = self._build_cnn_model_optimized()
-                
-                # Compile model directly inside strategy scope
+
+                # Compile model inside strategy scope
                 self._compile_model_optimized()
-                
-                # TYPE SAFETY: Ensure model was built successfully
+
+                # Verify model consistency with template
                 if self.model is None:
-                    raise RuntimeError("Failed to build model inside strategy scope")
-                
-                logger.debug("running _train_locally ... Model built and compiled inside strategy scope")
+                    raise RuntimeError("Failed to replicate model inside strategy scope")
+
+                replicated_param_count = self.model.count_params()
+                replicated_layers = len(self.model.layers)
+
+                if replicated_param_count != param_count:
+                    raise RuntimeError(f"Model replication failed: parameter count mismatch {replicated_param_count} != {param_count}")
+                if replicated_layers != model_layers:
+                    raise RuntimeError(f"Model replication failed: layer count mismatch {replicated_layers} != {model_layers}")
+
+                logger.info("running _train_locally ... Model successfully replicated inside strategy scope")
+                logger.info(f"running _train_locally ... Verified identical architecture: {param_count:,} params, {model_layers} layers")
+                logger.info("running _train_locally ... CollectiveReduceV2 consistency fix applied")
                 
                 # Scale batch size for multi-GPU (optional optimization)
                 # ENHANCED: Ensure minimum effective batch size for multi-GPU
@@ -1906,11 +1956,21 @@ class ModelBuilder:
         logger.debug("running evaluate ... Starting CONSOLIDATED model evaluation via HealthAnalyzer...")
         
         # ✅ Use HealthAnalyzer as single source of truth for evaluation
+        # Fix retracing: Always use exactly 50 samples to ensure consistent tensor shapes
+        sample_size = 50
+        if len(data['x_test']) >= sample_size:
+            sample_data = data['x_test'][:sample_size]
+        else:
+            # Pad with repeated samples to maintain consistent shape
+            needed = sample_size - len(data['x_test'])
+            repeated_samples = data['x_test'][:(needed % len(data['x_test'])) if needed % len(data['x_test']) > 0 else len(data['x_test'])]
+            sample_data = np.concatenate([data['x_test'], repeated_samples[:needed]], axis=0)
+
         comprehensive_metrics = self.health_analyzer.calculate_comprehensive_health(
             model=self.model,
             history=self.training_history,
             data=data,  # ✅ KEY: Pass data to get basic metrics
-            sample_data=data['x_test'][:50] if len(data['x_test']) > 50 else data['x_test'],
+            sample_data=sample_data,  # Always exactly 50 samples
             training_time_minutes=getattr(self, 'training_time_minutes', None),
             total_params=self.model.count_params()
         )
