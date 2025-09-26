@@ -834,12 +834,14 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
         # Save trained trial model to plots directory for later copying (similar to local approach)
         if model_builder and hasattr(model_builder, 'model') and model_builder.model:
             try:
+                logger.info(f"running start_training ... Attempting to save trial model for {trial_id}")
                 # Create model filename similar to final model training approach
                 dataset_name = request['dataset_name']
                 model_filename = f"final_model_{dataset_name}_trial_{trial_id}.keras"
 
                 # Get plots directory path (same place where plots are saved)
                 plots_dir = Path("/tmp/plots") / trial_id
+                plots_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
                 model_path_in_plots = plots_dir / model_filename
 
                 # Save model to plots directory so it gets downloaded with plots
@@ -849,10 +851,17 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info(f"running start_training ... Trial model will be included in plots download")
 
             except Exception as e:
-                logger.error(f"running start_training ... Failed to save trial model: {e}")
+                logger.error(f"running start_training ... Failed to save trial model for {trial_id}: {e}")
+                logger.error(f"running start_training ... Model save error traceback: {traceback.format_exc()}")
                 # Don't fail the entire request if model saving fails
         else:
             logger.warning(f"running start_training ... No model found to save for trial {trial_id}")
+            if model_builder:
+                logger.warning(f"running start_training ... model_builder exists but no model: hasattr(model)={hasattr(model_builder, 'model')}")
+                if hasattr(model_builder, 'model'):
+                    logger.warning(f"running start_training ... model_builder.model is None: {model_builder.model is None}")
+            else:
+                logger.warning(f"running start_training ... model_builder is None for trial {trial_id}")
             worker_persistence_enabled = False
 
         # Initialize worker persistence flag
@@ -981,236 +990,6 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             "success": False
         }
 
-async def start_final_model_training(job: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Handler for final model training requests.
-    Trains the final model using best hyperparameters from optimization.
-    
-    Args:
-        job: RunPod job dictionary containing final model training request
-        
-    Returns:
-        Structured response dictionary with model path and metrics
-    """
-    logger.debug("running start_final_model_training ... starting final model training request")
-    
-    
-    try:
-        request = job.get('input', {})
-        
-        # Validate final model training request
-        required_fields = ['dataset_name', 'best_params', 'config']
-        for field in required_fields:
-            if field not in request:
-                return {
-                    "status": "failed",
-                    "error": f"Missing required field: {field}",
-                    "success": False
-                }
-        
-        logger.debug(f"running start_final_model_training ... training final model with best params: {request['best_params']}")
-        
-        # Build configuration for final model
-        all_params = build_optimization_config(request)
-        
-        # Create ModelConfig with best hyperparameters
-        model_config = ModelConfig()
-        best_params = request.get('best_params', {})
-        for param_name, param_value in best_params.items():
-            if hasattr(model_config, param_name):
-                # Handle kernel_size conversion from int to tuple
-                if param_name == 'kernel_size' and isinstance(param_value, int):
-                    param_value = (param_value, param_value)
-                    logger.debug(f"running start_final_model_training ... Converted kernel_size from int {best_params['kernel_size']} to tuple {param_value}")
-                
-                setattr(model_config, param_name, param_value)
-                logger.debug(f"running start_final_model_training ... Applied to ModelConfig: {param_name} = {param_value}")
-
-        # Extract multi-GPU configuration from request
-        config_data = request.get('config', {})
-        use_multi_gpu = config_data.get('use_multi_gpu', False)
-        
-        # Add validation split from config
-        if 'validation_split' in all_params:
-            model_config.validation_split = all_params['validation_split']
-        
-        # Progress callback for final model training with RunPod progress updates
-        def progress_callback_func(current_epoch: int, epoch_progress: float):
-            """Send real-time epoch progress updates to RunPod during final model training"""
-            logger.debug(f"running start_final_model_training ... Epoch {current_epoch} progress: {epoch_progress:.1%}")
-            
-            try:
-                # Send structured progress update to RunPod (same format as trial training)
-                progress_data = {
-                    'current_epoch': current_epoch,
-                    'total_epochs': best_params.get('epochs', 5),  # Get epochs from best_params
-                    'epoch_progress': epoch_progress,
-                    'message': f"Final model - Epoch {current_epoch}/{best_params.get('epochs', 5)} - {epoch_progress:.1%} complete",
-                    'final_model': True  # Flag to distinguish from trial progress
-                }
-                
-                # Only send progress update if we're in RunPod environment
-                if os.getenv('RUNPOD_ENDPOINT_ID'):
-                    runpod.serverless.progress_update(job, progress_data)
-                    logger.info(f"🏗️ Final Model Progress: Epoch {current_epoch}/{best_params.get('epochs', 5)}, progress {epoch_progress:.1%}")
-                else:
-                    logger.info(f"🏠 Local Final Model Progress: Epoch {current_epoch}/{best_params.get('epochs', 5)}, progress {epoch_progress:.1%}")
-                
-            except Exception as e:
-                logger.error(f"❌ Error sending final model progress update: {e}")
-                # Continue training even if progress update fails
-        
-        # Train final model with best hyperparameters
-        logger.debug(f"running start_final_model_training ... Calling create_and_train_model for final model")
-        logger.debug(f"running start_final_model_training ... Parameters: dataset={request['dataset_name']}, multi_gpu={use_multi_gpu}, test_size={all_params.get('test_size', 0.2)}")
-        
-        try:
-            training_result = create_and_train_model(
-                dataset_name=request['dataset_name'],
-                model_config=model_config,
-                test_size=all_params.get('test_size', 0.2),
-                use_multi_gpu=use_multi_gpu,
-                run_name=f"final_model_{request['dataset_name']}",
-                progress_callback=progress_callback_func
-            )
-            logger.debug(f"running start_final_model_training ... create_and_train_model completed, result type: {type(training_result)}")
-        except Exception as e:
-            logger.error(f"running start_final_model_training ... create_and_train_model failed: {e}")
-            logger.error(f"running start_final_model_training ... Traceback: {traceback.format_exc()}")
-            raise
-        
-        if training_result and isinstance(training_result, dict) and 'test_accuracy' in training_result:
-            logger.info(f"✅ Final model training completed successfully")
-            
-            # DEBUG: Log training_result structure
-            logger.debug(f"running start_final_model_training ... DEBUG training_result keys: {list(training_result.keys())}")
-            logger.debug(f"running start_final_model_training ... DEBUG model_builder present: {'model_builder' in training_result}")
-            if 'model_builder' in training_result:
-                logger.debug(f"running start_final_model_training ... DEBUG model_builder value: {training_result['model_builder']}")
-                logger.debug(f"running start_final_model_training ... DEBUG model_builder type: {type(training_result['model_builder'])}")
-            
-            # Generate plots locally for direct download
-            config_data = request.get('config', {})
-            plots_direct_info = None
-
-            # Initialize model_attributes to ensure it's always defined
-            model_attributes = None
-
-            # Save final model BEFORE generating plots so it's included in batch download
-            model_path = None
-            plots_direct_info = None
-
-            if 'model_builder' in training_result and training_result['model_builder']:
-                model_builder_obj = training_result['model_builder']
-                logger.debug(f"running start_final_model_training ... DEBUG: model_builder conditional passed - proceeding to save model")
-
-                try:
-                    # Save model to plots directory first, before generating plots
-                    plots_dir = Path("/tmp/plots") / request['run_name']
-                    plots_dir.mkdir(parents=True, exist_ok=True)
-
-                    # Generate model filename
-                    test_accuracy = training_result['test_accuracy']
-                    accuracy_str = f"acc_{test_accuracy:.4f}".replace('.', 'p')
-                    model_filename = f"optimized_{request['dataset_name']}_{accuracy_str}_model.keras"
-
-                    # Save model directly to plots directory
-                    model_path_in_plots = plots_dir / model_filename
-                    model_builder_obj.model.save(model_path_in_plots)
-
-                    model_path = str(model_path_in_plots)
-                    logger.info(f"running start_final_model_training ... Final model saved to plots directory: {model_path}")
-                    logger.info(f"running start_final_model_training ... Model will be included in batch download with plots")
-
-                    # Debug: List what's in the plots directory before generating plots
-                    try:
-                        files_in_plots_dir = list(plots_dir.iterdir())
-                        logger.info(f"running start_final_model_training ... Contents of {plots_dir} before plot generation:")
-                        for file_path in files_in_plots_dir:
-                            logger.info(f"   - {file_path.name} ({file_path.stat().st_size} bytes)")
-                        logger.info(f"running start_final_model_training ... Total files before plot generation: {len(files_in_plots_dir)}")
-                    except Exception as e:
-                        logger.warning(f"running start_final_model_training ... Failed to list plots directory contents: {e}")
-
-                except Exception as e:
-                    logger.error(f"running start_final_model_training ... Failed to save final model to plots directory: {e}")
-
-                # Now generate plots AFTER model is saved
-                # Create OptimizationConfig object from config_data for plot generation
-                optimization_config = None
-                if config_data:
-                    from src.data_classes.configs import OptimizationConfig
-                    optimization_config = OptimizationConfig(**config_data)
-
-                # DEBUG: Check files BEFORE plot generation
-                plots_dir = Path("/tmp/plots") / request['run_name']
-                if plots_dir.exists():
-                    logger.info(f"running start_final_model_training ... Contents of {plots_dir} BEFORE plot generation:")
-                    all_files_before = []
-                    for file_path in sorted(plots_dir.rglob('*')):
-                        if file_path.is_file():
-                            size = file_path.stat().st_size
-                            all_files_before.append(file_path.name)
-                            logger.info(f"running start_final_model_training ...    - {file_path.name} ({size} bytes)")
-                    logger.info(f"running start_final_model_training ... Total files BEFORE plot generation: {len(all_files_before)}")
-                    logger.info(f"running start_final_model_training ... File list BEFORE: {all_files_before}")
-
-                plots_direct_info = generate_plots(
-                    model_builder=model_builder_obj,
-                    dataset_name=request['dataset_name'],
-                    trial_id=request['run_name'],  # Use run name to match directory with trials
-                    test_data=training_result.get('test_data'),
-                    optimization_config=optimization_config
-                )
-
-                # DEBUG: Check files AFTER plot generation
-                plots_dir = Path("/tmp/plots") / request['run_name']
-                if plots_dir.exists():
-                    logger.info(f"running start_final_model_training ... Contents of {plots_dir} AFTER plot generation:")
-                    all_files = []
-                    for file_path in sorted(plots_dir.rglob('*')):
-                        if file_path.is_file():
-                            size = file_path.stat().st_size
-                            all_files.append(file_path.name)
-                            logger.info(f"running start_final_model_training ...    - {file_path.name} ({size} bytes)")
-                    logger.info(f"running start_final_model_training ... Total files AFTER plot generation: {len(all_files)}")
-                    logger.info(f"running start_final_model_training ... File list: {all_files}")
-
-                # run_name is already correct from generate_plots using request['run_name']
-                # No override needed since plots and model use same directory
-
-                # Skip model attributes extraction - RunPod now returns only metrics
-                logger.debug(f"running start_final_model_training ... Skipping model attributes extraction (metrics-only response)")
-            
-            return {
-                "status": "completed",
-                "success": True,
-                "final_model_path": model_path,
-                "test_accuracy": training_result.get('test_accuracy', 0.0),
-                "test_loss": training_result.get('test_loss', 0.0),
-                "training_time_seconds": training_result.get('training_time_seconds', 0.0),
-                "multi_gpu_used": use_multi_gpu,
-                "model_attributes": model_attributes,  # Model attributes for local plotting
-                "plots_direct": plots_direct_info  # Direct plot download information
-            }
-        else:
-            logger.error(f"running start_final_model_training ... Final model training failed or returned invalid result")
-            return {
-                "status": "failed",
-                "error": "Final model training failed",
-                "success": False
-            }
-            
-    except Exception as e:
-        error_msg = f"Final model training failed: {str(e)}"
-        logger.error(f"running start_final_model_training ... {error_msg}")
-        logger.error(f"running start_final_model_training ... Traceback: {traceback.format_exc()}")
-        
-        return {
-            "status": "failed", 
-            "error": error_msg,
-            "success": False
-        }
 
 
 async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -1379,6 +1158,147 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
                     "download_type": download_type
                 }
 
+        elif command == 'download_directory_multipart':
+            """
+            Multi-part single response download to solve worker isolation issues.
+            Returns all file types in separate parts within a single response.
+            """
+            run_name = event.get('input', {}).get('run_name')
+            trial_id = event.get('input', {}).get('trial_id')
+            trial_number = event.get('input', {}).get('trial_number')
+            max_part_size_mb = event.get('input', {}).get('max_part_size_mb', 8)  # Default 8MB per part
+
+            # Format trial information for logs
+            trial_info = ""
+            if trial_number is not None:
+                trial_info = f" (trial_{trial_number}"
+                if trial_id:
+                    trial_info += f", {trial_id}"
+                trial_info += ")"
+
+            if not run_name:
+                return {"error": "run_name parameter required", "status_code": 400}
+
+            plots_dir = Path("/tmp/plots") / run_name
+            logger.info(f"download_directory_multipart{trial_info} ... Looking for directory: {plots_dir}")
+
+            # Debug: List what's available in /tmp/plots to help troubleshoot
+            try:
+                base_plots_dir = Path("/tmp/plots")
+                if base_plots_dir.exists():
+                    available_dirs = [d.name for d in base_plots_dir.iterdir() if d.is_dir()]
+                    logger.info(f"download_directory_multipart{trial_info} ... Available directories in /tmp/plots: {available_dirs}")
+                else:
+                    logger.warning(f"download_directory_multipart{trial_info} ... /tmp/plots directory doesn't exist!")
+            except Exception as e:
+                logger.warning(f"download_directory_multipart{trial_info} ... Failed to list /tmp/plots contents: {e}")
+
+            if not plots_dir.exists() or not plots_dir.is_dir():
+                logger.error(f"running download_directory_multipart{trial_info} ... Directory {plots_dir} not found or not a directory")
+                return {"error": f"Directory for run {run_name} not found", "status_code": 404}
+
+            logger.info(f"running download_directory_multipart{trial_info} ... Processing multi-part download request")
+
+            # Create temporary zip files for each part
+            import tempfile
+            import zipfile
+            import base64
+
+            # Define file type categories
+            file_types = [
+                {
+                    "name": "plots",
+                    "filter": lambda path: path.suffix.lower() not in ['.keras', '.h5', '.pb', '.pkl', '.pickle'],
+                    "priority": 1
+                },
+                {
+                    "name": "models",
+                    "filter": lambda path: path.suffix.lower() in ['.keras', '.h5', '.pb'],
+                    "priority": 2
+                },
+                {
+                    "name": "other",
+                    "filter": lambda path: path.suffix.lower() in ['.pkl', '.pickle'] or path.name.endswith('.json'),
+                    "priority": 3
+                }
+            ]
+
+            parts = []
+            max_part_size = max_part_size_mb * 1024 * 1024  # Convert MB to bytes
+            total_file_count = 0
+            total_size = 0
+
+            for file_type in file_types:
+                # Collect files for this type
+                type_files = []
+                for file_path in plots_dir.rglob('*'):
+                    if file_path.is_file() and file_type["filter"](file_path):
+                        type_files.append(file_path)
+
+                if not type_files:
+                    logger.info(f"download_directory_multipart{trial_info} ... No {file_type['name']} files found")
+                    continue
+
+                # Create zip for this file type
+                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
+                    zip_path = tmp_zip.name
+
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        for file_path in type_files:
+                            # Add file to zip with relative path
+                            arcname = file_path.relative_to(plots_dir)
+                            zipf.write(file_path, arcname)
+                            logger.debug(f"Added to {file_type['name']} zip: {arcname}")
+
+                    # Check zip size
+                    zip_size = Path(zip_path).stat().st_size
+
+                    if zip_size > max_part_size:
+                        logger.warning(f"download_directory_multipart{trial_info} ... {file_type['name']} zip size ({zip_size} bytes) exceeds max part size ({max_part_size} bytes)")
+                        # For now, include it anyway but log the warning
+                        # Future enhancement: could split large file types into sub-parts
+
+                    # Read zip file and encode as base64
+                    with open(zip_path, 'rb') as f:
+                        zip_content = base64.b64encode(f.read()).decode('utf-8')
+
+                    # Clean up temporary file
+                    os.unlink(zip_path)
+
+                    # Add part to response
+                    part = {
+                        "type": file_type["name"],
+                        "filename": f"{run_name}_{file_type['name']}.zip",
+                        "content": zip_content,
+                        "encoding": "base64",
+                        "size": zip_size,
+                        "file_count": len(type_files),
+                        "compression": "zip",
+                        "priority": file_type["priority"]
+                    }
+                    parts.append(part)
+                    total_file_count += len(type_files)
+                    total_size += zip_size
+
+                    logger.info(f"download_directory_multipart{trial_info} ... Created {file_type['name']} part: {len(type_files)} files, {zip_size} bytes")
+
+            if not parts:
+                logger.warning(f"download_directory_multipart{trial_info} ... No files found for download")
+                return {"error": f"No files found for run {run_name}", "status_code": 404}
+
+            logger.info(f"download_directory_multipart{trial_info} ... Multi-part download completed: {len(parts)} parts, {total_file_count} total files, {total_size} total bytes")
+
+            return {
+                "run_name": run_name,
+                "download_method": "multipart",
+                "parts": parts,
+                "total_parts": len(parts),
+                "total_file_count": total_file_count,
+                "total_size": total_size,
+                "trial_id": trial_id,
+                "trial_number": trial_number
+            }
+
         else:
             return {"error": f"Unknown command: {command}", "status_code": 400}
 
@@ -1402,7 +1322,7 @@ async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     logger.debug("running handler ... processing RunPod serverless request")
 
     # Handle simple HTTP endpoints for file downloads
-    if isinstance(event, dict) and event.get('input', {}).get('command') in ['health', 'list_files', 'download_file', 'download_directory']:
+    if isinstance(event, dict) and event.get('input', {}).get('command') in ['health', 'list_files', 'download_file', 'download_directory', 'download_directory_multipart']:
         return await handle_simple_http_endpoints(event)
 
     # 🔍 DEBUG: Log the entire event structure
@@ -1440,8 +1360,6 @@ async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         # Route to appropriate handler
         if command == 'start_training':
             return await start_training(job)  # ✅ Awaits coroutine to get Dict
-        elif command == 'start_final_model_training':
-            return await start_final_model_training(job)  # ✅ Final model training
         else:
             error_msg = f"Unknown command: {command}"
             logger.error(f"running handler ... {error_msg}")

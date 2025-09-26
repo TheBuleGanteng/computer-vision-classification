@@ -616,6 +616,32 @@ def download_directory_via_runpod_api(
                 timeout=timeout
             )
 
+            # Check for 502 Bad Gateway errors with worker-specific URLs and retry with load-balanced URL
+            if (worker_id and download_response and download_response.get("error") and
+                "502" in str(download_response.get("error")) and "Bad Gateway" in str(download_response.get("error"))):
+                logger.warning(f"⚠️ Worker-specific URL failed with 502 Bad Gateway for {download_type}{trial_info}")
+                logger.info(f"🔄 Retrying {download_type} download with load-balanced URL instead of worker-specific URL")
+
+                # Retry with load-balanced endpoint
+                fallback_url = runpod_api_url
+                logger.info(f"running download_directory_via_runpod_api{trial_info} ... Fallback to load-balanced endpoint: {fallback_url}")
+
+                download_response = _call_runpod_api(
+                    runpod_api_url=fallback_url,
+                    runpod_api_key=runpod_api_key,
+                    command="download_directory",
+                    run_name=run_name,
+                    download_type=download_type,
+                    trial_id=trial_id,
+                    trial_number=trial_number,
+                    timeout=timeout
+                )
+
+                if download_response and not download_response.get("error"):
+                    logger.info(f"✅ Fallback to load-balanced URL succeeded for {download_type}{trial_info}")
+                else:
+                    logger.error(f"❌ Fallback to load-balanced URL also failed for {download_type}{trial_info}")
+
             logger.info(f"running download_directory_via_runpod_api{trial_info} ... RunPod API call completed for {download_type} download")
             if worker_id and download_response:
                 logger.info(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning successful for {download_type} with worker {worker_id}")
@@ -697,4 +723,207 @@ def download_directory_via_runpod_api(
             logger.error(f"running download_directory_via_runpod_api{trial_info} ... Worker pinning exception with worker {worker_id}")
         else:
             logger.error(f"running download_directory_via_runpod_api{trial_info} ... Load balancer exception - no worker pinning used")
+        return False
+
+
+def download_directory_multipart_via_runpod_api(
+    runpod_api_url: str,
+    runpod_api_key: str,
+    run_name: str,
+    local_dir: str,
+    timeout: int = 300,
+    trial_id: str = None,
+    trial_number: int = None,
+    worker_id: str = None,
+    max_part_size_mb: int = 8
+) -> bool:
+    """
+    Download entire directory from RunPod worker using multi-part single response to avoid worker isolation issues.
+    Makes a single request that returns all file types in separate parts within the response.
+    This solves the worker isolation problem where multiple requests might hit different workers.
+
+    Args:
+        runpod_api_url: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
+        runpod_api_key: RunPod API key for authentication
+        run_name: Run name to identify directory
+        local_dir: Local directory to extract files to
+        timeout: Timeout in seconds for the request
+        trial_id: Optional trial ID for logging
+        trial_number: Optional trial number for logging
+        worker_id: Optional worker ID for pinning requests to specific worker
+        max_part_size_mb: Maximum size in MB for each part (sent to server as hint)
+
+    Returns:
+        bool: True if download succeeded, False otherwise
+    """
+    try:
+        # Format trial information for logs
+        trial_info = ""
+        if trial_number is not None:
+            trial_info = f" (trial_{trial_number}"
+            if trial_id:
+                trial_info += f", {trial_id}"
+            trial_info += ")"
+
+        logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Starting multipart download for run: {run_name}")
+
+        # Determine API URL - prefer worker-specific for consistency
+        if worker_id:
+            # Use worker-specific endpoint for guaranteed same-worker routing
+            api_url = f"https://{worker_id}-80.proxy.runpod.net"
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using worker-specific endpoint for guaranteed same-worker routing")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker ID: {worker_id}")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker endpoint: {api_url}")
+        else:
+            # Use load-balanced endpoint (may hit different workers)
+            api_url = runpod_api_url
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint (may hit different workers)")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer endpoint: {api_url}")
+            logger.warning(f"running download_directory_multipart_via_runpod_api{trial_info} ... No worker ID provided - using multipart approach to minimize worker isolation risk")
+
+        # Create local directory if it doesn't exist
+        local_path = Path(local_dir)
+        local_path.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"📦 Starting multipart download for run: {run_name}{trial_info}")
+        logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Calling RunPod API for multipart download")
+
+        if worker_id:
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using worker-specific endpoint for multipart download: {api_url}")
+        else:
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint for multipart download: {api_url}")
+
+        # Make single multipart request
+        download_response = _call_runpod_api(
+            runpod_api_url=api_url,
+            runpod_api_key=runpod_api_key,
+            command="download_directory_multipart",
+            run_name=run_name,
+            trial_id=trial_id,
+            trial_number=trial_number,
+            max_part_size_mb=max_part_size_mb,
+            timeout=timeout
+        )
+
+        # Handle 502 Bad Gateway errors with fallback (if using worker-specific URL)
+        if (worker_id and download_response and download_response.get("error") and
+            "502" in str(download_response.get("error")) and "Bad Gateway" in str(download_response.get("error"))):
+            logger.warning(f"⚠️ Worker-specific URL failed with 502 Bad Gateway for multipart download{trial_info}")
+            logger.info(f"🔄 Retrying multipart download with load-balanced URL instead of worker-specific URL")
+
+            # Retry with load-balanced endpoint
+            fallback_url = runpod_api_url
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Fallback to load-balanced endpoint: {fallback_url}")
+
+            download_response = _call_runpod_api(
+                runpod_api_url=fallback_url,
+                runpod_api_key=runpod_api_key,
+                command="download_directory_multipart",
+                run_name=run_name,
+                trial_id=trial_id,
+                trial_number=trial_number,
+                max_part_size_mb=max_part_size_mb,
+                timeout=timeout
+            )
+
+            if download_response and not download_response.get("error"):
+                logger.info(f"✅ Fallback to load-balanced URL succeeded for multipart download{trial_info}")
+            else:
+                logger.error(f"❌ Fallback to load-balanced URL also failed for multipart download{trial_info}")
+
+        logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... RunPod API call completed for multipart download")
+
+        if not download_response or download_response.get("error"):
+            logger.warning(f"⚠️ Failed to download multipart{trial_info}: {download_response.get('error', 'Unknown error')}")
+            return False
+
+        # Process multipart response
+        parts = download_response.get("parts", [])
+        total_parts = download_response.get("total_parts", 0)
+        total_file_count = download_response.get("total_file_count", 0)
+        total_size = download_response.get("total_size", 0)
+
+        if not parts or total_parts == 0:
+            logger.info(f"📭 No parts to download for run: {run_name}{trial_info}")
+            return True
+
+        logger.info(f"📦 Processing {total_parts} parts for multipart download{trial_info}: {total_file_count} total files, {total_size} total bytes")
+
+        # Extract each part
+        import tempfile
+        import zipfile
+        import base64
+
+        successful_parts = 0
+        for i, part in enumerate(parts):
+            part_type = part.get("type", f"part_{i}")
+            zip_content = part.get("content")
+            filename = part.get("filename", f"{run_name}_{part_type}.zip")
+            file_count = part.get("file_count", 0)
+            part_size = part.get("size", 0)
+
+            if not zip_content or file_count == 0:
+                logger.info(f"📭 No {part_type} files in part {i+1}/{total_parts}{trial_info}")
+                continue
+
+            # Decode base64 content
+            try:
+                decoded_content = base64.b64decode(zip_content)
+                logger.info(f"✅ Downloaded part {i+1}/{total_parts} ({part_type}){trial_info}: {file_count} files, {part_size} bytes")
+            except Exception as e:
+                logger.error(f"❌ Failed to decode base64 content for part {i+1}/{total_parts} ({part_type}){trial_info}: {e}")
+                continue
+
+            # Save zip temporarily and extract
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
+                tmp_zip.write(decoded_content)
+                temp_zip_path = tmp_zip.name
+
+            try:
+                # Extract zip to local directory
+                with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
+                    zipf.extractall(local_path)
+                    extracted_files = zipf.namelist()
+                    logger.info(f"📂 Extracted {len(extracted_files)} {part_type} files from part {i+1}/{total_parts} to: {local_path}")
+
+                successful_parts += 1
+
+            except Exception as e:
+                logger.error(f"❌ Failed to extract part {i+1}/{total_parts} ({part_type}){trial_info}: {e}")
+                continue
+            finally:
+                # Clean up temporary zip file
+                try:
+                    import os
+                    os.unlink(temp_zip_path)
+                except Exception as cleanup_e:
+                    logger.warning(f"⚠️ Failed to cleanup temporary zip file: {cleanup_e}")
+
+        # Report results
+        if successful_parts == total_parts:
+            logger.info(f"✅ Multipart download completed successfully{trial_info}: {successful_parts}/{total_parts} parts")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Multipart download completed successfully")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Success rate: {successful_parts}/{total_parts} parts")
+            if worker_id:
+                logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker pinning successful - all parts from worker {worker_id}")
+            return True
+        elif successful_parts > 0:
+            logger.warning(f"⚠️ Partial multipart download{trial_info}: {successful_parts}/{total_parts} parts succeeded")
+            logger.warning(f"running download_directory_multipart_via_runpod_api{trial_info} ... Partial success rate: {successful_parts}/{total_parts} parts")
+            return True  # Consider partial success as success since some files were downloaded
+        else:
+            logger.error(f"❌ Multipart download failed{trial_info}: 0/{total_parts} parts succeeded")
+            logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... All parts failed for run: {run_name}")
+            if worker_id:
+                logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker pinning failed - multipart download failed even with specific worker {worker_id}")
+            else:
+                logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer routing failed - consider implementing worker pinning")
+            return False
+
+    except Exception as e:
+        logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Exception during multipart download: {e}")
+        if worker_id:
+            logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker pinning exception with worker {worker_id}")
+        else:
+            logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer exception - no worker pinning used")
         return False

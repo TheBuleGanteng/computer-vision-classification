@@ -21,7 +21,6 @@ from dotenv import load_dotenv
 import json
 import numpy as np
 import optuna
-from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 import os
 from pathlib import Path
@@ -53,7 +52,7 @@ from model_visualizer import ModelVisualizer
 from plot_generator import PlotGenerator
 from utils.logger import logger
 from utils.run_name import create_run_name
-from utils.runpod_direct_download import download_directory_via_runpod_api
+from utils.runpod_direct_download import download_directory_via_runpod_api, download_directory_multipart_via_runpod_api
 
 
 # Auto-load .env file from project root
@@ -1274,15 +1273,16 @@ class ModelOptimizer:
                                 # Automatic download via batch API (README line 116)
                                 api_key = os.getenv('RUNPOD_API_KEY')
                                 if api_key and self.config.runpod_service_endpoint and self.run_name:
-                                    logger.info(f"📥 Downloading trial {trial.number} plots via automatic batch download")
+                                    logger.info(f"📥 Downloading trial {trial.number} plots via automatic multipart batch download")
 
-                                    success = download_directory_via_runpod_api(
+                                    success = download_directory_multipart_via_runpod_api(
                                         runpod_api_url=self.config.runpod_service_endpoint,
                                         runpod_api_key=api_key,
                                         run_name=self.run_name,
                                         local_dir=str(local_plots_dir),
                                         trial_id=self.run_name,
-                                        trial_number=trial.number
+                                        trial_number=trial.number,
+                                        worker_id=worker_id
                                     )
 
                                     if success:
@@ -1936,16 +1936,16 @@ class ModelOptimizer:
                 logger.error(f"running _save_trial_model ... Results directory not set, cannot save trial {trial_number} model")
                 return
 
-            # Create trial_models directory if it doesn't exist
-            trial_models_dir = Path(self.results_dir) / "trial_models"
-            trial_models_dir.mkdir(exist_ok=True)
+            # Create plots directory structure to match RunPod approach
+            plots_dir = Path(self.results_dir) / "plots"
+            plots_dir.mkdir(exist_ok=True)
 
-            # Create trial-specific directory
-            trial_dir = trial_models_dir / f"trial_{trial_number:03d}"
+            # Create trial-specific directory (matching RunPod pattern)
+            trial_dir = plots_dir / f"trial_{trial_number}"
             trial_dir.mkdir(exist_ok=True)
 
-            # Save the model in Keras format
-            model_filename = f"trial_{trial_number:03d}_acc_{test_accuracy:.4f}_model.keras"
+            # Save the model in Keras format (matching RunPod filename pattern)
+            model_filename = f"final_model_{self.dataset_config.name}_trial_{trial_number}.keras"
             model_path = trial_dir / model_filename
             model.save(str(model_path))
 
@@ -1960,7 +1960,7 @@ class ModelOptimizer:
                 "run_name": self.run_name
             }
 
-            metadata_path = trial_dir / f"trial_{trial_number:03d}_metadata.json"
+            metadata_path = trial_dir / f"trial_{trial_number}_metadata.json"
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2, default=str)
 
@@ -1994,7 +1994,7 @@ class ModelOptimizer:
         self.study = optuna.create_study(
             direction='maximize',
             sampler=TPESampler(n_startup_trials=self.config.startup_trials, seed=self.config.random_seed),
-            pruner=MedianPruner(
+            pruner=optuna.pruners.MedianPruner(
                 n_startup_trials=self.config.startup_trials,
                 n_warmup_steps=self.config.warmup_steps
             )
@@ -2375,209 +2375,6 @@ class ModelOptimizer:
         except Exception as e:
             logger.error(f"running ModelOptimizer._save_results ... Failed to save optimization results: {e}")
 
-    def _train_final_model_via_runpod_service(self, results: OptimizationResult) -> Optional[str]:
-        """
-        Train final model using RunPod service with best hyperparameters
-        
-        Args:
-            results: Optimization results containing best hyperparameters
-            
-        Returns:
-            Path to the saved final model, or None if training failed
-        """
-        logger.debug("running _train_final_model_via_runpod_service ... Starting RunPod final model training")
-
-        # Mark final model building as started
-        self._final_model_building = True
-        self._final_model_available = False
-
-        try:
-            api_key = os.getenv('RUNPOD_API_KEY')
-            if not api_key:
-                raise RuntimeError("RUNPOD_API_KEY environment variable not set")
-            
-            # Build request payload for final model training
-            request_payload = {
-                "input": {
-                    "command": "start_final_model_training",
-                    "dataset_name": self.dataset_name,
-                    "run_name": self.run_name,
-                    "best_params": results.best_params,
-                    "config": {
-                        "mode": self.config.mode,
-                        "objective": self.config.optimize_for,
-                        "gpu_proxy_sample_percentage": self.config.gpu_proxy_sample_percentage,
-                        "use_multi_gpu": self.config.use_multi_gpu,
-                        "target_gpus_per_worker": self.config.target_gpus_per_worker,
-                        "auto_detect_gpus": self.config.auto_detect_gpus,
-                        "multi_gpu_batch_size_scaling": self.config.multi_gpu_batch_size_scaling,
-                        "validation_split": 0.2,
-                        "test_size": 0.2,
-                        "create_optuna_model_plots": self.config.create_optuna_model_plots
-                    }
-                }
-            }
-            
-            logger.debug(f"running _train_final_model_via_runpod_service ... Final model payload: {json.dumps(request_payload, indent=2)}")
-            
-            # Submit final model training job
-            with requests.Session() as sess:
-                # Set authentication headers (same as trial training)
-                sess.headers.update({
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    "Connection": "close"
-                })
-                
-                submit_url = self.config.runpod_service_endpoint
-                if not submit_url:
-                    raise RuntimeError("RunPod service endpoint not configured")
-                    
-                logger.debug(f"running _train_final_model_via_runpod_service ... POST {submit_url}")
-                response = sess.post(submit_url, json=request_payload, timeout=self.config.runpod_service_timeout)
-                response.raise_for_status()
-                result = response.json()
-                
-                job_id = result.get('id')
-                if not job_id:
-                    raise RuntimeError("No job ID returned from RunPod service for final model training")
-                
-                logger.debug(f"running _train_final_model_via_runpod_service ... Final model job submitted with ID: {job_id}")
-                
-                # Poll for completion with progress reporting
-                max_poll_time = 3600  # 1 hour timeout for final model training
-                poll_interval = 10
-                start_time = time.time()
-                
-                while time.time() - start_time < max_poll_time:
-                    status_url = f"{submit_url.rsplit('/run', 1)[0]}/status/{job_id}"
-                    status_response = sess.get(status_url, timeout=30)
-                    status_response.raise_for_status()
-                    
-                    status_data = status_response.json()
-                    job_status = status_data.get('status', 'UNKNOWN')
-
-                    # Extract worker ID for proxy URL construction
-                    worker_id = status_data.get('workerId', status_data.get('worker_id'))
-                    if worker_id:
-                        logger.info(f"🎯 FINAL MODEL POLLING - Worker ID: {worker_id}")
-                    else:
-                        logger.debug(f"🔍 FINAL MODEL POLLING - No worker ID found in response")
-
-                    logger.debug(f"running _train_final_model_via_runpod_service ... Final model job {job_id} status: {job_status}")
-                    
-                    if job_status == 'COMPLETED':
-                        output = status_data.get('output', {})
-                        if output.get('success'):
-                            logger.info(f"✅ Final model training completed via RunPod")
-                            
-                            # Report completion progress
-                            self._report_final_model_progress("Completed", 1.0)
-                            
-                            # Downloads are handled automatically by API server
-                            model_path = output.get('final_model_path')
-                            if model_path:
-                                logger.debug(f"running _train_final_model_via_runpod_service ... Final model saved at (remote): {model_path}")
-                                # Mark final model as completed and available
-                                self._final_model_building = False
-                                self._final_model_available = True
-                                return model_path
-                            else:
-                                logger.warning(f"running _train_final_model_via_runpod_service ... No model path returned")
-                                return None
-                        else:
-                            error_msg = output.get('error', 'Unknown error during final model training')
-                            logger.error(f"running _train_final_model_via_runpod_service ... Final model training failed: {error_msg}")
-                            raise RuntimeError(f"Final model training failed: {error_msg}")
-                    
-                    elif job_status in ['FAILED', 'CANCELLED', 'TIMED_OUT']:
-                        output = status_data.get('output', {})
-                        error_msg = output.get('error', f'Final model job {job_status.lower()}')
-                        
-                        # Enhanced error logging for debugging
-                        logger.error(f"running _train_final_model_via_runpod_service ... Final model training failed: {error_msg}")
-                        logger.error(f"running _train_final_model_via_runpod_service ... Full RunPod response: {json.dumps(status_data, indent=2)}")
-
-                        if 'logs' in output:
-                            logger.error(f"running _train_final_model_via_runpod_service ... RunPod logs: {output['logs']}")
-
-                        raise RuntimeError(f"Final model training failed: {error_msg}")
-                    
-                    elif job_status == 'IN_PROGRESS':
-                        # Extract real-time progress updates from RunPod (similar to trial progress)
-                        progress_extracted = False
-                        output = status_data.get('output', {})
-                        
-                        # Debug: Log what we're getting from RunPod
-                        logger.debug(f"running _train_final_model_via_runpod_service ... STATUS DATA KEYS: {list(status_data.keys())}")
-                        logger.debug(f"running _train_final_model_via_runpod_service ... OUTPUT KEYS: {list(output.keys()) if output else 'None'}")
-                        
-                        # Look for progress updates in various possible locations (using same logic as trial progress)
-                        progress_updates = []
-                        
-                        # Check if output directly contains progress data (this is where RunPod puts it)
-                        if output and any(key in output for key in ['current_epoch', 'total_epochs', 'epoch_progress', 'message']):
-                            # Direct progress data in output
-                            progress_updates = [output]
-                            logger.debug(f"running _train_final_model_via_runpod_service ... Found progress data directly in output object")
-                        # Check for progress updates array
-                        elif 'progress_updates' in output:
-                            progress_updates = output['progress_updates']
-                            logger.debug(f"running _train_final_model_via_runpod_service ... Found progress updates array")
-                        # Check for streaming output that might contain progress
-                        elif 'stream' in output and isinstance(output['stream'], list):
-                            progress_updates = output['stream']
-                            logger.debug(f"running _train_final_model_via_runpod_service ... Found {len(progress_updates)} progress updates in stream")
-                        # Check root level for progress info
-                        elif 'progress' in status_data:
-                            progress_data = status_data['progress']
-                            if isinstance(progress_data, dict):
-                                progress_updates = [progress_data]
-                                logger.debug(f"running _train_final_model_via_runpod_service ... Found progress data at root level")
-                        else:
-                            logger.debug(f"running _train_final_model_via_runpod_service ... No progress updates found in expected locations")
-                        
-                        # Process the latest progress update for final model
-                        if progress_updates:
-                            latest_progress = progress_updates[-1]  # Get most recent
-                            
-                            # Check if this is final model progress
-                            if isinstance(latest_progress, dict) and latest_progress.get('final_model'):
-                                current_epoch = latest_progress.get('current_epoch', 1)
-                                total_epochs = latest_progress.get('total_epochs', 5)
-                                epoch_progress = latest_progress.get('epoch_progress', 0.0)
-                                
-                                # Calculate overall progress: (completed_epochs + current_epoch_progress) / total_epochs
-                                completed_epochs = max(0, current_epoch - 1)
-                                overall_progress = (completed_epochs + epoch_progress) / total_epochs
-                                
-                                step_message = f"Epoch {current_epoch}/{total_epochs} ({epoch_progress:.1%})"
-                                self._report_final_model_progress(step_message, overall_progress)
-                                progress_extracted = True
-                                
-                                logger.debug(f"running _train_final_model_via_runpod_service ... Real-time progress: {step_message}, overall: {overall_progress:.1%}")
-                        
-                        # Fallback to time-based estimate if no real-time progress available
-                        if not progress_extracted:
-                            elapsed = time.time() - start_time
-                            estimated_total = 1800  # 30 minutes estimate
-                            progress = min(0.95, elapsed / estimated_total)
-                            self._report_final_model_progress("Training final model", progress)
-                    
-                    time.sleep(poll_interval)
-                
-                raise RuntimeError(f"Final model training job {job_id} did not complete within {max_poll_time} seconds")
-                
-        except Exception as e:
-            logger.error(f"running _train_final_model_via_runpod_service ... RunPod final model training failed: {e}")
-            # Reset final model building status on failure
-            self._final_model_building = False
-            self._final_model_available = False
-            if self.config.runpod_service_fallback_local:
-                logger.warning(f"running _train_final_model_via_runpod_service ... Falling back to local execution for final model")
-                return self._build_final_model_locally(results)
-            raise RuntimeError(f"RunPod final model training failed: {e}")
-
     def _build_final_model_via_runpod_copy(self, results: OptimizationResult) -> Optional[str]:
         """
         Build final model for RunPod by copying the best trial model and plots.
@@ -2716,10 +2513,10 @@ class ModelOptimizer:
                 logger.error("running _build_final_model_locally ... Results directory not set")
                 raise RuntimeError("Results directory not set")
 
-            trial_models_dir = Path(self.results_dir) / "trial_models"
-            if not trial_models_dir.exists():
-                logger.error(f"running _build_final_model_locally ... Trial models directory not found: {trial_models_dir}")
-                raise FileNotFoundError("No trial models were saved during optimization")
+            plots_dir = Path(self.results_dir) / "plots"
+            if not plots_dir.exists():
+                logger.error(f"running _build_final_model_locally ... Plots directory not found: {plots_dir}")
+                raise FileNotFoundError("No trial plots were created during optimization")
 
             # Get the best trial number from results
             best_trial_number = getattr(results, 'best_trial_number', None)
@@ -2733,8 +2530,8 @@ class ModelOptimizer:
             best_model_path: Optional[Path] = None
 
             if best_trial_number is not None:
-                # Try to find the specific trial directory
-                trial_dir = trial_models_dir / f"trial_{best_trial_number:03d}"
+                # Try to find the specific trial directory (new plots pattern: trial_0, trial_1, etc.)
+                trial_dir = plots_dir / f"trial_{best_trial_number}"
                 if trial_dir.exists():
                     best_trial_dir = trial_dir
                     logger.debug(f"running _build_final_model_locally ... Found best trial directory: {best_trial_dir}")
@@ -2746,7 +2543,7 @@ class ModelOptimizer:
                 logger.debug("running _build_final_model_locally ... Searching for best trial by accuracy")
                 best_accuracy = -1.0
 
-                for trial_dir in trial_models_dir.iterdir():
+                for trial_dir in plots_dir.iterdir():
                     if not trial_dir.is_dir() or not trial_dir.name.startswith("trial_"):
                         continue
 
