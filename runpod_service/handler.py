@@ -873,7 +873,11 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
 
         # Log worker persistence status
         logger.info(f"running start_training ... Worker persistence enabled: {worker_persistence_enabled}")
-        
+
+        # Log worker tracking info for isolation analysis
+        worker_id = os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Training completed on worker_id={worker_id}, trial_id={trial_id}")
+
         # Build simplified response structure with worker persistence info
         response = {
             "trial_id": trial_id,
@@ -1179,23 +1183,41 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
             if not run_name:
                 return {"error": "run_name parameter required", "status_code": 400}
 
+            # Log worker tracking info for isolation analysis
+            worker_id = os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+            logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Download request received on worker_id={worker_id}, run_name={run_name}{trial_info}")
+
             plots_dir = Path("/tmp/plots") / run_name
             logger.info(f"download_directory_multipart{trial_info} ... Looking for directory: {plots_dir}")
 
-            # Debug: List what's available in /tmp/plots to help troubleshoot
+            # Enhanced directory existence verification for isolation analysis
             try:
                 base_plots_dir = Path("/tmp/plots")
                 if base_plots_dir.exists():
                     available_dirs = [d.name for d in base_plots_dir.iterdir() if d.is_dir()]
+                    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: worker_id={worker_id} has directories: {available_dirs}")
                     logger.info(f"download_directory_multipart{trial_info} ... Available directories in /tmp/plots: {available_dirs}")
+
+                    # Check if the requested directory exists
+                    if run_name in available_dirs:
+                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ worker_id={worker_id} HAS directory {run_name}")
+                    else:
+                        logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ worker_id={worker_id} MISSING directory {run_name}")
+                        logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: This confirms worker isolation - directory was created on different worker")
                 else:
+                    logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: worker_id={worker_id} has no /tmp/plots directory at all")
                     logger.warning(f"download_directory_multipart{trial_info} ... /tmp/plots directory doesn't exist!")
             except Exception as e:
                 logger.warning(f"download_directory_multipart{trial_info} ... Failed to list /tmp/plots contents: {e}")
 
             if not plots_dir.exists() or not plots_dir.is_dir():
+                logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: CONFIRMED - worker_id={worker_id} cannot access directory {run_name}")
                 logger.error(f"running download_directory_multipart{trial_info} ... Directory {plots_dir} not found or not a directory")
-                return {"error": f"Directory for run {run_name} not found", "status_code": 404}
+                return {
+                    "error": f"Directory for run {run_name} not found",
+                    "status_code": 404,
+                    "download_worker_id": worker_id
+                }
 
             logger.info(f"running download_directory_multipart{trial_info} ... Processing multi-part download request")
 
@@ -1296,7 +1318,8 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
                 "total_file_count": total_file_count,
                 "total_size": total_size,
                 "trial_id": trial_id,
-                "trial_number": trial_number
+                "trial_number": trial_number,
+                "download_worker_id": worker_id
             }
 
         else:
@@ -1319,6 +1342,10 @@ async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Response dictionary for RunPod
     """
+    # Get worker identification for isolation tracking
+    worker_id = os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+
+    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Handler called on worker_id={worker_id}")
     logger.debug("running handler ... processing RunPod serverless request")
 
     # Handle simple HTTP endpoints for file downloads

@@ -1191,8 +1191,10 @@ class ModelOptimizer:
                     worker_id = status_data.get('workerId', status_data.get('worker_id'))
                     if worker_id:
                         logger.info(f"🎯 RUNPOD POLLING - Worker ID: {worker_id}")
+                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} TRAINED on worker_id={worker_id}")
                     else:
                         logger.debug(f"🔍 RUNPOD POLLING - No worker ID found in response")
+                        logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} completed but no worker_id available")
 
                     logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
                     
@@ -1206,14 +1208,23 @@ class ModelOptimizer:
 
                     if job_status == 'COMPLETED':
                         logger.info(f"🎉 RUNPOD COMPLETED - Trial {trial.number} job finished!")
-                        
+                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ Training COMPLETED for trial {trial.number} on worker_id={worker_id}")
+
                         output = status_data.get('output', {})
                         #logger.info(f"🔍 RUNPOD COMPLETED - Processing output data: {json.dumps(output, indent=2) if output else 'NO OUTPUT DATA'}")
-                        
+
                         if not output:
                             logger.error(f"🚨 RUNPOD COMPLETED - No output returned from completed RunPod job")
+                            logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ Training FAILED - no output from trial {trial.number} on worker_id={worker_id}")
                             logger.error(f"🚨 RUNPOD COMPLETED - Full status_data: {json.dumps(status_data, indent=2)}")
                             raise RuntimeError("No output returned from completed RunPod job")
+
+                        # Verify training completion success
+                        training_success = output.get('success', False)
+                        if training_success:
+                            logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ Training SUCCESS confirmed for trial {trial.number} on worker_id={worker_id}")
+                        else:
+                            logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: ⚠️ Training completed but success=False for trial {trial.number} on worker_id={worker_id}")
                         
                         success_flag = output.get('success', False)
                         logger.info(f"🔍 RUNPOD COMPLETED - Success flag: {success_flag}")
@@ -1274,6 +1285,7 @@ class ModelOptimizer:
                                 api_key = os.getenv('RUNPOD_API_KEY')
                                 if api_key and self.config.runpod_service_endpoint and self.run_name:
                                     logger.info(f"📥 Downloading trial {trial.number} plots via automatic multipart batch download")
+                                    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Attempting download for trial {trial.number} (trained on worker_id={worker_id})")
 
                                     success = download_directory_multipart_via_runpod_api(
                                         runpod_api_url=self.config.runpod_service_endpoint,
@@ -1287,9 +1299,12 @@ class ModelOptimizer:
 
                                     if success:
                                         logger.info(f"✅ Trial {trial.number} plots downloaded successfully")
+                                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ Download SUCCESS for trial {trial.number} (trained on worker_id={worker_id})")
                                         self._trials_with_plots.add(trial.number)
                                     else:
                                         logger.error(f"❌ Failed to download trial {trial.number} plots")
+                                        logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ Download FAILED for trial {trial.number} (trained on worker_id={worker_id})")
+                                        logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: This suggests worker isolation if trained worker != download worker")
                                 else:
                                     if not api_key:
                                         logger.warning(f"❌ Missing RUNPOD_API_KEY for trial {trial.number} download")

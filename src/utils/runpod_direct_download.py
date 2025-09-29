@@ -767,19 +767,14 @@ def download_directory_multipart_via_runpod_api(
 
         logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Starting multipart download for run: {run_name}")
 
-        # Determine API URL - prefer worker-specific for consistency
+        # Use load-balanced endpoint directly (worker-specific URLs consistently fail with 502 errors)
+        api_url = runpod_api_url
+        logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint with multipart approach to avoid worker isolation")
+        logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer endpoint: {api_url}")
         if worker_id:
-            # Use worker-specific endpoint for guaranteed same-worker routing
-            api_url = f"https://{worker_id}-80.proxy.runpod.net"
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using worker-specific endpoint for guaranteed same-worker routing")
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker ID: {worker_id}")
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker endpoint: {api_url}")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker ID {worker_id} available but skipping worker-specific URL (502 errors)")
         else:
-            # Use load-balanced endpoint (may hit different workers)
-            api_url = runpod_api_url
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint (may hit different workers)")
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer endpoint: {api_url}")
-            logger.warning(f"running download_directory_multipart_via_runpod_api{trial_info} ... No worker ID provided - using multipart approach to minimize worker isolation risk")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... No worker ID provided - using load-balanced multipart approach")
 
         # Create local directory if it doesn't exist
         local_path = Path(local_dir)
@@ -787,11 +782,7 @@ def download_directory_multipart_via_runpod_api(
 
         logger.info(f"📦 Starting multipart download for run: {run_name}{trial_info}")
         logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Calling RunPod API for multipart download")
-
-        if worker_id:
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using worker-specific endpoint for multipart download: {api_url}")
-        else:
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint for multipart download: {api_url}")
+        logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint for multipart download: {api_url}")
 
         # Make single multipart request
         download_response = _call_runpod_api(
@@ -805,33 +796,20 @@ def download_directory_multipart_via_runpod_api(
             timeout=timeout
         )
 
-        # Handle 502 Bad Gateway errors with fallback (if using worker-specific URL)
-        if (worker_id and download_response and download_response.get("error") and
-            "502" in str(download_response.get("error")) and "Bad Gateway" in str(download_response.get("error"))):
-            logger.warning(f"⚠️ Worker-specific URL failed with 502 Bad Gateway for multipart download{trial_info}")
-            logger.info(f"🔄 Retrying multipart download with load-balanced URL instead of worker-specific URL")
-
-            # Retry with load-balanced endpoint
-            fallback_url = runpod_api_url
-            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Fallback to load-balanced endpoint: {fallback_url}")
-
-            download_response = _call_runpod_api(
-                runpod_api_url=fallback_url,
-                runpod_api_key=runpod_api_key,
-                command="download_directory_multipart",
-                run_name=run_name,
-                trial_id=trial_id,
-                trial_number=trial_number,
-                max_part_size_mb=max_part_size_mb,
-                timeout=timeout
-            )
-
-            if download_response and not download_response.get("error"):
-                logger.info(f"✅ Fallback to load-balanced URL succeeded for multipart download{trial_info}")
-            else:
-                logger.error(f"❌ Fallback to load-balanced URL also failed for multipart download{trial_info}")
-
         logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... RunPod API call completed for multipart download")
+
+        # Extract download worker ID for definitive worker isolation analysis
+        download_worker_id = download_response.get("download_worker_id", "unknown_download_worker") if download_response else "no_response"
+
+        # Log definitive worker comparison - this is the smoking gun evidence
+        if worker_id and download_worker_id:
+            if worker_id == download_worker_id:
+                logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ SAME WORKER - Training worker_id={worker_id} == Download worker_id={download_worker_id}")
+            else:
+                logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ WORKER MISMATCH - Training worker_id={worker_id} != Download worker_id={download_worker_id}")
+                logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: DEFINITIVE PROOF of worker isolation issue")
+        else:
+            logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: ⚠️ Missing worker IDs - training={worker_id}, download={download_worker_id}")
 
         if not download_response or download_response.get("error"):
             logger.warning(f"⚠️ Failed to download multipart{trial_info}: {download_response.get('error', 'Unknown error')}")
@@ -904,8 +882,7 @@ def download_directory_multipart_via_runpod_api(
             logger.info(f"✅ Multipart download completed successfully{trial_info}: {successful_parts}/{total_parts} parts")
             logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Multipart download completed successfully")
             logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Success rate: {successful_parts}/{total_parts} parts")
-            if worker_id:
-                logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker pinning successful - all parts from worker {worker_id}")
+            logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load-balanced multipart approach successful - worker isolation avoided")
             return True
         elif successful_parts > 0:
             logger.warning(f"⚠️ Partial multipart download{trial_info}: {successful_parts}/{total_parts} parts succeeded")
@@ -914,16 +891,10 @@ def download_directory_multipart_via_runpod_api(
         else:
             logger.error(f"❌ Multipart download failed{trial_info}: 0/{total_parts} parts succeeded")
             logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... All parts failed for run: {run_name}")
-            if worker_id:
-                logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker pinning failed - multipart download failed even with specific worker {worker_id}")
-            else:
-                logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer routing failed - consider implementing worker pinning")
+            logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load-balanced multipart approach failed")
             return False
 
     except Exception as e:
         logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Exception during multipart download: {e}")
-        if worker_id:
-            logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Worker pinning exception with worker {worker_id}")
-        else:
-            logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer exception - no worker pinning used")
+        logger.error(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load-balanced multipart approach exception")
         return False
