@@ -231,12 +231,21 @@ class ModelOptimizer:
                 self.run_timestamp = jakarta_time.strftime("%Y-%m-%d-%H-%M-%S")
                 logger.warning(f"running ModelOptimizer.__init__ ... Using fallback timestamp: {self.run_timestamp}")
         else:
-            # No run_name provided, generate timestamp with Jakarta timezone
-            logger.debug(f"running ModelOptimizer.__init__ ... No run_name provided, generating timestamp...")
+            # No run_name provided, generate timestamp and run_name with Jakarta timezone
+            logger.debug(f"running ModelOptimizer.__init__ ... No run_name provided, generating timestamp and run_name...")
             jakarta_tz = pytz.timezone('Asia/Jakarta')
             jakarta_time = datetime.now(jakarta_tz)
             self.run_timestamp = jakarta_time.strftime("%Y-%m-%d-%H-%M-%S")
+
+            # Generate run_name to match API server behavior
+            dataset_clean = self.dataset_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+            if self.config.mode == 'health':
+                self.run_name = f"{self.run_timestamp}_{dataset_clean}_health"
+            else:
+                self.run_name = f"{self.run_timestamp}_{dataset_clean}_simple"
+
             logger.debug(f"running ModelOptimizer.__init__ ... Generated timestamp: {self.run_timestamp}")
+            logger.debug(f"running ModelOptimizer.__init__ ... Generated run_name: {self.run_name}")
         if self.activation_override:
             logger.debug(f"running ModelOptimizer.__init__ ... Activation override: {self.activation_override} (will force this activation for all trials)")
         
