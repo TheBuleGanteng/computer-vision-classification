@@ -5,7 +5,9 @@ Implements specialized serverless hyperparameter optimization using existing bat
 
 # Web server wrapper for local testing and container deployment
 import base64
-from datetime import datetime
+import boto3
+from botocore.exceptions import ClientError
+from datetime import datetime, timedelta
 import json
 import numpy as np
 import os
@@ -37,6 +39,186 @@ from src.dataset_manager import DatasetManager
 
 def adjust_concurrency(current_concurrency):
     return min(current_concurrency + 1, 6)  # Your max workers
+
+
+def get_s3_client():
+    """
+    Create and return boto3 S3 client configured for RunPod S3.
+
+    Follows RunPod's official documentation pattern exactly.
+    Requires environment variables:
+    - AWS_ACCESS_KEY_ID or RUNPOD_S3_ACCESS_KEY
+    - AWS_SECRET_ACCESS_KEY or RUNPOD_S3_SECRET_ACCESS_KEY
+    - RUNPOD_S3_VOLUME_DATACENTER
+
+    Returns:
+        boto3.client: Configured S3 client
+    """
+    # Try standard AWS env vars first, then fall back to custom RUNPOD_S3_* names
+    s3_access_key = os.getenv('RUNPOD_S3_ACCESS_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
+    s3_secret_key = os.getenv('RUNPOD_S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
+    datacenter = os.getenv('RUNPOD_S3_VOLUME_DATACENTER')
+
+    if not s3_access_key or not s3_secret_key:
+        raise ValueError("S3 credentials not found in environment variables (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)")
+
+    if not datacenter:
+        raise ValueError("RUNPOD_S3_VOLUME_DATACENTER not found in environment variables")
+
+    # Construct datacenter-specific endpoint URL (lowercase)
+    datacenter_lower = datacenter.lower()
+    s3_endpoint = f"https://s3api-{datacenter_lower}.runpod.io"
+
+    logger.info(f"get_s3_client ... Configuring S3 client: endpoint={s3_endpoint}, region={datacenter_lower}")
+    logger.info(f"get_s3_client ... Access Key ID: {s3_access_key}")
+    logger.info(f"get_s3_client ... Secret Key prefix: {s3_secret_key[:10]}...")
+
+    # Use RunPod's documented pattern - simple boto3 client with no extra config
+    return boto3.client(
+        's3',
+        aws_access_key_id=s3_access_key,
+        aws_secret_access_key=s3_secret_key,
+        region_name=datacenter_lower,
+        endpoint_url=s3_endpoint
+    )
+
+
+def cleanup_all_s3_models():
+    """
+    Aggressively delete ALL files from S3 models/ prefix.
+    Called at the start of each trial to prevent orphaned files.
+
+    This ensures:
+    - No orphaned files from failed uploads
+    - No orphaned files from interrupted downloads
+    - No orphaned files from previous errors
+    - Clean slate for each trial
+    """
+    try:
+        s3_client = get_s3_client()
+        bucket = os.getenv('RUNPOD_S3_VOLUME_ID')
+
+        if not bucket:
+            logger.warning("cleanup_all_s3_models ... RUNPOD_S3_VOLUME_ID not set, skipping S3 cleanup")
+            return
+
+        logger.info("cleanup_all_s3_models ... Starting aggressive S3 cleanup (deleting ALL models/)")
+
+        # List all objects under models/ prefix
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=bucket,
+                Prefix='models/'
+            )
+
+            if 'Contents' not in response or len(response['Contents']) == 0:
+                logger.info("cleanup_all_s3_models ... No files found in S3 models/, nothing to clean")
+                return
+
+            objects_to_delete = response['Contents']
+            logger.info(f"cleanup_all_s3_models ... Found {len(objects_to_delete)} files to delete")
+
+            # Delete objects one at a time (RunPod S3 doesn't support batch delete well)
+            deleted_count = 0
+            failed_count = 0
+
+            for obj in objects_to_delete:
+                try:
+                    s3_client.delete_object(
+                        Bucket=bucket,
+                        Key=obj['Key']
+                    )
+                    deleted_count += 1
+                    logger.debug(f"cleanup_all_s3_models ... Deleted: {obj['Key']}")
+                except Exception as delete_error:
+                    failed_count += 1
+                    logger.warning(f"cleanup_all_s3_models ... Failed to delete {obj['Key']}: {delete_error}")
+
+            if failed_count > 0:
+                logger.warning(f"cleanup_all_s3_models ... Deleted {deleted_count}/{len(objects_to_delete)} files ({failed_count} failures)")
+            else:
+                logger.info(f"cleanup_all_s3_models ... ✅ Successfully deleted {deleted_count} files from S3")
+
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchBucket':
+                logger.warning(f"cleanup_all_s3_models ... S3 bucket '{bucket}' does not exist")
+            else:
+                raise
+
+    except Exception as e:
+        # Log but don't fail - cleanup failure shouldn't block training
+        logger.warning(f"cleanup_all_s3_models ... S3 cleanup failed (non-fatal): {e}")
+        logger.debug(f"cleanup_all_s3_models ... Traceback: {traceback.format_exc()}")
+
+
+def upload_model_to_s3(zip_file_path: Path, run_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Upload model ZIP file to RunPod S3 and return presigned URL.
+
+    Args:
+        zip_file_path: Path to the compressed models ZIP file
+        run_name: Run name for organizing S3 storage
+
+    Returns:
+        Dictionary with S3 metadata, or None on failure
+    """
+    try:
+        s3_client = get_s3_client()
+        bucket = os.getenv('RUNPOD_S3_VOLUME_ID')
+
+        if not bucket:
+            logger.error("upload_model_to_s3 ... RUNPOD_S3_VOLUME_ID not set")
+            return None
+
+        # S3 object key
+        s3_key = f"models/{run_name}/models.zip"
+        file_size = zip_file_path.stat().st_size
+
+        logger.info(f"upload_model_to_s3 ... Uploading {file_size} bytes to s3://{bucket}/{s3_key}")
+        logger.info(f"upload_model_to_s3 ... Bucket: {bucket}, Key: {s3_key}")
+        logger.info(f"upload_model_to_s3 ... Endpoint URL: {s3_client.meta.endpoint_url}")
+
+        # Upload file
+        s3_client.upload_file(
+            str(zip_file_path),
+            bucket,
+            s3_key,
+            ExtraArgs={
+                'ContentType': 'application/zip'
+            }
+        )
+
+        logger.info("upload_model_to_s3 ... ✅ Successfully uploaded models ZIP to S3")
+        logger.debug("running upload_model_to_s3 ... skipping presign (RunPod S3 does not support presigned URLs)")
+
+        # Return S3 metadata with HTTP URL for download
+        s3_path = f"s3://{bucket}/{s3_key}"
+        endpoint_url = getattr(getattr(s3_client, "meta", None), "endpoint_url", "")
+
+        # Construct HTTP URL for direct download: https://endpoint/bucket/key
+        s3_url = f"{endpoint_url}/{bucket}/{s3_key}"
+
+        return {
+            "filename": "models.zip",
+            "s3_path": s3_path,               # S3 protocol path
+            "s3_url": s3_url,                 # HTTP URL for download
+            "s3_key": s3_key,
+            "s3_bucket": bucket,
+            "endpoint_url": endpoint_url,
+            "size": file_size,
+            "storage_type": "runpod-s3"
+        }
+
+
+    except ClientError as e:
+        logger.error(f"upload_model_to_s3 ... S3 upload failed: {e}")
+        logger.error(f"upload_model_to_s3 ... Error code: {e.response['Error']['Code']}")
+        logger.error(f"upload_model_to_s3 ... Error message: {e.response['Error']['Message']}")
+        return None
+    except Exception as e:
+        logger.error(f"upload_model_to_s3 ... Unexpected error during S3 upload: {e}")
+        logger.error(f"upload_model_to_s3 ... Traceback: {traceback.format_exc()}")
+        return None
 
 
 def generate_plots(
@@ -171,80 +353,74 @@ def generate_plots(
         else:
             run_name = f"{trial_id}_{dataset_name}"
 
-        # Create compressed zip file with all plots and models to eliminate worker isolation while reducing response size
-        plot_files_data = None
+        # Create compressed zip files: plots inline (base64), models on S3
+        plots_zip_data = None
+        models_s3_data = None  # S3 reference instead of inline ZIP
         total_size = 0
         plot_count = 0
         model_count = 0
         zip_size = 0
+        s3_data = None
 
         if plot_dir.exists():
-
-            # Count files first
+            # Collect all files (plots + models) for single ZIP
             all_files = []
             for file_path in plot_dir.rglob('*'):
                 if file_path.is_file():
                     file_extension = file_path.suffix.lower()
-                    if file_extension in ['.keras', '.h5', '.pkl']:
-                        file_type = 'model'
-                        model_count += 1
-                    else:
-                        file_type = 'plot'
-                        plot_count += 1
-
                     file_size = file_path.stat().st_size
                     total_size += file_size
-                    all_files.append((file_path, file_type, file_size))
-                    logger.info(f"generate_plots ... Found {file_type}: {file_path.name} ({file_size} bytes)")
+                    all_files.append((file_path, file_size))
 
+                    if file_extension in ['.keras', '.h5', '.pkl']:
+                        model_count += 1
+                        logger.info(f"generate_plots ... Found model: {file_path.name} ({file_size} bytes)")
+                    else:
+                        plot_count += 1
+                        logger.info(f"generate_plots ... Found plot: {file_path.name} ({file_size} bytes)")
+
+            # Create single ZIP with both plots and models
             if all_files:
-                # Create temporary zip file containing all plots and models
-                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip_file:
+                with tempfile.NamedTemporaryFile(suffix='_complete.zip', delete=False) as tmp_zip_file:
                     temp_zip_path = tmp_zip_file.name
 
                 try:
+                    # Create compressed ZIP with all files
                     with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipf:
-                        for file_path, file_type, file_size in all_files:
-                            # Add file to zip with relative path
+                        for file_path, file_size in all_files:
                             relative_path = file_path.relative_to(plot_dir)
                             zipf.write(file_path, relative_path)
-                            logger.info(f"generate_plots ... Added {file_type} to zip: {relative_path}")
+                            logger.info(f"generate_plots ... Added to ZIP: {relative_path}")
 
-                    # Read the compressed zip file
-                    with open(temp_zip_path, 'rb') as f:
-                        zip_content = f.read()
-                        zip_size = len(zip_content)
-
-                    # Encode zip as base64
-                    encoded_zip_content = base64.b64encode(zip_content).decode('utf-8')
+                    zip_size = Path(temp_zip_path).stat().st_size
                     compression_ratio = zip_size / total_size if total_size > 0 else 1.0
 
-                    # Create single zip response
-                    plot_files_data = {
-                        "filename": f"{run_name}_all_files.zip",
-                        "content": encoded_zip_content,
-                        "size": zip_size,
-                        "uncompressed_size": total_size,
-                        "compression_ratio": compression_ratio,
-                        "encoding": "base64",
-                        "format": "zip",
-                        "file_count": len(all_files),
-                        "plot_count": plot_count,
-                        "model_count": model_count
-                    }
+                    logger.info(f"generate_plots ... Created complete ZIP: {len(all_files)} files ({plot_count} plots, {model_count} models), {zip_size} bytes ({compression_ratio:.2f} ratio)")
 
-                    logger.info(f"generate_plots ... Created compressed zip: {len(all_files)} files")
-                    logger.info(f"generate_plots ... Compression: {total_size} → {zip_size} bytes ({compression_ratio:.2f} ratio)")
+                    # Upload single ZIP to S3
+                    logger.info(f"generate_plots ... Uploading complete ZIP to S3")
+                    s3_data = upload_model_to_s3(Path(temp_zip_path), run_name)
+
+                    if s3_data:
+                        # Add metadata
+                        s3_data["uncompressed_size"] = total_size
+                        s3_data["compression_ratio"] = compression_ratio
+                        s3_data["file_count"] = len(all_files)
+                        s3_data["plot_count"] = plot_count
+                        s3_data["model_count"] = model_count
+                        logger.info(f"generate_plots ... ✅ Complete ZIP uploaded to S3: {s3_data['s3_key']}")
+                    else:
+                        logger.error(f"generate_plots ... ❌ Failed to upload ZIP to S3")
+                        return None
 
                 finally:
                     # Clean up temporary zip file
-                    try:                        
+                    try:
                         os.unlink(temp_zip_path)
                     except Exception as cleanup_e:
                         logger.warning(f"generate_plots ... Failed to cleanup temp zip: {cleanup_e}")
 
-        logger.info(f"generate_plots ... Compressed response: {plot_count} plots, {model_count} models, zip size: {zip_size} bytes")
-        logger.info(f"generate_plots ... ✅ Training response includes all files - worker isolation eliminated with compression")
+        logger.info(f"generate_plots ... ✅ Training complete: {plot_count} plots + {model_count} models uploaded to S3")
 
         return {
             "success": True,
@@ -252,11 +428,12 @@ def generate_plots(
             "run_name": run_name,
             "generated_plots": generated_plots,
             "available_files": available_files,
-            "plot_files_zip": plot_files_data,
-            "total_files": plot_files_data.get("file_count", 0) if plot_files_data else 0,
+            "s3_zip": s3_data,  # Single S3 ZIP with everything
+            "total_files": plot_count + model_count,
+            "plot_count": plot_count,
+            "model_count": model_count,
             "total_size": total_size,
-            "zip_size": zip_size,
-            "compression_ratio": plot_files_data.get("compression_ratio", 1.0) if plot_files_data else 1.0,
+            "zip_size": zip_size if s3_data else 0,
             "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
         }
 
@@ -759,25 +936,31 @@ def build_optimization_config(request: Dict[str, Any]) -> Dict[str, Any]:
     
     return config_params
 
-async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
+async def start_training(job: Dict[str, Any]):
     """
     Main handler function for RunPod serverless training requests.
     Uses existing optimizer.py orchestration for consistency.
-    
+    With S3 storage, responses are always small (just S3 URLs).
+
     Args:
         job: RunPod job dictionary containing input request
-        
+
     Returns:
-        Structured response dictionary
+        Response dictionary with S3 URLs for plots and models
     """
     logger.debug("running start_training ... starting serverless training request with COMPLETE config")
-    
+
+    # FIRST THING: Aggressively clean ALL S3 storage before starting trial
+    # This prevents orphaned files from failed uploads, interrupted downloads, or previous errors
+    logger.info("running start_training ... 🧹 Cleaning S3 storage before starting trial")
+    cleanup_all_s3_models()
+
     trial_id = 'unknown_trial'
-    
+
     try:
         request = job.get('input', {})
         trial_id = request.get('trial_id', 'unknown_trial')
-        
+
         logger.debug(f"running start_training ... processing trial: {trial_id}")
         
         # Validate request
@@ -1100,53 +1283,7 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
             json_size_mb = len(json_str.encode('utf-8')) / (1024 * 1024)
             logger.debug(f"✅ JSON serialization: SUCCESS")
             logger.debug(f"✅ JSON size: {len(json_str.encode('utf-8'))} bytes ({json_size_mb:.2f} MB)")
-
-            # Check if response is too large for RunPod (limit is 10MB for /run, 20MB for /runsync)
-            # Using 8MB threshold to leave headroom for safety
-            if json_size_mb > 9.8:
-                logger.warning(f"⚠️ Response size ({json_size_mb:.2f} MB) exceeds safe limits - implementing size reduction")
-
-                # Create reduced response by preserving essential metadata but removing large binary data
-                original_plots_direct = response.get("plots_direct", {})
-
-                reduced_response = {
-                    "trial_id": response.get("trial_id", trial_id),
-                    "status": "completed",
-                    "success": True,
-                    "metrics": response.get("metrics", {}),
-                    "health_metrics": response.get("health_metrics", {}),
-                    "best_params": response.get("best_params", {}),
-                    "worker_persistence": response.get("worker_persistence", {}),
-                    "multi_gpu_used": response.get("multi_gpu_used", False),
-                    "target_gpus": response.get("target_gpus", 1),
-                    # Remove large model_attributes field if present
-                    "model_attributes": None,  # Remove large model data (weights, gradients, activations)
-                    # Preserve essential plots_direct fields but remove large binary data
-                    "plots_direct": {
-                        "success": original_plots_direct.get("success", True),
-                        "available_files": original_plots_direct.get("available_files", []),
-                        "plot_dir": original_plots_direct.get("plot_dir"),
-                        "run_name": original_plots_direct.get("run_name"),
-                        "generated_plots": original_plots_direct.get("generated_plots", []),
-                        "total_files": original_plots_direct.get("total_files", 0),
-                        "total_size": original_plots_direct.get("total_size", 0),
-                        # Remove the large plot_files_zip field that contains base64 data
-                        "size_reduction_note": f"Large binary data removed due to response size ({json_size_mb:.2f} MB) - use available_files for downloads"
-                    },
-                    "size_reduction_applied": True,
-                    "original_size_mb": json_size_mb
-                }
-
-                # Test reduced response size
-                try:
-                    reduced_json_str = json.dumps(reduced_response)
-                    reduced_size_mb = len(reduced_json_str.encode('utf-8')) / (1024 * 1024)
-                    logger.info(f"✅ Size reduction successful: {json_size_mb:.2f} MB → {reduced_size_mb:.2f} MB")
-                    response = reduced_response
-                    json_size_mb = reduced_size_mb
-                except Exception as reduction_error:
-                    logger.error(f"❌ Size reduction failed: {reduction_error}")
-                    # Keep original response and let RunPod handle the size limit
+            logger.info(f"✅ S3-based response is small ({json_size_mb:.2f} MB) - no streaming needed")
 
         except Exception as e:
             logger.error(f"❌ JSON serialization: FAILED - {e}")
@@ -1207,12 +1344,14 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
 
         logger.debug("=" * 60)
 
+        # With S3 storage, response is always small - just return it
+        logger.info(f"running start_training ... Returning S3-based response for trial {trial_id}")
         return response
-        
+
     except Exception as e:
         logger.error(f"running start_training ... trial {trial_id} failed: {str(e)}")
         logger.error(f"running start_training ... error traceback: {traceback.format_exc()}")
-        
+
         return {
             "trial_id": trial_id,
             "status": "failed",
@@ -1547,17 +1686,18 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": str(e), "status_code": 500}
 
 
-async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
+async def handler(event: Dict[str, Any]):
     """
     Main RunPod handler function.
     Processes incoming serverless requests and routes to appropriate handlers.
     Also handles simple HTTP endpoints for file downloads.
+    With S3 storage, responses are always small and returned directly.
 
     Args:
         event: RunPod event dictionary containing job information
 
     Returns:
-        Response dictionary for RunPod
+        Response dictionary with results or S3 URLs
     """
     # Get worker identification for isolation tracking
     worker_id = os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
@@ -1576,11 +1716,11 @@ async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
 
     # Initialize trial_id before try block to ensure it's always available
     trial_id = 'unknown_trial'
-    
+
     try:
         # Extract job from event
         job = event.get('job', event)  # Handle both event formats
-        
+
         if not job:
             error_msg = "No job found in event"
             logger.error(f"running handler ... {error_msg}")
@@ -1590,30 +1730,32 @@ async def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             logger.debug(f"running handler ... DEBUG: job type: {type(job)}")
             logger.debug(f"running handler ... DEBUG: job keys: {list(job.keys()) if isinstance(job, dict) else 'not a dict'}")
             logger.debug(f"running handler ... DEBUG: job content: {job}")
-        
+
         # Extract input from job
         request = job.get('input', {})
         # 🔍 DEBUG: Log what we extracted from job
         logger.debug(f"running handler ... DEBUG: request type: {type(request)}")
         logger.debug(f"running handler ... DEBUG: request keys: {list(request.keys()) if isinstance(request, dict) else 'not a dict'}")
         logger.debug(f"running handler ... DEBUG: request content: {request}")
-        
+
         command = request.get('command', 'unknown')
         logger.debug(f"running handler ... command: {command}")
-        
+
         # Route to appropriate handler
         if command == 'start_training':
-            return await start_training(job)  # ✅ Awaits coroutine to get Dict
+            # start_training now returns a dict directly (no streaming)
+            result = await start_training(job)
+            return result
         else:
             error_msg = f"Unknown command: {command}"
             logger.error(f"running handler ... {error_msg}")
             return {"error": error_msg, "success": False}
-            
+
     except Exception as e:
         error_msg = f"Handler error: {str(e)}"
         logger.error(f"running handler ... {error_msg}")
         logger.error(f"running handler ... traceback: {traceback.format_exc()}")
-        
+
         return {
             "error": error_msg,
             "success": False
@@ -1631,8 +1773,9 @@ async def runpod_handler(event):
     """
     RunPod serverless entry point.
     This is the function that RunPod will call for each serverless request.
+    Returns dict responses directly (no streaming with S3).
     """
-    # RunPod expects a sync function, so we need to run the async handler
+    # handler now returns a dict directly
     return await handler(event)
 
 
@@ -1650,7 +1793,7 @@ if __name__ == "__main__":
         logger.info(f"RUNPOD_ENDPOINT_ID: {os.getenv('RUNPOD_ENDPOINT_ID')}")
         logger.info("=========================")
 
-        # Start RunPod serverless handler
+        # Start RunPod serverless handler (no streaming needed with S3)
         logger.info("Starting RunPod serverless handler...")
         print("Starting RunPod serverless handler...")
         runpod.serverless.start({

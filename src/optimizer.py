@@ -16,6 +16,7 @@ Health metrics are always calculated for monitoring and API reporting regardless
 Uses Bayesian optimization (Optuna) for intelligent hyperparameter search.
 """
 import base64
+import boto3
 from datetime import datetime
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -38,7 +39,8 @@ import threading
 import time
 import traceback
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
-import yaml             
+from urllib.parse import urlparse
+import yaml
 import zipfile
 
 
@@ -1097,7 +1099,66 @@ class ModelOptimizer:
         else:
             logger.debug(f"running train ... Trial {trial.number}: Using RunPod service execution")
             return self._train_via_runpod_service(trial, params)
-    
+
+    def _download_from_s3(self, s3_url: str, local_path: Path, trial_number: int) -> bool:
+        """
+        Download model ZIP from S3 presigned URL.
+
+        Args:
+            s3_url: Presigned S3 URL
+            local_path: Local path to save the downloaded file
+            trial_number: Trial number for logging
+
+        Returns:
+            True if download successful, False otherwise
+        """
+        try:
+            logger.info(f"running _download_from_s3 ... Downloading models from S3 for trial {trial_number}")
+            logger.info(f"running _download_from_s3 ... S3 URL: {s3_url[:100]}...")
+
+            # Parse S3 URL: https://s3api-us-ks-2.runpod.io/40ub9vhaa7/models/run/models.zip
+            parsed = urlparse(s3_url)
+            path_parts = parsed.path.lstrip('/').split('/', 1)
+            bucket = path_parts[0]
+            key = path_parts[1] if len(path_parts) > 1 else ''
+
+            logger.info(f"running _download_from_s3 ... Parsed: bucket={bucket}, key={key}")
+
+            # Get S3 credentials (same pattern as handler.py get_s3_client)
+            s3_access_key = os.getenv('RUNPOD_S3_ACCESS_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
+            s3_secret_key = os.getenv('RUNPOD_S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
+            datacenter = os.getenv('RUNPOD_S3_VOLUME_DATACENTER')
+
+            if not s3_access_key or not s3_secret_key or not datacenter:
+                logger.error(f"running _download_from_s3 ... ❌ Missing S3 credentials in environment")
+                logger.error(f"running _download_from_s3 ... Required: RUNPOD_S3_ACCESS_KEY, RUNPOD_S3_SECRET_ACCESS_KEY, RUNPOD_S3_VOLUME_DATACENTER")
+                return False
+
+            # Construct endpoint (same pattern as handler.py)
+            datacenter_lower = datacenter.lower()
+            s3_endpoint = f"https://s3api-{datacenter_lower}.runpod.io"
+
+            # Create S3 client (exact same pattern as handler.py get_s3_client)
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=s3_access_key,
+                aws_secret_access_key=s3_secret_key,
+                region_name=datacenter_lower,
+                endpoint_url=s3_endpoint
+            )
+
+            # Download using boto3 with authentication
+            logger.info(f"running _download_from_s3 ... Starting authenticated download from {s3_endpoint}")
+            s3_client.download_file(bucket, key, str(local_path))
+
+            actual_size = local_path.stat().st_size
+            logger.info(f"running _download_from_s3 ... ✅ Download complete: {actual_size} bytes")
+            return True
+        except Exception as e:
+            logger.error(f"running _download_from_s3 ... ❌ Unexpected error: {e}")
+            logger.error(f"running _download_from_s3 ... Traceback: {traceback.format_exc()}")
+            return False
+
     def _train_via_runpod_service(self, trial: optuna.Trial, params: Dict[str, Any]) -> float:
         logger.debug(f"running _train_via_runpod_service ... Starting RunPod service training for trial {trial.number}")
         logger.debug(f"running _train_via_runpod_service ... Using JSON API approach (tiny payloads) instead of code injection")
@@ -1324,46 +1385,38 @@ class ModelOptimizer:
                                 local_plots_dir = self.results_dir / "plots" / f"trial_{trial.number}"
                                 local_plots_dir.mkdir(parents=True, exist_ok=True)
 
-                                # Extract compressed zip from training response (new compressed format)
-                                plot_files_zip = plots_direct_info.get('plot_files_zip')
+                                # Extract S3 ZIP (single ZIP with plots + models)
+                                s3_zip = plots_direct_info.get('s3_zip')  # New simplified S3 format
                                 plots_worker_id = plots_direct_info.get('worker_id', 'unknown_plots_worker')
 
-                                logger.info(f"📥 Extracting trial {trial.number} compressed files from training response")
+                                logger.info(f"📥 Downloading trial {trial.number} files from S3")
                                 logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ SAME WORKER - Training worker_id={worker_id} == Plots worker_id={plots_worker_id}")
 
-                                if plot_files_zip:
-                               
-                                    # Log compression details
-                                    file_count = plot_files_zip.get('file_count', 0)
-                                    plot_count = plot_files_zip.get('plot_count', 0)
-                                    model_count = plot_files_zip.get('model_count', 0)
-                                    zip_size = plot_files_zip.get('size', 0)
-                                    uncompressed_size = plot_files_zip.get('uncompressed_size', 0)
-                                    compression_ratio = plot_files_zip.get('compression_ratio', 1.0)
+                                # Download single ZIP from S3 (contains plots + models)
+                                if s3_zip:
+                                    s3_url = s3_zip.get('s3_url')
+                                    file_count = s3_zip.get('file_count', 0)
+                                    plot_count = s3_zip.get('plot_count', 0)
+                                    model_count = s3_zip.get('model_count', 0)
+                                    zip_size = s3_zip.get('size', 0)
+                                    s3_key = s3_zip.get('s3_key', '')
 
-                                    logger.info(f"📦 Found compressed zip: {file_count} files ({plot_count} plots, {model_count} models)")
-                                    logger.info(f"📦 Compression: {uncompressed_size} → {zip_size} bytes (ratio: {compression_ratio:.2f})")
+                                    logger.info(f"📦 Complete ZIP on S3: {file_count} files ({plot_count} plots, {model_count} models), {zip_size} bytes")
+                                    logger.info(f"📍 S3 Key: {s3_key}")
 
-                                    try:
-                                        # Decode base64 zip content
-                                        zip_content = plot_files_zip.get('content')
-                                        if not zip_content:
-                                            logger.error(f"❌ No zip content found in training response")
-                                        else:
-                                            decoded_zip = base64.b64decode(zip_content)
+                                    if s3_url:
+                                        # Download ZIP from S3
+                                        with tempfile.NamedTemporaryFile(suffix='_complete.zip', delete=False) as tmp_zip:
+                                            temp_zip_path = Path(tmp_zip.name)
 
-                                            # Create temporary zip file
-                                            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
-                                                tmp_zip.write(decoded_zip)
-                                                temp_zip_path = tmp_zip.name
-
-                                            try:
-                                                # Extract zip to local directory
+                                        try:
+                                            if self._download_from_s3(s3_url, temp_zip_path, trial.number):
+                                                # Extract ZIP to local directory
                                                 with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
                                                     zipf.extractall(local_plots_dir)
                                                     extracted_files = zipf.namelist()
 
-                                                    logger.info(f"✅ Trial {trial.number} files extracted successfully: {len(extracted_files)} files")
+                                                    logger.info(f"✅ Trial {trial.number} extracted from S3: {len(extracted_files)} files")
                                                     for file_name in extracted_files:
                                                         file_path = local_plots_dir / file_name
                                                         if file_path.exists():
@@ -1372,20 +1425,21 @@ class ModelOptimizer:
                                                             file_type = 'model' if file_ext in ['.keras', '.h5', '.pkl'] else 'plot'
                                                             logger.info(f"📂 Extracted {file_type}: {file_name} ({file_size} bytes)")
 
-                                                    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ COMPRESSED EXTRACTION SUCCESS - no worker isolation possible")
                                                     self._trials_with_plots.add(trial.number)
+                                                    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ S3 DOWNLOAD SUCCESS - {len(extracted_files)} files extracted")
+                                            else:
+                                                logger.error(f"❌ Failed to download ZIP from S3 for trial {trial.number}")
 
-                                            finally:
-                                                # Clean up temporary zip file
-                                                try:
-                                                    os.unlink(temp_zip_path)
-                                                except Exception as cleanup_e:
-                                                    logger.warning(f"⚠️ Failed to cleanup temporary zip file: {cleanup_e}")
-
-                                    except Exception as e:
-                                        logger.error(f"❌ Failed to extract compressed files for trial {trial.number}: {e}")
+                                        finally:
+                                            # Clean up temporary zip
+                                            try:
+                                                temp_zip_path.unlink()
+                                            except Exception as cleanup_e:
+                                                logger.warning(f"⚠️ Failed to cleanup S3 temp zip: {cleanup_e}")
+                                    else:
+                                        logger.warning(f"⚠️ S3 ZIP metadata present but no URL found")
                                 else:
-                                    logger.warning(f"📂 No compressed files found in training response for trial {trial.number}")
+                                    logger.warning(f"📂 No S3 ZIP found in training response")
                             else:
                                 logger.warning(f"❌ No results_dir configured for trial {trial.number} plot extraction")
 
