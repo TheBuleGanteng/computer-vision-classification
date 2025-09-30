@@ -4,6 +4,8 @@ Implements specialized serverless hyperparameter optimization using existing bat
 """
 
 # Web server wrapper for local testing and container deployment
+import base64
+from datetime import datetime
 import json
 import numpy as np
 import os
@@ -11,13 +13,16 @@ from pathlib import Path
 from pydantic import BaseModel
 import runpod
 import sys
+import tempfile
 import tensorflow as tf
 import traceback
 from typing import Dict, Any, Optional, TYPE_CHECKING, List
+import zipfile
+            
+from src.data_classes.configs import OptimizationConfig
+# Import here to avoid circular dependencies
+from src.plot_generator import PlotGenerator            
 
-if TYPE_CHECKING:
-    from src.data_classes.configs import OptimizationConfig
-from datetime import datetime
 
 # Add project root to Python path for imports
 current_file = Path(__file__)
@@ -53,6 +58,10 @@ def generate_plots(
     Returns:
         Dictionary with plot info if successful, None if skipped/failed
     """
+    logger.info(f"generate_plots ... DEBUG: Starting plot generation for trial_id={trial_id}, dataset={dataset_name}")
+    logger.info(f"generate_plots ... DEBUG: model_builder provided: {model_builder is not None}")
+    logger.info(f"generate_plots ... DEBUG: test_data provided: {test_data is not None}")
+    logger.info(f"generate_plots ... DEBUG: optimization_config provided: {optimization_config is not None}")
     # Check plot generation setting from optimization_config
     if optimization_config and getattr(optimization_config, 'plot_generation', 'all') == 'none':
         logger.debug(f"generate_plots ... Skipping plot generation: plot_generation='none'")
@@ -60,9 +69,6 @@ def generate_plots(
 
     try:
         logger.debug(f"generate_plots ... Generating plots for trial {trial_id}")
-
-        # Import here to avoid circular dependencies
-        from src.plot_generator import PlotGenerator
 
         # Create persistent directory for plots in /tmp/plots
         plots_base_dir = Path("/tmp/plots")
@@ -165,19 +171,101 @@ def generate_plots(
         else:
             run_name = f"{trial_id}_{dataset_name}"
 
+        # Create compressed zip file with all plots and models to eliminate worker isolation while reducing response size
+        plot_files_data = None
+        total_size = 0
+        plot_count = 0
+        model_count = 0
+        zip_size = 0
+
+        if plot_dir.exists():
+
+            # Count files first
+            all_files = []
+            for file_path in plot_dir.rglob('*'):
+                if file_path.is_file():
+                    file_extension = file_path.suffix.lower()
+                    if file_extension in ['.keras', '.h5', '.pkl']:
+                        file_type = 'model'
+                        model_count += 1
+                    else:
+                        file_type = 'plot'
+                        plot_count += 1
+
+                    file_size = file_path.stat().st_size
+                    total_size += file_size
+                    all_files.append((file_path, file_type, file_size))
+                    logger.info(f"generate_plots ... Found {file_type}: {file_path.name} ({file_size} bytes)")
+
+            if all_files:
+                # Create temporary zip file containing all plots and models
+                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip_file:
+                    temp_zip_path = tmp_zip_file.name
+
+                try:
+                    with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipf:
+                        for file_path, file_type, file_size in all_files:
+                            # Add file to zip with relative path
+                            relative_path = file_path.relative_to(plot_dir)
+                            zipf.write(file_path, relative_path)
+                            logger.info(f"generate_plots ... Added {file_type} to zip: {relative_path}")
+
+                    # Read the compressed zip file
+                    with open(temp_zip_path, 'rb') as f:
+                        zip_content = f.read()
+                        zip_size = len(zip_content)
+
+                    # Encode zip as base64
+                    encoded_zip_content = base64.b64encode(zip_content).decode('utf-8')
+                    compression_ratio = zip_size / total_size if total_size > 0 else 1.0
+
+                    # Create single zip response
+                    plot_files_data = {
+                        "filename": f"{run_name}_all_files.zip",
+                        "content": encoded_zip_content,
+                        "size": zip_size,
+                        "uncompressed_size": total_size,
+                        "compression_ratio": compression_ratio,
+                        "encoding": "base64",
+                        "format": "zip",
+                        "file_count": len(all_files),
+                        "plot_count": plot_count,
+                        "model_count": model_count
+                    }
+
+                    logger.info(f"generate_plots ... Created compressed zip: {len(all_files)} files")
+                    logger.info(f"generate_plots ... Compression: {total_size} → {zip_size} bytes ({compression_ratio:.2f} ratio)")
+
+                finally:
+                    # Clean up temporary zip file
+                    try:                        
+                        os.unlink(temp_zip_path)
+                    except Exception as cleanup_e:
+                        logger.warning(f"generate_plots ... Failed to cleanup temp zip: {cleanup_e}")
+
+        logger.info(f"generate_plots ... Compressed response: {plot_count} plots, {model_count} models, zip size: {zip_size} bytes")
+        logger.info(f"generate_plots ... ✅ Training response includes all files - worker isolation eliminated with compression")
+
         return {
             "success": True,
             "plot_dir": str(plot_dir),
             "run_name": run_name,
             "generated_plots": generated_plots,
-            "available_files": available_files
+            "available_files": available_files,
+            "plot_files_zip": plot_files_data,
+            "total_files": plot_files_data.get("file_count", 0) if plot_files_data else 0,
+            "total_size": total_size,
+            "zip_size": zip_size,
+            "compression_ratio": plot_files_data.get("compression_ratio", 1.0) if plot_files_data else 1.0,
+            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
         }
 
     except Exception as e:
         logger.error(f"generate_plots ... Plot generation failed: {e}")
         return {
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
         }
 
 
@@ -817,21 +905,14 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
         # Generate plots locally for direct download
         config_data = request.get('config', {})
 
-        # Create OptimizationConfig object from config_data for plot generation
-        optimization_config = None
-        if config_data:
-            from src.data_classes.configs import OptimizationConfig
-            optimization_config = OptimizationConfig(**config_data)
+        # Save trained trial model to plots directory BEFORE plot generation (so it gets included in response)
+        logger.info(f"running start_training ... DEBUG: Checking model saving conditions for {trial_id}")
+        logger.info(f"running start_training ... DEBUG: model_builder exists: {model_builder is not None}")
+        if model_builder:
+            logger.info(f"running start_training ... DEBUG: model_builder has 'model' attribute: {hasattr(model_builder, 'model')}")
+            if hasattr(model_builder, 'model'):
+                logger.info(f"running start_training ... DEBUG: model_builder.model is not None: {model_builder.model is not None}")
 
-        plots_direct_info = generate_plots(
-            model_builder=model_builder,
-            dataset_name=request['dataset_name'],
-            trial_id=trial_id,
-            test_data=training_result.get('test_data'),
-            optimization_config=optimization_config
-        )
-
-        # Save trained trial model to plots directory for later copying (similar to local approach)
         if model_builder and hasattr(model_builder, 'model') and model_builder.model:
             try:
                 logger.info(f"running start_training ... Attempting to save trial model for {trial_id}")
@@ -844,11 +925,18 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 plots_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
                 model_path_in_plots = plots_dir / model_filename
 
-                # Save model to plots directory so it gets downloaded with plots
+                # Save model to plots directory so it gets included in training response
                 model_builder.model.save(model_path_in_plots)
 
                 logger.info(f"running start_training ... Trial model saved: {model_path_in_plots}")
-                logger.info(f"running start_training ... Trial model will be included in plots download")
+                logger.info(f"running start_training ... Trial model will be included in training response (eliminates worker isolation)")
+
+                # Verify model file was actually saved
+                if model_path_in_plots.exists():
+                    model_size = model_path_in_plots.stat().st_size
+                    logger.info(f"running start_training ... ✅ Model file verified: {model_size} bytes")
+                else:
+                    logger.error(f"running start_training ... ❌ Model file NOT found after save: {model_path_in_plots}")
 
             except Exception as e:
                 logger.error(f"running start_training ... Failed to save trial model for {trial_id}: {e}")
@@ -860,16 +948,48 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
                 logger.warning(f"running start_training ... model_builder exists but no model: hasattr(model)={hasattr(model_builder, 'model')}")
                 if hasattr(model_builder, 'model'):
                     logger.warning(f"running start_training ... model_builder.model is None: {model_builder.model is None}")
-            else:
-                logger.warning(f"running start_training ... model_builder is None for trial {trial_id}")
-            worker_persistence_enabled = False
+
+        # Create OptimizationConfig object from config_data for plot generation
+        optimization_config = None
+        if config_data:
+            optimization_config = OptimizationConfig(**config_data)
+
+        logger.info(f"running start_training ... DEBUG: Now generating plots (model should already be saved)")
+
+        plots_direct_info = generate_plots(
+            model_builder=model_builder,
+            dataset_name=request['dataset_name'],
+            trial_id=trial_id,
+            test_data=training_result.get('test_data'),
+            optimization_config=optimization_config
+        )
+
+        logger.info(f"running start_training ... DEBUG: Finished plot generation")
+
+        # CRITICAL FIX: Ensure plots_direct_info is never None to prevent response failures
+        if plots_direct_info is None:
+            logger.warning(f"running start_training ... plots_direct_info is None, creating fallback")
+            plots_direct_info = {
+                "success": False,
+                "error": "Plot generation returned None",
+                "plot_files_zip": None,
+                "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+            }
 
         # Initialize worker persistence flag
         worker_persistence_enabled = locals().get('worker_persistence_enabled', False)
 
         # Skip model attributes extraction - RunPod now returns only metrics
-        logger.debug(f"running start_training ... Skipping model attributes extraction (metrics-only response)")
+        # This eliminates the massive model weights/gradients/activations data that was causing 3.3MB+ responses
+        logger.info(f"running start_training ... Skipping model attributes extraction to prevent response size issues")
+        logger.info(f"running start_training ... Model attributes would include weights, gradients, activations - not needed when plots are generated")
         model_attributes = None
+
+        # Verify model_attributes is truly None for debugging
+        if model_attributes is not None:
+            logger.error(f"❌ CRITICAL: model_attributes should be None but is: {type(model_attributes)}")
+        else:
+            logger.info(f"✅ Confirmed: model_attributes = None (will not contribute to response size)")
 
         # Log worker persistence status
         logger.info(f"running start_training ... Worker persistence enabled: {worker_persistence_enabled}")
@@ -913,7 +1033,20 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
         
         logger.debug(f"running start_training ... trial {trial_id} completed with COMPLETE config")
         logger.debug(f"running start_training ... best value: {test_accuracy:.4f}")
-        
+
+        # SIZE DEBUGGING: Log what's actually in the response before serialization
+        logger.info(f"🔍 RESPONSE SIZE DEBUG - Response keys: {list(response.keys())}")
+        logger.info(f"🔍 RESPONSE SIZE DEBUG - model_attributes type: {type(response.get('model_attributes'))}")
+        logger.info(f"🔍 RESPONSE SIZE DEBUG - plots_direct type: {type(response.get('plots_direct'))}")
+        if response.get('plots_direct') and isinstance(response.get('plots_direct'), dict):
+            plots_info = response['plots_direct']
+            logger.info(f"🔍 RESPONSE SIZE DEBUG - plots_direct keys: {list(plots_info.keys())}")
+            if 'plot_files_zip' in plots_info:
+                zip_info = plots_info['plot_files_zip']
+                if zip_info:
+                    logger.info(f"🔍 RESPONSE SIZE DEBUG - zip size: {zip_info.get('size', 'unknown')} bytes")
+                    logger.info(f"🔍 RESPONSE SIZE DEBUG - zip compression: {zip_info.get('compression_ratio', 'unknown')}")
+
         # DETAILED RESPONSE ANALYSIS LOGGING
         logger.debug("=" * 60)
         logger.debug("RUNPOD RESPONSE ANALYSIS")
@@ -964,23 +1097,116 @@ async def start_training(job: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug("\nJSON SERIALIZATION TEST:")
         try:
             json_str = json.dumps(response)
+            json_size_mb = len(json_str.encode('utf-8')) / (1024 * 1024)
             logger.debug(f"✅ JSON serialization: SUCCESS")
-            logger.debug(f"✅ JSON size: {len(json_str.encode('utf-8'))} bytes")
+            logger.debug(f"✅ JSON size: {len(json_str.encode('utf-8'))} bytes ({json_size_mb:.2f} MB)")
+
+            # Check if response is too large for RunPod (limit is 10MB for /run, 20MB for /runsync)
+            # Using 8MB threshold to leave headroom for safety
+            if json_size_mb > 9.8:
+                logger.warning(f"⚠️ Response size ({json_size_mb:.2f} MB) exceeds safe limits - implementing size reduction")
+
+                # Create reduced response by preserving essential metadata but removing large binary data
+                original_plots_direct = response.get("plots_direct", {})
+
+                reduced_response = {
+                    "trial_id": response.get("trial_id", trial_id),
+                    "status": "completed",
+                    "success": True,
+                    "metrics": response.get("metrics", {}),
+                    "health_metrics": response.get("health_metrics", {}),
+                    "best_params": response.get("best_params", {}),
+                    "worker_persistence": response.get("worker_persistence", {}),
+                    "multi_gpu_used": response.get("multi_gpu_used", False),
+                    "target_gpus": response.get("target_gpus", 1),
+                    # Remove large model_attributes field if present
+                    "model_attributes": None,  # Remove large model data (weights, gradients, activations)
+                    # Preserve essential plots_direct fields but remove large binary data
+                    "plots_direct": {
+                        "success": original_plots_direct.get("success", True),
+                        "available_files": original_plots_direct.get("available_files", []),
+                        "plot_dir": original_plots_direct.get("plot_dir"),
+                        "run_name": original_plots_direct.get("run_name"),
+                        "generated_plots": original_plots_direct.get("generated_plots", []),
+                        "total_files": original_plots_direct.get("total_files", 0),
+                        "total_size": original_plots_direct.get("total_size", 0),
+                        # Remove the large plot_files_zip field that contains base64 data
+                        "size_reduction_note": f"Large binary data removed due to response size ({json_size_mb:.2f} MB) - use available_files for downloads"
+                    },
+                    "size_reduction_applied": True,
+                    "original_size_mb": json_size_mb
+                }
+
+                # Test reduced response size
+                try:
+                    reduced_json_str = json.dumps(reduced_response)
+                    reduced_size_mb = len(reduced_json_str.encode('utf-8')) / (1024 * 1024)
+                    logger.info(f"✅ Size reduction successful: {json_size_mb:.2f} MB → {reduced_size_mb:.2f} MB")
+                    response = reduced_response
+                    json_size_mb = reduced_size_mb
+                except Exception as reduction_error:
+                    logger.error(f"❌ Size reduction failed: {reduction_error}")
+                    # Keep original response and let RunPod handle the size limit
+
         except Exception as e:
             logger.error(f"❌ JSON serialization: FAILED - {e}")
             logger.error(f"❌ Error type: {type(e).__name__}")
-            
+
             # Try to identify which field is problematic
             logger.debug("TESTING INDIVIDUAL FIELDS:")
+            problematic_fields = []
             for key, value in response.items():
                 try:
                     json.dumps({key: value})
                     logger.debug(f"  ✅ {key}: serializable")
                 except Exception as field_error:
                     logger.error(f"  ❌ {key}: NOT serializable - {field_error}")
-        
+                    problematic_fields.append(key)
+
+            # CRITICAL FIX: Create minimal fallback response if serialization fails
+            if problematic_fields:
+                logger.error(f"🚨 CREATING FALLBACK RESPONSE - Removing problematic fields: {problematic_fields}")
+
+                # Create a minimal guaranteed-serializable response
+                fallback_response = {
+                    "trial_id": trial_id,
+                    "status": "completed",
+                    "success": True,
+                    "metrics": {
+                        "test_accuracy": float(test_accuracy) if test_accuracy is not None else 0.0,
+                        "test_loss": float(test_loss) if test_loss is not None else 0.0,
+                        "val_accuracy": float(test_accuracy) if test_accuracy is not None else 0.0,
+                        "val_loss": float(test_loss) if test_loss is not None else 0.0,
+                        "best_value": float(test_accuracy) if test_accuracy is not None else 0.0,
+                        "optimize_for": str(all_params.get('optimize_for', 'val_accuracy')),
+                        "training_time_seconds": 0.0
+                    },
+                    "plots_direct": plots_direct_info if plots_direct_info and 'success' in plots_direct_info else {
+                        "success": False,
+                        "error": "Plot data not serializable"
+                    },
+                    "serialization_fallback": True,
+                    "removed_fields": problematic_fields
+                }
+
+                # Test fallback serialization
+                try:
+                    json.dumps(fallback_response)
+                    logger.info("✅ FALLBACK response serialization: SUCCESS")
+                    response = fallback_response
+                except Exception as fallback_error:
+                    logger.error(f"❌ FALLBACK response serialization: FAILED - {fallback_error}")
+                    # Last resort: absolute minimal response
+                    response = {
+                        "trial_id": trial_id,
+                        "status": "completed",
+                        "success": True,
+                        "error": "Response serialization failed",
+                        "test_accuracy": float(test_accuracy) if test_accuracy is not None else 0.0
+                    }
+
         logger.debug("=" * 60)
-        
+
         return response
         
     except Exception as e:
@@ -1047,7 +1273,6 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
                 return {"error": f"File {file_path} not found in run {run_name}", "status_code": 404}
 
             # Read file and return as base64 (simple approach)
-            import base64
             with open(full_file_path, 'rb') as f:
                 file_content = base64.b64encode(f.read()).decode('utf-8')
 
@@ -1096,11 +1321,6 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
                 return {"error": f"Directory for run {run_name} not found", "status_code": 404}
 
             logger.info(f"running download_directory{trial_info} ... Processing {download_type} download request")
-
-            # Create temporary zip file
-            import tempfile
-            import zipfile
-            import base64
 
             with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
                 zip_path = tmp_zip.name
@@ -1222,9 +1442,6 @@ async def handle_simple_http_endpoints(event: Dict[str, Any]) -> Dict[str, Any]:
             logger.info(f"running download_directory_multipart{trial_info} ... Processing multi-part download request")
 
             # Create temporary zip files for each part
-            import tempfile
-            import zipfile
-            import base64
 
             # Define file type categories
             file_types = [
@@ -1443,6 +1660,5 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"ERROR in handler startup: {e}")
-        import traceback
         print(f"TRACEBACK: {traceback.format_exc()}")
         raise

@@ -1529,7 +1529,7 @@ class ModelBuilder:
                     if hasattr(self, 'params') and self.params:
                         # Apply same modulo frequency control as local operation (% 300)
                         # Only send progress updates every 300 batches to reduce RunPod log spam
-                        if batch > 0 and batch % 300 == 0:
+                        if batch > 0 and batch % 600 == 0:
                             total_batches = self.params.get('steps', 1)
                             batch_progress = (batch + 1) / total_batches
                             self.progress_callback(self.current_epoch, batch_progress)
@@ -1541,15 +1541,26 @@ class ModelBuilder:
         
         # Check multi-GPU availability and model requirements
         available_gpus = tf.config.list_physical_devices('GPU')
+
+        # RUNPOD FIX: Disable multi-GPU in RunPod to avoid CollectiveReduceV2 shape mismatches
+        # RunPod's distributed environment causes collective ops state persistence between trials
+        is_runpod_environment = os.environ.get('RUNPOD_POD_ID') is not None
+
         should_use_multi_gpu = (
-            use_multi_gpu and 
+            use_multi_gpu and
             len(available_gpus) > 1 and
-            self._is_model_suitable_for_multi_gpu()
+            self._is_model_suitable_for_multi_gpu() and
+            not is_runpod_environment  # Disable multi-GPU in RunPod
         )
         
         logger.debug(f"running _train_locally ... Available GPUs: {len(available_gpus)}")
         logger.debug(f"running _train_locally ... Multi-GPU requested: {use_multi_gpu}")
+        logger.debug(f"running _train_locally ... RunPod environment: {is_runpod_environment}")
         logger.debug(f"running _train_locally ... Will use multi-GPU: {should_use_multi_gpu}")
+
+        if is_runpod_environment and use_multi_gpu and len(available_gpus) > 1:
+            logger.info("🚫 RUNPOD MULTI-GPU DISABLED: Preventing CollectiveReduceV2 shape mismatches between trials")
+            logger.info(f"🚫 Available GPUs ({len(available_gpus)}) will be used in single-GPU mode for stability")
         
         # Apply manual validation split for consistency
         validation_split_value = validation_split or self.model_config.validation_split
@@ -1580,6 +1591,25 @@ class ModelBuilder:
         # Proper multi-GPU model building and training
         if should_use_multi_gpu:
             logger.debug("running _train_locally ... Using MirroredStrategy for multi-GPU training")
+
+            # COLLECTIVE OPS RESET: Clear TensorFlow's collective operations state
+            # This prevents shape mismatches between trials with different model architectures
+            try:
+                # Force cleanup of any existing collective operations
+                tf.keras.backend.clear_session() # type: ignore
+
+                # Reset TensorFlow's collective operations context
+                if hasattr(tf.distribute.experimental, 'CommunicationOptions'):
+                    logger.debug("running _train_locally ... Resetting TensorFlow collective operations state")
+
+                # Import gc for garbage collection
+                import gc
+                gc.collect()
+
+                logger.debug("running _train_locally ... TensorFlow session and collective ops cleared")
+            except Exception as e:
+                logger.warning(f"running _train_locally ... Could not reset collective ops: {e}")
+
             strategy = tf.distribute.MirroredStrategy()
             logger.debug(f"running _train_locally ... Strategy devices: {strategy.extended.worker_devices}")
             logger.debug(f"running _train_locally ... Number of replicas: {strategy.num_replicas_in_sync}")

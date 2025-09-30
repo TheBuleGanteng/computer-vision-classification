@@ -15,6 +15,7 @@ Health metrics are always calculated for monitoring and API reporting regardless
 
 Uses Bayesian optimization (Optuna) for intelligent hyperparameter search.
 """
+import base64
 from datetime import datetime
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -38,6 +39,8 @@ import time
 import traceback
 from typing import Dict, Any, List, Tuple, Optional, Union, Callable
 import yaml             
+import zipfile
+
 
 # Import existing modules
 from data_classes.callbacks import TrialProgress, AggregatedProgress, UnifiedProgress, ConcurrentProgressAggregator, EpochProgressCallback, default_progress_callback
@@ -52,7 +55,11 @@ from model_visualizer import ModelVisualizer
 from plot_generator import PlotGenerator
 from utils.logger import logger
 from utils.run_name import create_run_name
-from utils.runpod_direct_download import download_directory_via_runpod_api, download_directory_multipart_via_runpod_api
+from utils.runpod_direct_download import get_runpod_worker_endpoint
+from utils.test_runpod_endpoints import run_comprehensive_endpoint_tests, log_endpoint_test_summary
+
+
+# download_directory functions no longer needed - plots come directly with training response
 
 
 # Auto-load .env file from project root
@@ -407,10 +414,7 @@ class ModelOptimizer:
         try:
             logger.info("running _test_runpod_endpoints ... Testing RunPod endpoint connectivity")
 
-            # Import test functions
-            from utils.test_runpod_endpoints import run_comprehensive_endpoint_tests, log_endpoint_test_summary
-            from utils.runpod_direct_download import get_runpod_worker_endpoint
-
+            
             # Get worker endpoint from API URL
             if not self.config.runpod_service_endpoint:
                 logger.error("running _test_runpod_endpoints ... RunPod service endpoint not configured")
@@ -1196,7 +1200,7 @@ class ModelOptimizer:
                         logger.debug(f"🔍 RUNPOD POLLING - No worker ID found in response")
                         logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} completed but no worker_id available")
 
-                    logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
+                    # logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
                     
                     # Check for output data
                     output_data = status_data.get('output')
@@ -1213,11 +1217,50 @@ class ModelOptimizer:
                         output = status_data.get('output', {})
                         #logger.info(f"🔍 RUNPOD COMPLETED - Processing output data: {json.dumps(output, indent=2) if output else 'NO OUTPUT DATA'}")
 
+                        # Retry logic for empty output (transient failures)
                         if not output:
-                            logger.error(f"🚨 RUNPOD COMPLETED - No output returned from completed RunPod job")
-                            logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ Training FAILED - no output from trial {trial.number} on worker_id={worker_id}")
-                            logger.error(f"🚨 RUNPOD COMPLETED - Full status_data: {json.dumps(status_data, indent=2)}")
-                            raise RuntimeError("No output returned from completed RunPod job")
+                            logger.warning(f"running _train_via_runpod_service ... No output data in COMPLETED response for trial {trial.number}")
+                            logger.warning(f"running _train_via_runpod_service ... Implementing retry logic with exponential backoff")
+
+                            max_retries = 3
+                            retry_delays = [5, 10, 15]  # seconds
+
+                            for retry_attempt in range(max_retries):
+                                logger.warning(f"running _train_via_runpod_service ... Retry attempt {retry_attempt + 1}/{max_retries} - waiting {retry_delays[retry_attempt]}s before re-checking status")
+                                logger.warning(f"running _train_via_runpod_service ... Worker ID: {worker_id}, Job ID: {job_id}")
+
+                                time.sleep(retry_delays[retry_attempt])
+
+                                logger.debug(f"running _train_via_runpod_service ... Re-fetching job status from {status_url}")
+
+                                # Re-fetch the job status using the existing session
+                                try:
+                                    retry_status_response = sess.get(status_url, timeout=30)
+                                    retry_status_response.raise_for_status()
+                                    retry_status_data = retry_status_response.json()
+                                    output = retry_status_data.get('output', {})
+
+                                    if output:
+                                        logger.info(f"running _train_via_runpod_service ... ✅ Output retrieved successfully on retry attempt {retry_attempt + 1}")
+                                        logger.info(f"running _train_via_runpod_service ... Output keys: {list(output.keys())}")
+                                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ Retry successful for trial {trial.number} on worker_id={worker_id}")
+                                        status_data = retry_status_data  # Update status_data with successful retry
+                                        break
+                                    else:
+                                        logger.warning(f"running _train_via_runpod_service ... Still no output on retry attempt {retry_attempt + 1}/{max_retries}")
+                                        logger.debug(f"running _train_via_runpod_service ... Status data keys: {list(retry_status_data.keys())}")
+
+                                except Exception as retry_error:
+                                    logger.error(f"running _train_via_runpod_service ... Retry attempt {retry_attempt + 1} failed: {retry_error}")
+                                    logger.error(f"running _train_via_runpod_service ... Error type: {type(retry_error).__name__}")
+
+                            # If still no output after retries, raise error
+                            if not output:
+                                logger.error(f"running _train_via_runpod_service ... No output returned after {max_retries} retry attempts")
+                                logger.error(f"running _train_via_runpod_service ... Total wait time: {sum(retry_delays)}s")
+                                logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ Training FAILED - no output from trial {trial.number} on worker_id={worker_id}")
+                                logger.error(f"running _train_via_runpod_service ... Final status_data: {json.dumps(status_data, indent=2)}")
+                                raise RuntimeError(f"No output returned from completed RunPod job after {max_retries} retries")
 
                         # Verify training completion success
                         training_success = output.get('success', False)
@@ -1257,7 +1300,7 @@ class ModelOptimizer:
                         if 'plots_direct' in output:
                             plots_direct_info = output['plots_direct']
                             logger.info(f"✅ PLOTS_DIRECT FOUND in RunPod response")
-                            logger.info(f"📊 PLOTS_DIRECT CONTENT: {plots_direct_info}")
+                            # logger.info(f"📊 PLOTS_DIRECT CONTENT: {plots_direct_info}")
 
                             # Validate plots_direct structure
                             required_fields = ['success', 'available_files']
@@ -1273,7 +1316,7 @@ class ModelOptimizer:
                         
                         # Note: final_model_direct checks removed - final models are only built after all trials complete
 
-                        # Automatic downloads from RunPod worker (as per README architecture)
+                        # Extract plots directly from training response (eliminates worker isolation)
                         plots_direct_info = output.get('plots_direct', {})
                         if plots_direct_info and plots_direct_info.get('success'):
                             # Determine local directory for plots
@@ -1281,37 +1324,70 @@ class ModelOptimizer:
                                 local_plots_dir = self.results_dir / "plots" / f"trial_{trial.number}"
                                 local_plots_dir.mkdir(parents=True, exist_ok=True)
 
-                                # Automatic download via batch API (README line 116)
-                                api_key = os.getenv('RUNPOD_API_KEY')
-                                if api_key and self.config.runpod_service_endpoint and self.run_name:
-                                    logger.info(f"📥 Downloading trial {trial.number} plots via automatic multipart batch download")
-                                    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Attempting download for trial {trial.number} (trained on worker_id={worker_id})")
+                                # Extract compressed zip from training response (new compressed format)
+                                plot_files_zip = plots_direct_info.get('plot_files_zip')
+                                plots_worker_id = plots_direct_info.get('worker_id', 'unknown_plots_worker')
 
-                                    success = download_directory_multipart_via_runpod_api(
-                                        runpod_api_url=self.config.runpod_service_endpoint,
-                                        runpod_api_key=api_key,
-                                        run_name=self.run_name,
-                                        local_dir=str(local_plots_dir),
-                                        trial_id=self.run_name,
-                                        trial_number=trial.number,
-                                        worker_id=worker_id
-                                    )
+                                logger.info(f"📥 Extracting trial {trial.number} compressed files from training response")
+                                logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ SAME WORKER - Training worker_id={worker_id} == Plots worker_id={plots_worker_id}")
 
-                                    if success:
-                                        logger.info(f"✅ Trial {trial.number} plots downloaded successfully")
-                                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ Download SUCCESS for trial {trial.number} (trained on worker_id={worker_id})")
-                                        self._trials_with_plots.add(trial.number)
-                                    else:
-                                        logger.error(f"❌ Failed to download trial {trial.number} plots")
-                                        logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: ❌ Download FAILED for trial {trial.number} (trained on worker_id={worker_id})")
-                                        logger.error(f"🏗️ WORKER_ISOLATION_TRACKING: This suggests worker isolation if trained worker != download worker")
+                                if plot_files_zip:
+                               
+                                    # Log compression details
+                                    file_count = plot_files_zip.get('file_count', 0)
+                                    plot_count = plot_files_zip.get('plot_count', 0)
+                                    model_count = plot_files_zip.get('model_count', 0)
+                                    zip_size = plot_files_zip.get('size', 0)
+                                    uncompressed_size = plot_files_zip.get('uncompressed_size', 0)
+                                    compression_ratio = plot_files_zip.get('compression_ratio', 1.0)
+
+                                    logger.info(f"📦 Found compressed zip: {file_count} files ({plot_count} plots, {model_count} models)")
+                                    logger.info(f"📦 Compression: {uncompressed_size} → {zip_size} bytes (ratio: {compression_ratio:.2f})")
+
+                                    try:
+                                        # Decode base64 zip content
+                                        zip_content = plot_files_zip.get('content')
+                                        if not zip_content:
+                                            logger.error(f"❌ No zip content found in training response")
+                                        else:
+                                            decoded_zip = base64.b64decode(zip_content)
+
+                                            # Create temporary zip file
+                                            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
+                                                tmp_zip.write(decoded_zip)
+                                                temp_zip_path = tmp_zip.name
+
+                                            try:
+                                                # Extract zip to local directory
+                                                with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
+                                                    zipf.extractall(local_plots_dir)
+                                                    extracted_files = zipf.namelist()
+
+                                                    logger.info(f"✅ Trial {trial.number} files extracted successfully: {len(extracted_files)} files")
+                                                    for file_name in extracted_files:
+                                                        file_path = local_plots_dir / file_name
+                                                        if file_path.exists():
+                                                            file_size = file_path.stat().st_size
+                                                            file_ext = file_path.suffix.lower()
+                                                            file_type = 'model' if file_ext in ['.keras', '.h5', '.pkl'] else 'plot'
+                                                            logger.info(f"📂 Extracted {file_type}: {file_name} ({file_size} bytes)")
+
+                                                    logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ COMPRESSED EXTRACTION SUCCESS - no worker isolation possible")
+                                                    self._trials_with_plots.add(trial.number)
+
+                                            finally:
+                                                # Clean up temporary zip file
+                                                try:
+                                                    os.unlink(temp_zip_path)
+                                                except Exception as cleanup_e:
+                                                    logger.warning(f"⚠️ Failed to cleanup temporary zip file: {cleanup_e}")
+
+                                    except Exception as e:
+                                        logger.error(f"❌ Failed to extract compressed files for trial {trial.number}: {e}")
                                 else:
-                                    if not api_key:
-                                        logger.warning(f"❌ Missing RUNPOD_API_KEY for trial {trial.number} download")
-                                    elif not self.config.runpod_service_endpoint:
-                                        logger.warning(f"❌ Missing runpod_service_endpoint for trial {trial.number} download")
-                                    elif not self.run_name:
-                                        logger.warning(f"❌ Missing run_name for trial {trial.number} download")
+                                    logger.warning(f"📂 No compressed files found in training response for trial {trial.number}")
+                            else:
+                                logger.warning(f"❌ No results_dir configured for trial {trial.number} plot extraction")
 
                         # Store metrics for standard completion flow in _objective_function
                         # Remove manual completion callback to prevent race conditions
@@ -2441,7 +2517,6 @@ class ModelOptimizer:
         final_model_path = optimized_model_dir / model_filename
 
         try:
-            import shutil
             shutil.copy2(source_model_path, final_model_path)
             logger.info(f"running _build_final_model_via_runpod_copy ... Model copied to: {final_model_path}")
 
