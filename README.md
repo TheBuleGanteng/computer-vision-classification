@@ -108,12 +108,14 @@ This project uses a dual-path configuration architecture with a sophisticated hy
   • ModelConfig creation from trial params
   • ModelBuilder execution with GPU training
   • Plot generation (PlotGenerator via generate_plots())
-  • Files saved to /tmp/plots/{run_name}/
-  • Returns trial metrics + plot info
-       ↓ Trial results + plot metadata
+  • Files compressed to single ZIP (plots + models)
+  • ZIP uploaded to RunPod S3 (upload_model_to_s3())
+  • Returns trial metrics + S3 metadata (s3_url, s3_key, file counts)
+       ↓ Trial results + S3 metadata
 ☁️  RunPod API → 💻 ModelOptimizer [LOCAL COORDINATION]
-  • Receives trial results (optimizer.py)
-  • Downloads trial plots via download_directory_via_runpod_api() (runpod_direct_download.py)
+  • Receives trial results with S3 URL (optimizer.py)
+  • Downloads ZIP from S3 via authenticated boto3 client (_download_from_s3())
+  • Extracts files to optimization_results/{run_name}/plots/trial_{n}/
   • Updates Optuna study
   • Continues optimization loop
        ↓ After all trials complete:
@@ -139,9 +141,10 @@ This project uses a dual-path configuration architecture with a sophisticated hy
 **Key Architecture Points:**
 - **Local Coordination**: Optuna study and optimization logic runs on your local machine (optimizer.py)
 - **Remote Execution**: Individual trials execute on RunPod GPU workers (handler.py), final model assembled locally from best trial
-- **Plot Generation**: All plots generated on RunPod workers and saved to /tmp/plots/ (PlotGenerator)
-- **Batch Download**: Files downloaded as compressed zip archives via RunPod API (runpod_direct_download.py)
-- **File Organization**: Trial plots → optimization_results/{run_name}/plots/, Final model + plots → optimized_model/
+- **Plot Generation**: All plots generated on RunPod workers (PlotGenerator)
+- **S3 Upload**: Files compressed to single ZIP and uploaded to RunPod S3 storage (upload_model_to_s3() in handler.py)
+- **S3 Download**: Authenticated boto3 client downloads ZIP from RunPod S3 (_download_from_s3() in optimizer.py)
+- **File Organization**: Trial plots → optimization_results/{run_name}/plots/trial_{n}/, Final model + plots → optimized_model/
 - **Cost Efficiency**: You only pay for GPU time during actual model training and plot generation
 - **Scalability**: Multiple trials can run in parallel on different RunPod workers
 
@@ -168,12 +171,14 @@ This project uses a dual-path configuration architecture with a sophisticated hy
   • ModelConfig creation from trial params
   • ModelBuilder execution with GPU training
   • Plot generation (PlotGenerator via generate_plots())
-  • Files saved to /tmp/plots/{run_name}/
-  • Returns trial metrics + plot info
-       ↓ Trial results + plot metadata
+  • Files compressed to single ZIP (plots + models)
+  • ZIP uploaded to RunPod S3 (upload_model_to_s3())
+  • Returns trial metrics + S3 metadata (s3_url, s3_key, file counts)
+       ↓ Trial results + S3 metadata
 💻 ModelOptimizer [LOCAL COORDINATION]
-  • Receives trial results (optimizer.py)
-  • Downloads trial plots via download_directory_via_runpod_api()
+  • Receives trial results with S3 URL (optimizer.py)
+  • Downloads ZIP from S3 via authenticated boto3 client (_download_from_s3())
+  • Extracts files to optimization_results/{run_name}/plots/trial_{n}/
   • Updates Optuna study
   • Continues optimization loop
   • Returns OptimizationResult object
@@ -275,8 +280,9 @@ ModelConfig() defaults → Used when Optuna fails → Safe fallback values
 - ✅ **Real-time Progress Aggregation**: Thread-safe concurrent training progress visualization
 - ✅ **Local Fallback**: Automatic local execution when cloud service unavailable
 - ✅ **Accuracy Synchronization**: <0.5% gap between cloud and local execution
-- ✅ **RunPod Batch Download Integration**: Direct file transfer via zip compression and base64 encoding from RunPod workers
-- ✅ **Simplified Architecture**: Streamlined file transfer system using /tmp/plots/ storage and batch download API calls
+- ✅ **S3-Based File Transfer**: RunPod → S3 upload with authenticated boto3 downloads to local machine
+- ✅ **Efficient Cloud Storage**: Single ZIP files (plots + models) uploaded to RunPod S3 per trial
+- ✅ **Authenticated Downloads**: Boto3 client with RunPod S3 credentials for secure file retrieval
 - ✅ **Intelligent Final Model Assembly**: Copy-based approach eliminates redundant retraining - instant final model creation from best trial artifacts
 
 ### Efficiency & Performance Optimizations
@@ -589,12 +595,12 @@ else:
 - ✅ Ensured `optimize_model(..., trials=1, ...)` matches actual request
 - ✅ Added trial-specific result formatting for local aggregation
 
-**Stage 2: GPU Plot Generation with Batch Download System** ✅ **COMPLETED**
+**Stage 2: GPU Plot Generation with S3-Based File Transfer** ✅ **COMPLETED**
 
 *Step 2.1: Enable plot generation on RunPod workers* ✅ **COMPLETED**
 ```python
-# IMPLEMENTED: RunPod handler creates plots and saves to /tmp/plots/
-# Plot generation infrastructure with batch download system
+# IMPLEMENTED: RunPod handler creates plots and uploads to S3
+# Plot generation infrastructure with S3 upload system
 plots_direct_info = generate_plots(
     model_builder=model_builder_obj,
     dataset_name=request['dataset_name'],
@@ -602,23 +608,24 @@ plots_direct_info = generate_plots(
     test_data=training_result.get('test_data'),
     optimization_config=optimization_config
 )
+# Returns: {"success": True, "s3_zip": {"s3_url": "...", "s3_key": "...", "file_count": 15, ...}}
 ```
 
-*Step 2.2: Implement batch download in local optimizer* ✅ **COMPLETED**
+*Step 2.2: Implement S3 download in local optimizer* ✅ **COMPLETED**
 ```python
-# IMPLEMENTED: Batch download via RunPod API with zip compression
-plots_success = download_directory_via_runpod_api(
-    runpod_api_url=self.config.runpod_service_endpoint,
-    runpod_api_key=api_key,
-    run_name=run_name,
-    local_dir=str(local_plots_dir)
-)
+# IMPLEMENTED: S3 download via authenticated boto3 client
+if self._download_from_s3(s3_url, temp_zip_path, trial.number):
+    # Extract ZIP to local directory
+    with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
+        zipf.extractall(local_plots_dir)
+        extracted_files = zipf.namelist()
 ```
 
 *Step 2.3: Update plot generation and transfer system* ✅ **COMPLETED**
 - ✅ Plot generation enabled on RunPod workers by default
-- ✅ Implemented batch download with zip compression and base64 encoding
-- ✅ Files stored in /tmp/plots/{run_name}/ on RunPod workers
+- ✅ Implemented S3 upload with single ZIP file (plots + models)
+- ✅ Files uploaded to RunPod S3: s3://{bucket}/models/{run_name}/models.zip
+- ✅ Authenticated boto3 downloads using RunPod S3 credentials
 - ✅ Maintained backward compatibility for local-only execution mode
 
 **Stage 3: Multi-Worker Coordination Enhancement** ✅ **COMPLETED**
@@ -663,27 +670,29 @@ class OptimizationConfig:
 *Step 4.3: Add comprehensive logging* ✅ **COMPLETED**
 - Local Optuna study decisions and trial parameters
 - RunPod worker dispatch and response tracking
-- Batch download transfer success/failure monitoring
+- S3 upload/download success/failure monitoring with error handling
 - Multi-worker coordination and load balancing
 
 #### **Testing and Validation Strategy**
 
 **Unit Testing:**
 - Individual trial dispatch to RunPod workers
-- Batch download functionality via runpod_direct_download.py
+- S3 upload functionality in handler.py (upload_model_to_s3())
+- S3 download functionality in optimizer.py (_download_from_s3())
 - Local Optuna study state management
 - Progress aggregation accuracy
 
 **Integration Testing:**
 - Multi-worker concurrent execution (2-6 workers)
-- Plot generation and batch download pipeline
+- Plot generation → S3 upload → S3 download pipeline
 - UI real-time progress updates during concurrent trials
 - Fallback to local execution when RunPod unavailable
+- S3 authentication and error handling (404, 401, etc.)
 
 **Performance Validation:**
-- Measure speedup with concurrent workers vs current sequential approach
+- Measure speedup with concurrent workers vs sequential approach
 - Validate plot generation performance: GPU vs local timing
-- Monitor batch download transfer rates and success rates
+- Monitor S3 upload/download transfer rates and success rates
 - Confirm cost optimization: GPU utilization vs idle time
 
 #### **Success Criteria**
@@ -691,7 +700,8 @@ class OptimizationConfig:
 **Functional Requirements:**
 - ✅ **COMPLETED**: Local Optuna study coordinates multiple RunPod workers successfully
 - ✅ **COMPLETED**: Individual trials execute concurrently on separate workers
-- ✅ **COMPLETED**: Plot generation occurs on GPU with automatic batch download transfer
+- ✅ **COMPLETED**: Plot generation occurs on GPU with automatic S3 upload
+- ✅ **COMPLETED**: Authenticated S3 downloads using boto3 client
 - ✅ **COMPLETED**: Real-time progress tracking across all concurrent workers
 - ✅ **COMPLETED**: Backward compatibility maintained for local-only execution
 - ✅ **COMPLETED**: Final model assembly via best trial copying with comprehensive plot consolidation
@@ -699,26 +709,26 @@ class OptimizationConfig:
 **Performance Requirements:**
 - ✅ **VERIFIED**: 2-3x speedup with concurrent workers (2 workers tested)
 - ✅ **VERIFIED**: Plot generation on GPU (infrastructure confirmed working)
-- ✅ **VERIFIED**: Batch download system with zip compression for efficient transfer
+- ✅ **VERIFIED**: S3-based file transfer with single ZIP per trial
 - ✅ **VERIFIED**: GPU utilization during training phases only
 - ✅ **VERIFIED**: Real-time UI updates with epoch-level progress
 
 **Debugging and Maintenance:**
 - ✅ **COMPLETED**: Clear local logs showing Optuna decisions and trial parameters
 - ✅ **COMPLETED**: Detailed worker dispatch and response tracking
-- ✅ **COMPLETED**: Batch download transfer monitoring and file organization
+- ✅ **COMPLETED**: S3 upload/download monitoring with error handling (404, 401 errors logged)
 - ✅ **COMPLETED**: Easy identification of worker status and progress
 
 ## **Comprehensive Testing Plan for Implemented Features**
 
-This testing plan validates the current distributed architecture with local Optuna orchestration, RunPod GPU workers, plot generation, and batch download system. Each test must pass both automated verification and manual confirmation before proceeding.
+This testing plan validates the current distributed architecture with local Optuna orchestration, RunPod GPU workers, plot generation, and S3-based file transfer. Each test must pass both automated verification and manual confirmation before proceeding.
 
 **Testing Protocol:**
 1. **Automated Execution**: I run the test first and verify logs/behavior
-2. **Manual Verification**: You run the test and confirm file downloads/behavior
+2. **Manual Verification via Terminal and then via UI**: You run the test and confirm file downloads/behavior
 3. **Success Criteria**: Verification of expected files downloaded to disk + correct logs
 
-### **Test 1: Local Execution (Baseline)** ✅ **VERIFIED**
+### **Test 1: Local Execution (Baseline)** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `use_runpod_service=False`
 **Purpose**: Verify complete local execution works correctly
 
@@ -741,7 +751,7 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Keras model file present: `optimized_mnist_acc_*.keras`
 - ✅ All plot files present (confusion matrix, training progress, etc.)
 
-### **Test 2: Single RunPod Worker (Sequential)** ✅ **VERIFIED**
+### **Test 2: Single RunPod Worker (Sequential)** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `use_runpod_service=True, concurrent=True, concurrent_workers=1`
 **Purpose**: Verify single worker behaves same as concurrent=False
 
@@ -761,12 +771,12 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 **Expected Results**:
 - ✅ Local Optuna orchestration (optimizer.py)
 - ✅ Sequential trial execution on RunPod
-- ✅ Trial plots batch downloaded from RunPod workers
+- ✅ Trial files uploaded to S3 and downloaded via boto3
 - ✅ Final model assembly via best trial copying
-- ✅ Final model + plots batch downloaded (15+ files)
-- ✅ Files organized: `plots/` (trials) + `optimized_model/` (final)
+- ✅ Final model + plots downloaded from S3 (15+ files)
+- ✅ Files organized: `plots/trial_{n}/` (trials) + `optimized_model/` (final)
 
-### **Test 3: Dual RunPod Workers (Concurrent)** ✅ **VERIFIED**
+### **Test 3: Dual RunPod Workers (Concurrent)** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `use_runpod_service=True, concurrent=True, concurrent_workers=2`
 **Purpose**: Verify concurrent execution with multiple workers
 
@@ -787,11 +797,11 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ Local Optuna orchestration (optimizer.py)
 - ✅ Parallel trial execution on 2 RunPod workers
 - ✅ Concurrent progress updates from multiple workers
-- ✅ Trial plots downloaded from both workers
+- ✅ Trial files uploaded to S3 from both workers and downloaded locally
 - ✅ Final model assembly via best trial copying
-- ✅ Complete file organization: trials + final model
+- ✅ Complete file organization: plots/trial_{n}/ + optimized_model/
 
-### **Test 4: Multi-GPU Concurrent Workers** ✅ **VERIFIED**
+### **Test 4: Multi-GPU Concurrent Workers** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `use_runpod_service=True, concurrent=True, concurrent_workers=2, target_gpus_per_worker=2`
 **Purpose**: Test multiple GPUs per worker with concurrent execution
 
@@ -813,9 +823,9 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 - ✅ 2 concurrent workers each using 2 GPUs
 - ✅ TensorFlow MirroredStrategy logs in RunPod workers
 - ✅ Faster training due to multi-GPU acceleration
-- ✅ Normal plot and model download behavior
+- ✅ Normal S3 upload/download behavior for plots and models
 
-### **Test 5: Multi-GPU Sequential Workers** ✅ **VERIFIED**
+### **Test 5: Multi-GPU Sequential Workers** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `use_runpod_service=True, concurrent=False, target_gpus_per_worker=2`
 **Purpose**: Test multiple GPUs per worker without concurrency
 
@@ -835,9 +845,9 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 **Expected Results**:
 - ✅ Sequential trials each using 2 GPUs
 - ✅ TensorFlow MirroredStrategy acceleration
-- ✅ Normal download behavior with GPU acceleration
+- ✅ Normal S3 upload/download behavior with GPU acceleration
 
-### **Test 6: Higher Trial Count** ✅ **VERIFIED**
+### **Test 6: Higher Trial Count** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `trials=4` (increased from default 2)
 **Purpose**: Verify system handles higher trial counts correctly
 
@@ -856,12 +866,12 @@ curl -X POST "http://localhost:8000/optimize" -H "Content-Type: application/json
 
 **Expected Results**:
 - ✅ 4 trials executed across 2 concurrent workers
-- ✅ Trial plots downloaded for all 4 trials
+- ✅ Trial files uploaded to S3 and downloaded for all 4 trials
 - ✅ Optuna study explores larger hyperparameter space
 - ✅ Best trial identified from 4 candidates
-- ✅ Final model + plots downloaded normally
+- ✅ Final model + plots assembled from best trial
 
-### **Test 7: Extended Training Epochs** ✅ **VERIFIED**
+### **Test 7: Extended Training Epochs** ✅ **VERIFIED VIA TERMINAL**
 **Configuration**: `max_epochs_per_trial=10` (increased from default 6)
 **Purpose**: Verify system handles longer training periods correctly
 

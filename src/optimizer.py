@@ -1256,10 +1256,14 @@ class ModelOptimizer:
                     worker_id = status_data.get('workerId', status_data.get('worker_id'))
                     if worker_id:
                         logger.info(f"🎯 RUNPOD POLLING - Worker ID: {worker_id}")
-                        logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} TRAINED on worker_id={worker_id}")
+                        if job_status == 'COMPLETED':
+                            logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} COMPLETED on worker_id={worker_id}")
+                        else:
+                            logger.debug(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} running on worker_id={worker_id}")
                     else:
                         logger.debug(f"🔍 RUNPOD POLLING - No worker ID found in response")
-                        logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} completed but no worker_id available")
+                        if job_status == 'COMPLETED':
+                            logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: Trial {trial.number} completed but no worker_id available")
 
                     # logger.info(f"🔍 RUNPOD POLLING - Full status response: {json.dumps(status_data, indent=2)}")
                     

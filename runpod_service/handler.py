@@ -411,7 +411,11 @@ def generate_plots(
                         logger.info(f"generate_plots ... ✅ Complete ZIP uploaded to S3: {s3_data['s3_key']}")
                     else:
                         logger.error(f"generate_plots ... ❌ Failed to upload ZIP to S3")
-                        return None
+                        return {
+                            "success": False,
+                            "error": "Failed to upload ZIP to S3",
+                            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+                        }
 
                 finally:
                     # Clean up temporary zip file
