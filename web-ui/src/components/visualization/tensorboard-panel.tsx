@@ -376,6 +376,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                       className="w-full h-auto max-h-[600px] object-contain"
                       width={800}
                       height={600}
+                      style={{ height: 'auto' }}
                       unoptimized={true}
                       onError={(e) => {
                         const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
