@@ -22,7 +22,7 @@ def _get_default_runpod_endpoint() -> Optional[str]:
     except ImportError:
         pass  # dotenv not available, rely on system environment
     
-    endpoint_id = os.getenv('RUNPOD_ENDPOINT_ID')
+    endpoint_id = os.getenv('ENDPOINT_ID_RUNPOD')
     if endpoint_id:
         return f"https://api.runpod.ai/v2/{endpoint_id}/run"
     return None
@@ -92,7 +92,7 @@ class OptimizationConfig(BaseModel):
     timeout_hours: Optional[float] = Field(5, description="Optimization timeout in hours")
     health_monitoring_frequency: int = Field(1, description="Health monitoring frequency")
     max_bias_change_per_epoch: float = Field(10.0, description="Maximum bias change per epoch")
-    runpod_service_endpoint: Optional[str] = Field(default_factory=_get_default_runpod_endpoint, description="RunPod service endpoint URL (auto-configured from RUNPOD_ENDPOINT_ID)")
+    runpod_service_endpoint: Optional[str] = Field(default_factory=_get_default_runpod_endpoint, description="RunPod service endpoint URL (auto-configured from ENDPOINT_ID_RUNPOD)")
     runpod_service_timeout: int = Field(1800, description="RunPod service timeout in seconds")  # 30 minutes for health mode
     runpod_service_fallback_local: bool = Field(True, description="Fallback to local execution if RunPod fails")
     concurrent: bool = Field(False, description="Enable concurrent execution")
@@ -206,7 +206,7 @@ class OptimizationConfig(BaseModel):
             if self.runpod_service_endpoint:
                 logger.debug(f"running OptimizationConfig.model_post_init ... RunPod endpoint configured: {self.runpod_service_endpoint}")
             else:
-                logger.warning(f"running OptimizationConfig.model_post_init ... RunPod service enabled but RUNPOD_ENDPOINT_ID not found in environment")
+                logger.warning(f"running OptimizationConfig.model_post_init ... RunPod service enabled but ENDPOINT_ID_RUNPOD not found in environment")
         
         # Log RunPod Service configuration
         if self.use_runpod_service:

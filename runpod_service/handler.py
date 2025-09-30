@@ -47,36 +47,36 @@ def get_s3_client():
 
     Follows RunPod's official documentation pattern exactly.
     Requires environment variables:
-    - AWS_ACCESS_KEY_ID or RUNPOD_S3_ACCESS_KEY
-    - AWS_SECRET_ACCESS_KEY or RUNPOD_S3_SECRET_ACCESS_KEY
-    - RUNPOD_S3_VOLUME_DATACENTER
+    - AWS_ACCESS_KEY_ID or S3_ACCESS_KEY_RUNPOD
+    - AWS_SECRET_ACCESS_KEY or S3_SECRET_ACCESS_KEY_RUNPOD
+    - S3_VOLUME_DATACENTER_RUNPOD
 
     Returns:
         boto3.client: Configured S3 client
     """
     # Try standard AWS env vars first, then fall back to custom RUNPOD_S3_* names
-    s3_access_key = os.getenv('RUNPOD_S3_ACCESS_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
-    s3_secret_key = os.getenv('RUNPOD_S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
-    datacenter = os.getenv('RUNPOD_S3_VOLUME_DATACENTER')
+    s3_access_key_runpod = os.getenv('S3_ACCESS_KEY_RUNPOD') or os.getenv('AWS_ACCESS_KEY_ID')
+    s3_secret_key = os.getenv('S3_SECRET_ACCESS_KEY_RUNPOD') or os.getenv('AWS_SECRET_ACCESS_KEY')
+    datacenter = os.getenv('S3_VOLUME_DATACENTER_RUNPOD')
 
-    if not s3_access_key or not s3_secret_key:
+    if not s3_access_key_runpod or not s3_secret_key:
         raise ValueError("S3 credentials not found in environment variables (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)")
 
     if not datacenter:
-        raise ValueError("RUNPOD_S3_VOLUME_DATACENTER not found in environment variables")
+        raise ValueError("S3_VOLUME_DATACENTER_RUNPOD not found in environment variables")
 
     # Construct datacenter-specific endpoint URL (lowercase)
     datacenter_lower = datacenter.lower()
     s3_endpoint = f"https://s3api-{datacenter_lower}.runpod.io"
 
     logger.info(f"get_s3_client ... Configuring S3 client: endpoint={s3_endpoint}, region={datacenter_lower}")
-    logger.info(f"get_s3_client ... Access Key ID: {s3_access_key}")
+    logger.info(f"get_s3_client ... Access Key ID: {s3_access_key_runpod}")
     logger.info(f"get_s3_client ... Secret Key prefix: {s3_secret_key[:10]}...")
 
     # Use RunPod's documented pattern - simple boto3 client with no extra config
     return boto3.client(
         's3',
-        aws_access_key_id=s3_access_key,
+        aws_access_key_id=s3_access_key_runpod,
         aws_secret_access_key=s3_secret_key,
         region_name=datacenter_lower,
         endpoint_url=s3_endpoint
@@ -96,10 +96,10 @@ def cleanup_all_s3_models():
     """
     try:
         s3_client = get_s3_client()
-        bucket = os.getenv('RUNPOD_S3_VOLUME_ID')
+        bucket = os.getenv('S3_VOLUME_ID_RUNPOD')
 
         if not bucket:
-            logger.warning("cleanup_all_s3_models ... RUNPOD_S3_VOLUME_ID not set, skipping S3 cleanup")
+            logger.warning("cleanup_all_s3_models ... S3_VOLUME_ID_RUNPOD not set, skipping S3 cleanup")
             return
 
         logger.info("cleanup_all_s3_models ... Starting aggressive S3 cleanup (deleting ALL models/)")
@@ -151,27 +151,28 @@ def cleanup_all_s3_models():
         logger.debug(f"cleanup_all_s3_models ... Traceback: {traceback.format_exc()}")
 
 
-def upload_model_to_s3(zip_file_path: Path, run_name: str) -> Optional[Dict[str, Any]]:
+def upload_model_to_s3(zip_file_path: Path, run_name: str, trial_number: int = 0) -> Optional[Dict[str, Any]]:
     """
     Upload model ZIP file to RunPod S3 and return presigned URL.
 
     Args:
         zip_file_path: Path to the compressed models ZIP file
         run_name: Run name for organizing S3 storage
+        trial_number: Trial number for unique S3 paths (prevents concurrent trial conflicts)
 
     Returns:
         Dictionary with S3 metadata, or None on failure
     """
     try:
         s3_client = get_s3_client()
-        bucket = os.getenv('RUNPOD_S3_VOLUME_ID')
+        bucket = os.getenv('S3_VOLUME_ID_RUNPOD')
 
         if not bucket:
-            logger.error("upload_model_to_s3 ... RUNPOD_S3_VOLUME_ID not set")
+            logger.error("upload_model_to_s3 ... S3_VOLUME_ID_RUNPOD not set")
             return None
 
-        # S3 object key
-        s3_key = f"models/{run_name}/models.zip"
+        # S3 object key - include trial_number to prevent concurrent trials from overwriting files
+        s3_key = f"models/{run_name}/trial_{trial_number}/models.zip"
         file_size = zip_file_path.stat().st_size
 
         logger.info(f"upload_model_to_s3 ... Uploading {file_size} bytes to s3://{bucket}/{s3_key}")
@@ -225,6 +226,7 @@ def generate_plots(
     model_builder,
     dataset_name: str,
     trial_id: str,
+    trial_number: int = 0,
     test_data: Optional[Dict[str, Any]] = None,
     optimization_config: Optional['OptimizationConfig'] = None
 ) -> Optional[Dict[str, Any]]:
@@ -399,7 +401,7 @@ def generate_plots(
 
                     # Upload single ZIP to S3
                     logger.info(f"generate_plots ... Uploading complete ZIP to S3")
-                    s3_data = upload_model_to_s3(Path(temp_zip_path), run_name)
+                    s3_data = upload_model_to_s3(Path(temp_zip_path), run_name, trial_number)
 
                     if s3_data:
                         # Add metadata
@@ -414,7 +416,9 @@ def generate_plots(
                         return {
                             "success": False,
                             "error": "Failed to upload ZIP to S3",
-                            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+                            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker'),
+                            "available_files": [],
+                            "generated_plots": []
                         }
 
                 finally:
@@ -446,7 +450,9 @@ def generate_plots(
         return {
             "success": False,
             "error": str(e),
-            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker')
+            "worker_id": os.environ.get('RUNPOD_POD_ID', 'unknown_worker'),
+            "available_files": [],
+            "generated_plots": []
         }
 
 
@@ -1007,6 +1013,10 @@ async def start_training(job: Dict[str, Any]):
         if 'gpu_proxy_sample_percentage' in all_params:
             model_config.gpu_proxy_sample_percentage = all_params['gpu_proxy_sample_percentage']
 
+        # Extract trial number for unique S3 paths
+        trial_number = request.get('trial_number', 0)
+        logger.debug(f"running start_training ... Trial number: {trial_number}")
+
         # Extract and apply multi-GPU configuration from request
         config_data = request.get('config', {})
         use_multi_gpu = config_data.get('use_multi_gpu', False)
@@ -1044,7 +1054,7 @@ async def start_training(job: Dict[str, Any]):
                 }
                 
                 # Only send progress update if we're in RunPod environment
-                if os.getenv('RUNPOD_ENDPOINT_ID'):
+                if os.getenv('ENDPOINT_ID_RUNPOD'):
                     runpod.serverless.progress_update(job, progress_data)
                     logger.info(f"✅ Sent progress update: Epoch {epoch}/{total_epochs}, progress {epoch_progress:.1%}")
                 else:
@@ -1147,6 +1157,7 @@ async def start_training(job: Dict[str, Any]):
             model_builder=model_builder,
             dataset_name=request['dataset_name'],
             trial_id=trial_id,
+            trial_number=trial_number,
             test_data=training_result.get('test_data'),
             optimization_config=optimization_config
         )
@@ -1787,14 +1798,14 @@ if __name__ == "__main__":
     print("=== HANDLER.PY STARTUP ===")
     print(f"Python path: {sys.path}")
     print(f"Current working directory: {os.getcwd()}")
-    print(f"RUNPOD_ENDPOINT_ID: {os.getenv('RUNPOD_ENDPOINT_ID')}")
+    print(f"ENDPOINT_ID_RUNPOD: {os.getenv('ENDPOINT_ID_RUNPOD')}")
     print("=========================")
 
     try:
         logger.info("=== HANDLER.PY STARTUP ===")
         logger.info(f"Python path: {sys.path}")
         logger.info(f"Current working directory: {os.getcwd()}")
-        logger.info(f"RUNPOD_ENDPOINT_ID: {os.getenv('RUNPOD_ENDPOINT_ID')}")
+        logger.info(f"ENDPOINT_ID_RUNPOD: {os.getenv('ENDPOINT_ID_RUNPOD')}")
         logger.info("=========================")
 
         # Start RunPod serverless handler (no streaming needed with S3)

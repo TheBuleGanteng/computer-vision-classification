@@ -11,12 +11,16 @@ Usage:
     logger.error("Model failed to load")
 """
 
-import logging
-import os
 from datetime import datetime
-from typing import Optional, Union, Dict, Any
+import logging
+import matplotlib.font_manager
+import matplotlib.pyplot as plt
+import os
 from pathlib import Path
+import time
+from typing import Optional, Union, Dict, Any
 
+from logging.handlers import RotatingFileHandler
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to console output."""
@@ -101,8 +105,7 @@ def setup_logging(
     # File handler with rotation and error handling
     file_handler = None
     try:
-        from logging.handlers import RotatingFileHandler
-        
+       
         # Test if we can write to the file first
         log_file_path_resolved.touch()  # Create file if it doesn't exist
         
@@ -319,12 +322,9 @@ if __name__ == "__main__":
     
     # Test timed operation
     with TimedOperation("data loading"):
-        import time
         time.sleep(1)  # Simulate work
     
     # Test matplotlib logging (should be silenced)
-    import matplotlib.pyplot as plt
-    import matplotlib.font_manager
     print("Testing matplotlib - verbose logs should be silenced...")
     plt.figure()
     plt.plot([1, 2, 3], [1, 4, 9])

@@ -24,27 +24,20 @@ Supported Architectures:
 - CNN: For image data (GTSRB, CIFAR-10, MNIST, etc.)
 - LSTM: For text data (IMDB, Reuters, etc.)
 """
+import base64
 import copy
 from dataset_manager import DatasetConfig, DatasetManager
-import datetime
+from dataclasses import dataclass, field
+from enum import Enum
+import gc
+import gzip
+import json
+from keras.callbacks import Callback
 import os
 import random
-from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
-from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
-from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
-from plot_creation.training_history import TrainingHistoryAnalyzer
-from plot_creation.weights_bias import WeightsBiasAnalyzer
-from plot_creation.gradient_flow import GradientFlowAnalyzer
-#from gpu_proxy_code import get_gpu_proxy_training_code
-
-from dataclasses import dataclass, field
-from datetime import datetime
-import json
-import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 import seaborn as sns
-from sklearn.metrics import confusion_matrix
 import subprocess
 import sys
 import tensorflow as tf
@@ -57,7 +50,14 @@ if TYPE_CHECKING:
     from optimizer import OptimizationConfig
 
 from dataclasses import dataclass, field
-from enum import Enum
+
+from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
+from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
+from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
+from plot_creation.training_history import TrainingHistoryAnalyzer
+from plot_creation.weights_bias import WeightsBiasAnalyzer
+from plot_creation.gradient_flow import GradientFlowAnalyzer
+from utils.logger import logger
 
 # Move PaddingOption outside the class to avoid issues
 class PaddingOption(Enum):
@@ -203,7 +203,7 @@ class ModelConfig:
                 self.padding = PaddingOption(self.padding)
             except ValueError:
                 # If the string value doesn't match enum values, default to SAME
-                from utils.logger import logger
+                
                 logger.warning(f"running ModelConfig.__post_init__ ... Invalid padding value '{self.padding}', defaulting to 'same'")
                 self.padding = PaddingOption.SAME
     
@@ -718,8 +718,6 @@ class ModelBuilder:
         y_train: np.ndarray
     ) -> Dict[str, Any]:
         """Compress training data for large payload transmission with improved error handling"""
-        import gzip
-        import base64
         
         logger.debug("running _compress_context_data ... compressing training data with improved handling")
         
@@ -1302,7 +1300,6 @@ class ModelBuilder:
                 logger.debug(f"running _process_training_results ... - cuDNN: {env_info.get('cudnn_version', 'Unknown')}")
                 
             # Local environment for comparison
-            import tensorflow as tf
             logger.debug("running _process_training_results ... Local Environment (for comparison):")
             logger.debug(f"running _process_training_results ... - TensorFlow: {tf.__version__}")
             logger.debug(f"running _process_training_results ... - Keras (TF): {tf.keras.__version__}")             # type: ignore
@@ -1509,8 +1506,7 @@ class ModelBuilder:
         
         # Add epoch progress callback if provided (for final model building)
         if epoch_progress_callback:
-            from keras.callbacks import Callback
-            
+                        
             class FinalModelEpochCallback(Callback):
                 def __init__(self, progress_callback):
                     super().__init__()
@@ -1549,8 +1545,8 @@ class ModelBuilder:
         should_use_multi_gpu = (
             use_multi_gpu and
             len(available_gpus) > 1 and
-            self._is_model_suitable_for_multi_gpu() and
-            not is_runpod_environment  # Disable multi-GPU in RunPod
+            self._is_model_suitable_for_multi_gpu() # and
+            # not is_runpod_environment  # Disable multi-GPU in RunPod
         )
         
         logger.debug(f"running _train_locally ... Available GPUs: {len(available_gpus)}")
@@ -1602,8 +1598,7 @@ class ModelBuilder:
                 if hasattr(tf.distribute.experimental, 'CommunicationOptions'):
                     logger.debug("running _train_locally ... Resetting TensorFlow collective operations state")
 
-                # Import gc for garbage collection
-                import gc
+                # gc for garbage collection
                 gc.collect()
 
                 logger.debug("running _train_locally ... TensorFlow session and collective ops cleared")
@@ -1912,7 +1907,7 @@ class ModelBuilder:
                 test_loss, test_accuracy = self.model.evaluate(test_data['x_test'], test_data['y_test'], verbose=0)
                 test_accuracy = round(test_accuracy, 4)
             
-            # Use comprehensive PlotGenerator (delayed import to avoid circular dependency)
+            # Use comprehensive PlotGenerator (delayed to avoid circular dependency)
             from plot_generator import PlotGenerator
             
             # Create optimization config with plot flags (if not available, all plots enabled by default)
@@ -2117,8 +2112,8 @@ class ModelBuilder:
         project_root = Path(__file__).parent.parent.parent  # Go up 3 levels to project root
         
         # Check if we're actually in RunPod container environment (not just endpoint configured)
-        # RunPod containers have /app directory and RUNPOD_ENDPOINT_ID set
-        if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
+        # RunPod containers have /app directory and ENDPOINT_ID_RUNPOD set
+        if os.getenv('ENDPOINT_ID_RUNPOD') and os.path.exists('/app'):
             logger.debug("running _determine_save_directory ... Detected RunPod container environment")
             # Use /app/optimization_results structure for RunPod to match local behavior
             if run_name:

@@ -1134,13 +1134,13 @@ class ModelOptimizer:
             logger.info(f"running _download_from_s3 ... Parsed: bucket={bucket}, key={key}")
 
             # Get S3 credentials (same pattern as handler.py get_s3_client)
-            s3_access_key = os.getenv('RUNPOD_S3_ACCESS_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
-            s3_secret_key = os.getenv('RUNPOD_S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
-            datacenter = os.getenv('RUNPOD_S3_VOLUME_DATACENTER')
+            s3_access_key_runpod = os.getenv('S3_ACCESS_KEY_RUNPOD') or os.getenv('AWS_ACCESS_KEY_ID')
+            s3_secret_key = os.getenv('S3_SECRET_ACCESS_KEY_RUNPOD') or os.getenv('AWS_SECRET_ACCESS_KEY')
+            datacenter = os.getenv('S3_VOLUME_DATACENTER_RUNPOD')
 
-            if not s3_access_key or not s3_secret_key or not datacenter:
+            if not s3_access_key_runpod or not s3_secret_key or not datacenter:
                 logger.error(f"running _download_from_s3 ... ❌ Missing S3 credentials in environment")
-                logger.error(f"running _download_from_s3 ... Required: RUNPOD_S3_ACCESS_KEY, RUNPOD_S3_SECRET_ACCESS_KEY, RUNPOD_S3_VOLUME_DATACENTER")
+                logger.error(f"running _download_from_s3 ... Required: S3_ACCESS_KEY_RUNPOD, S3_SECRET_ACCESS_KEY_RUNPOD, S3_VOLUME_DATACENTER_RUNPOD")
                 return False
 
             # Construct endpoint (same pattern as handler.py)
@@ -1150,7 +1150,7 @@ class ModelOptimizer:
             # Create S3 client (exact same pattern as handler.py get_s3_client)
             s3_client = boto3.client(
                 's3',
-                aws_access_key_id=s3_access_key,
+                aws_access_key_id=s3_access_key_runpod,
                 aws_secret_access_key=s3_secret_key,
                 region_name=datacenter_lower,
                 endpoint_url=s3_endpoint
@@ -1173,9 +1173,9 @@ class ModelOptimizer:
         logger.debug(f"running _train_via_runpod_service ... Using JSON API approach (tiny payloads) instead of code injection")
         
         try:
-            api_key = os.getenv('RUNPOD_API_KEY')
+            api_key = os.getenv('API_KEY_RUNPOD')
             if not api_key:
-                raise RuntimeError("RUNPOD_API_KEY environment variable not set")
+                raise RuntimeError("API_KEY_RUNPOD environment variable not set")
             if self.config.runpod_service_endpoint is None:
                 raise RuntimeError("RunPod service endpoint is not configured")
 
@@ -1183,8 +1183,10 @@ class ModelOptimizer:
                 "input": {
                     "command": "start_training",
                     "trial_id": self.run_name,  # Use full run name for consistent file organization
+                    "trial_number": trial.number,  # Include trial number for unique S3 paths
                     "dataset_name": self.dataset_name,
                     "run_name": self.run_name,  # Include coordinated run_name for timestamp consistency
+                    "run_timestamp": self.run_timestamp,  # Include run_timestamp for model_builder compatibility
                     "hyperparameters": params,
                     "config": {
                         "validation_split": self.config.validation_split,

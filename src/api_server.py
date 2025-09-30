@@ -47,9 +47,10 @@ from data_classes.configs import OptimizationConfig, OptimizationRequest, Optimi
 from dataset_manager import DatasetManager
 from model_visualizer import create_model_visualizer
 from optimizer import optimize_model, ModelOptimizer, OptimizationResult
-from utils.logger import logger
 from utils.clear_logs import clear_logs_directory
-# S3 imports removed - using direct downloads from RunPod workers
+from utils.logger import logger
+from utils.run_name import create_run_name
+from utils.runpod_direct_download import download_specific_files_from_runpod_worker, get_runpod_worker_endpoint
 
 
 class TensorBoardManager:
@@ -304,7 +305,6 @@ class RunPodServiceClient:
         """Convert OptimizationRequest to RunPod handler input format"""
 
         # Generate unified run_name to ensure consistency between local and RunPod execution
-        from utils.run_name import create_run_name
         run_name = create_run_name(
             dataset_name=request.dataset_name,
             mode=request.mode,
@@ -344,13 +344,13 @@ class RunPodServiceClient:
         """Make HTTP request to RunPod service with polling until completion"""
 
         # Get RunPod API key from environment
-        runpod_api_key = os.getenv('RUNPOD_API_KEY')
-        if not runpod_api_key:
-            raise RuntimeError("RUNPOD_API_KEY not found in environment variables")
+        api_key_runpod = os.getenv('API_KEY_RUNPOD')
+        if not api_key_runpod:
+            raise RuntimeError("API_KEY_RUNPOD not found in environment variables")
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {runpod_api_key}"
+            "Authorization": f"Bearer {api_key_runpod}"
         }
 
         timeout = aiohttp.ClientTimeout(total=60)  # 60s timeout per request
@@ -544,9 +544,6 @@ class RunPodServiceClient:
             logger.info(f"running _download_direct_artifacts ... Downloading RunPod artifacts to: {results_dir}")
             logger.info(f"running _download_direct_artifacts ... Using old working individual file download method")
             logger.info(f"running _download_direct_artifacts ... This downloads plots with trial models included in available_files")
-
-            # Import direct download functions (REVERTED TO WORKING METHOD)
-            from utils.runpod_direct_download import download_specific_files_from_runpod_worker, get_runpod_worker_endpoint
 
             # Get worker endpoint
             worker_endpoint = get_runpod_worker_endpoint(self.endpoint_url)
@@ -1397,7 +1394,6 @@ class OptimizationJob:
             logger.info(f"🏠 Using local Optuna orchestration with local execution")
 
         # Generate unified run_name to ensure consistency with RunPod execution
-        from utils.run_name import create_run_name
         run_name = create_run_name(
             dataset_name=self.request.dataset_name,
             mode=self.request.mode,
@@ -3115,7 +3111,7 @@ Job ID: {job_id}
             
             # Fallback: Search for directory by pattern
             # Use /app path only if actually in RunPod container
-            if os.getenv('RUNPOD_ENDPOINT_ID') and os.path.exists('/app'):
+            if os.getenv('ENDPOINT_ID_RUNPOD') and os.path.exists('/app'):
                 logger.debug("running _get_job_results_directory ... Detected RunPod container environment")
                 optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "/app/optimization_results"))
             else:

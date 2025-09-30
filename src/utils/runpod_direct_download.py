@@ -264,12 +264,12 @@ def download_specific_files_from_runpod_worker(
         return False
 
 
-def get_runpod_worker_endpoint(runpod_api_url: str) -> str:
+def get_runpod_worker_endpoint(api_url_runpod: str) -> str:
     """
     Extract the RunPod worker endpoint URL from the API URL.
 
     Args:
-        runpod_api_url: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
+        api_url_runpod: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
 
     Returns:
         Worker endpoint URL (e.g., https://endpoint_id-80.proxy.runpod.net)
@@ -277,18 +277,18 @@ def get_runpod_worker_endpoint(runpod_api_url: str) -> str:
     try:
         # Extract endpoint ID from RunPod API URL
         # Format: https://api.runpod.ai/v2/{endpoint_id}/run
-        if '/v2/' in runpod_api_url and '/run' in runpod_api_url:
-            endpoint_id = runpod_api_url.split('/v2/')[1].split('/run')[0]
+        if '/v2/' in api_url_runpod and '/run' in api_url_runpod:
+            endpoint_id = api_url_runpod.split('/v2/')[1].split('/run')[0]
             worker_endpoint = f"https://{endpoint_id}-80.proxy.runpod.net"
             logger.debug(f"🔗 Converted API URL to worker endpoint: {worker_endpoint}")
             return worker_endpoint
         else:
-            logger.error(f"❌ Invalid RunPod API URL format: {runpod_api_url}")
-            return runpod_api_url
+            logger.error(f"❌ Invalid RunPod API URL format: {api_url_runpod}")
+            return api_url_runpod
 
     except Exception as e:
         logger.error(f"❌ Failed to extract worker endpoint: {e}")
-        return runpod_api_url
+        return api_url_runpod
 
 
 def wait_for_runpod_worker_ready(runpod_endpoint: str, timeout: int = 60) -> bool:
@@ -328,8 +328,8 @@ def wait_for_runpod_worker_ready(runpod_endpoint: str, timeout: int = 60) -> boo
 
 
 def download_files_via_runpod_api(
-    runpod_api_url: str,
-    runpod_api_key: str,
+    api_url_runpod: str,
+    api_key_runpod: str,
     run_name: str,
     local_dir: str,
     file_list: Optional[List[str]] = None,
@@ -339,8 +339,8 @@ def download_files_via_runpod_api(
     Download files from RunPod worker using the new RunPod API approach.
 
     Args:
-        runpod_api_url: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
-        runpod_api_key: RunPod API key for authentication
+        api_url_runpod: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
+        api_key_runpod: RunPod API key for authentication
         run_name: Run name to identify files
         local_dir: Local directory to download files to
         file_list: Optional list of specific files to download
@@ -350,7 +350,7 @@ def download_files_via_runpod_api(
         True if download successful, False otherwise
     """
     try:
-        logger.info(f"📥 Starting download via RunPod API: {runpod_api_url}")
+        logger.info(f"📥 Starting download via RunPod API: {api_url_runpod}")
         logger.info(f"🏷️ Run name: {run_name}")
         logger.info(f"📁 Local directory: {local_dir}")
 
@@ -360,15 +360,16 @@ def download_files_via_runpod_api(
 
         # First, get list of available files
         files_response = _call_runpod_api(
-            runpod_api_url=runpod_api_url,
-            runpod_api_key=runpod_api_key,
+            api_url_runpod=api_url_runpod,
+            api_key_runpod=api_key_runpod,
             command="list_files",
             run_name=run_name,
             timeout=timeout
         )
 
         if not files_response or files_response.get("error"):
-            logger.error(f"❌ Failed to list files: {files_response.get('error', 'Unknown error')}")
+            error_msg = files_response.get('error', 'Unknown error') if files_response else 'No response from RunPod'
+            logger.error(f"❌ Failed to list files: {error_msg}")
             return False
 
         available_files = files_response.get("files", [])
@@ -391,8 +392,8 @@ def download_files_via_runpod_api(
 
                 # Download file via RunPod API
                 download_response = _call_runpod_api(
-                    runpod_api_url=runpod_api_url,
-                    runpod_api_key=runpod_api_key,
+                    api_url_runpod=api_url_runpod,
+                    api_key_runpod=api_key_runpod,
                     command="download_file",
                     run_name=run_name,
                     file_path=file_path,
@@ -400,7 +401,8 @@ def download_files_via_runpod_api(
                 )
 
                 if not download_response or download_response.get("error"):
-                    logger.error(f"❌ Failed to download {file_path}: {download_response.get('error', 'Unknown error')}")
+                    error_msg = download_response.get('error', 'Unknown error') if download_response else 'No response from RunPod'
+                    logger.error(f"❌ Failed to download {file_path}: {error_msg}")
                     continue
 
                 # Decode base64 content and save to local file
@@ -447,8 +449,8 @@ def download_files_via_runpod_api(
 
 
 def _call_runpod_api(
-    runpod_api_url: str,
-    runpod_api_key: str,
+    api_url_runpod: str,
+    api_key_runpod: str,
     command: str,
     timeout: int = 300,
     **kwargs
@@ -457,8 +459,8 @@ def _call_runpod_api(
     Call RunPod API with a command and parameters.
 
     Args:
-        runpod_api_url: RunPod API URL
-        runpod_api_key: RunPod API key
+        api_url_runpod: RunPod API URL
+        api_key_runpod: RunPod API key
         command: Command to execute
         timeout: Request timeout
         **kwargs: Additional parameters for the command
@@ -475,12 +477,12 @@ def _call_runpod_api(
         }
 
         headers = {
-            "Authorization": f"Bearer {runpod_api_key}",
+            "Authorization": f"Bearer {api_key_runpod}",
             "Content-Type": "application/json"
         }
 
         logger.debug(f"🔧 Calling RunPod API: {command}")
-        response = requests.post(runpod_api_url, json=payload, headers=headers, timeout=timeout)
+        response = requests.post(api_url_runpod, json=payload, headers=headers, timeout=timeout)
         response.raise_for_status()
 
         result = response.json()
@@ -491,7 +493,7 @@ def _call_runpod_api(
             return None
 
         # Poll for job completion
-        status_url = runpod_api_url.replace("/run", f"/status/{job_id}")
+        status_url = api_url_runpod.replace("/run", f"/status/{job_id}")
 
         logger.debug(f"⏳ Polling job status: {job_id}")
         max_polls = 60  # 5 minutes at 5-second intervals
@@ -535,22 +537,22 @@ def _call_runpod_api(
 
 
 def download_directory_via_runpod_api(
-    runpod_api_url: str,
-    runpod_api_key: str,
+    api_url_runpod: str,
+    api_key_runpod: str,
     run_name: str,
     local_dir: str,
     timeout: int = 300,
-    trial_id: str = None,
-    trial_number: int = None,
-    worker_id: str = None
+    trial_id: Optional[str] = None,
+    trial_number: Optional[int] = None,
+    worker_id: Optional[str] = None
 ) -> bool:
     """
     Download entire directory from RunPod worker using multiple smaller zip files to avoid response size limits.
     Downloads plots and models separately to prevent 400 Bad Request errors from large responses.
 
     Args:
-        runpod_api_url: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
-        runpod_api_key: RunPod API key for authentication
+        api_url_runpod: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
+        api_key_runpod: RunPod API key for authentication
         run_name: Run name to identify directory
         local_dir: Local directory to extract files to
         timeout: Timeout in seconds for the request
@@ -561,15 +563,15 @@ def download_directory_via_runpod_api(
     Returns:
         True if download successful, False otherwise
     """
-    try:
-        # Format trial information for logs
-        trial_info = ""
-        if trial_number is not None:
-            trial_info = f" (trial_{trial_number}"
-            if trial_id:
-                trial_info += f", {trial_id}"
-            trial_info += ")"
+    # Format trial information for logs (initialize before try block for exception handler)
+    trial_info = ""
+    if trial_number is not None:
+        trial_info = f" (trial_{trial_number}"
+        if trial_id:
+            trial_info += f", {trial_id}"
+        trial_info += ")"
 
+    try:
         logger.info(f"running download_directory_via_runpod_api{trial_info} ... Starting multi-part directory download")
         logger.info(f"running download_directory_via_runpod_api{trial_info} ... Run name: {run_name}")
         logger.info(f"running download_directory_via_runpod_api{trial_info} ... Local directory: {local_dir}")
@@ -583,7 +585,7 @@ def download_directory_via_runpod_api(
             logger.info(f"running download_directory_via_runpod_api{trial_info} ... Worker endpoint: {api_url}")
         else:
             # Use load-balanced endpoint (may hit different workers)
-            api_url = runpod_api_url
+            api_url = api_url_runpod
             logger.info(f"running download_directory_via_runpod_api{trial_info} ... Using load-balanced endpoint (may hit different workers)")
             logger.info(f"running download_directory_via_runpod_api{trial_info} ... Load balancer endpoint: {api_url}")
             logger.warning(f"running download_directory_via_runpod_api{trial_info} ... No worker ID provided - downloads may fail due to worker isolation")
@@ -606,8 +608,8 @@ def download_directory_via_runpod_api(
                 logger.info(f"running download_directory_via_runpod_api{trial_info} ... Using load-balanced endpoint for {download_type}: {api_url}")
 
             download_response = _call_runpod_api(
-                runpod_api_url=api_url,
-                runpod_api_key=runpod_api_key,
+                api_url_runpod=api_url,
+                api_key_runpod=api_key_runpod,
                 command="download_directory",
                 run_name=run_name,
                 download_type=download_type,
@@ -623,12 +625,12 @@ def download_directory_via_runpod_api(
                 logger.info(f"🔄 Retrying {download_type} download with load-balanced URL instead of worker-specific URL")
 
                 # Retry with load-balanced endpoint
-                fallback_url = runpod_api_url
+                fallback_url = api_url_runpod
                 logger.info(f"running download_directory_via_runpod_api{trial_info} ... Fallback to load-balanced endpoint: {fallback_url}")
 
                 download_response = _call_runpod_api(
-                    runpod_api_url=fallback_url,
-                    runpod_api_key=runpod_api_key,
+                    api_url_runpod=fallback_url,
+                    api_key_runpod=api_key_runpod,
                     command="download_directory",
                     run_name=run_name,
                     download_type=download_type,
@@ -653,7 +655,8 @@ def download_directory_via_runpod_api(
                 logger.error(f"running download_directory_via_runpod_api{trial_info} ... Load balancer routing failed for {download_type}")
 
             if not download_response or download_response.get("error"):
-                logger.warning(f"⚠️ Failed to download {download_type}{trial_info}: {download_response.get('error', 'Unknown error')}")
+                error_msg = download_response.get('error', 'Unknown error') if download_response else 'No response from RunPod'
+                logger.warning(f"⚠️ Failed to download {download_type}{trial_info}: {error_msg}")
                 logger.warning(f"⚠️ This may be normal if no {download_type} files exist for this run{trial_info}")
                 continue  # Skip this download type but continue with others
 
@@ -727,14 +730,14 @@ def download_directory_via_runpod_api(
 
 
 def download_directory_multipart_via_runpod_api(
-    runpod_api_url: str,
-    runpod_api_key: str,
+    api_url_runpod: str,
+    api_key_runpod: str,
     run_name: str,
     local_dir: str,
     timeout: int = 300,
-    trial_id: str = None,
-    trial_number: int = None,
-    worker_id: str = None,
+    trial_id: Optional[str] = None,
+    trial_number: Optional[int] = None,
+    worker_id: Optional[str] = None,
     max_part_size_mb: int = 8
 ) -> bool:
     """
@@ -743,8 +746,8 @@ def download_directory_multipart_via_runpod_api(
     This solves the worker isolation problem where multiple requests might hit different workers.
 
     Args:
-        runpod_api_url: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
-        runpod_api_key: RunPod API key for authentication
+        api_url_runpod: RunPod API URL (e.g., https://api.runpod.ai/v2/endpoint_id/run)
+        api_key_runpod: RunPod API key for authentication
         run_name: Run name to identify directory
         local_dir: Local directory to extract files to
         timeout: Timeout in seconds for the request
@@ -756,19 +759,19 @@ def download_directory_multipart_via_runpod_api(
     Returns:
         bool: True if download succeeded, False otherwise
     """
-    try:
-        # Format trial information for logs
-        trial_info = ""
-        if trial_number is not None:
-            trial_info = f" (trial_{trial_number}"
-            if trial_id:
-                trial_info += f", {trial_id}"
-            trial_info += ")"
+    # Format trial information for logs (initialize before try block for exception handler)
+    trial_info = ""
+    if trial_number is not None:
+        trial_info = f" (trial_{trial_number}"
+        if trial_id:
+            trial_info += f", {trial_id}"
+        trial_info += ")"
 
+    try:
         logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Starting multipart download for run: {run_name}")
 
         # Use load-balanced endpoint directly (worker-specific URLs consistently fail with 502 errors)
-        api_url = runpod_api_url
+        api_url = api_url_runpod
         logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Using load-balanced endpoint with multipart approach to avoid worker isolation")
         logger.info(f"running download_directory_multipart_via_runpod_api{trial_info} ... Load balancer endpoint: {api_url}")
         if worker_id:
@@ -786,8 +789,8 @@ def download_directory_multipart_via_runpod_api(
 
         # Make single multipart request
         download_response = _call_runpod_api(
-            runpod_api_url=api_url,
-            runpod_api_key=runpod_api_key,
+            api_url_runpod=api_url,
+            api_key_runpod=api_key_runpod,
             command="download_directory_multipart",
             run_name=run_name,
             trial_id=trial_id,
@@ -812,7 +815,8 @@ def download_directory_multipart_via_runpod_api(
             logger.warning(f"🏗️ WORKER_ISOLATION_TRACKING: ⚠️ Missing worker IDs - training={worker_id}, download={download_worker_id}")
 
         if not download_response or download_response.get("error"):
-            logger.warning(f"⚠️ Failed to download multipart{trial_info}: {download_response.get('error', 'Unknown error')}")
+            error_msg = download_response.get('error', 'Unknown error') if download_response else 'No response from RunPod'
+            logger.warning(f"⚠️ Failed to download multipart{trial_info}: {error_msg}")
             return False
 
         # Process multipart response

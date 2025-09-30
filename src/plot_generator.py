@@ -7,30 +7,26 @@ Handles all plot generation and visualization logic for model training analysis.
 This module contains visualization domain knowledge and coordinates between
 different plot analysis modules to create comprehensive training reports.
 """
-
+from dataset_manager import DatasetManager
 from datetime import datetime
 import numpy as np
 import os
 from pathlib import Path
+import sys
 from tensorflow import keras # type: ignore
-from typing import Dict, Any, List, Tuple, Optional, Union, Callable
+from typing import Dict, Any, List, Tuple, TYPE_CHECKING, Optional, Union, Callable
 from utils.logger import logger
 
 # Import all the plot analysis modules
+from dataset_manager import DatasetConfig
+from model_builder import ModelConfig
+from optimizer import OptimizationConfig
 from plot_creation.confusion_matrix import ConfusionMatrixAnalyzer
 from plot_creation.training_history import TrainingHistoryAnalyzer
 from plot_creation.training_animation import TrainingAnimationAnalyzer
 from plot_creation.gradient_flow import GradientFlowAnalyzer
 from plot_creation.weights_bias import WeightsBiasAnalyzer
 from plot_creation.activation_map import ActivationMapAnalyzer
-
-from dataset_manager import DatasetConfig
-from typing import TYPE_CHECKING, Union
-
-if TYPE_CHECKING:
-    from model_builder import ModelConfig
-    from optimizer import OptimizationConfig
-
 
 class PlotGenerator:
     """
@@ -754,9 +750,7 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
     
     Args:
         dataset_name: Name of dataset to test with
-    """
-    from dataset_manager import DatasetManager
-    
+    """    
     logger.debug(f"running test_plot_generator ... Testing with dataset: {dataset_name}")
     
     # Load dataset config
@@ -764,7 +758,6 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
     dataset_config = dataset_manager.get_dataset_config(dataset_name)
     
     # Create model config (delayed import to avoid circular dependency)
-    from model_builder import ModelConfig
     model_config = ModelConfig()
     
     # Create plot generator
@@ -776,8 +769,6 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
 
 
 if __name__ == "__main__":
-    # Simple test when run directly
-    import sys
-    
+    # Simple test when run directly    
     dataset_name = sys.argv[1] if len(sys.argv) > 1 else "cifar10"
     test_plot_generator(dataset_name)

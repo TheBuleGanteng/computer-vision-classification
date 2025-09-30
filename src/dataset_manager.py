@@ -9,22 +9,25 @@ Handles multiple datasets with a unified interface:
 - MNIST
 - Extensible for additional datasets
 """
-from pathlib import Path
-import os
+from abc import ABC, abstractmethod
 import cv2
-import numpy as np
-import shutil
+from dataclasses import dataclass
 import importlib
+import kagglehub
+import numpy as np
+import os
+from pathlib import Path
+import shutil
+import tensorflow as tf
 from tensorflow.keras.datasets import cifar10 # type: ignore
 from tensorflow.keras.datasets import cifar100 # type: ignore
+from tensorflow.keras.preprocessing.sequence import pad_sequences # type: ignore
 from tensorflow.keras.utils import to_categorical # type: ignore
 from sklearn.model_selection import train_test_split
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Tuple, List, Dict, Any, Optional, Callable
-import tensorflow as tf
+import urllib.request
 from utils.logger import logger, PerformanceLogger, TimedOperation
-import kagglehub
+import zipfile
 
 @dataclass
 class DatasetConfig:
@@ -236,7 +239,6 @@ class KerasDatasetLoader(BaseDatasetLoader):
             logger.debug(f"running load_data ... Detected text data with {len(images)} sequences")
             
             # For text data, we need to pad sequences to uniform length
-            from tensorflow.keras.preprocessing.sequence import pad_sequences # type: ignore
             
             # Use img_width as max_sequence_length for text datasets
             max_length = self.config.img_width
@@ -397,12 +399,10 @@ class DatasetManager:
         
         # Set up datasets directory path
         if datasets_root is None:
-            from pathlib import Path
             current_file = Path(__file__)
             project_root = current_file.parent.parent  # Go up from src/ to project root
             self.datasets_root = project_root / "datasets"
         else:
-            from pathlib import Path
             self.datasets_root = Path(datasets_root)
         
         # Create datasets directory if it doesn't exist
@@ -627,10 +627,7 @@ class DatasetManager:
         Returns:
             True if successful
         """
-        try:
-            import urllib.request
-            import zipfile
-            
+        try:          
             zip_path = extract_to.parent / "gtsrb.zip"
             
             logger.info(f"running _download_from_url_fallback ... Downloading GTSRB from fallback URL: {url}")

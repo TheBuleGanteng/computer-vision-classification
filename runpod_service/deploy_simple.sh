@@ -119,7 +119,7 @@ if docker push "$REMOTE_IMAGE"; then
     echo ""
     echo -e "${BLUE}📋 Next Steps:${NC}"
     echo "1. Go to RunPod Console: https://www.runpod.io/console/serverless"
-    echo "2. Find your endpoint: ${RUNPOD_ENDPOINT_ID:-your-endpoint}"
+    echo "2. Find your endpoint: ${ENDPOINT_ID_RUNPOD:-your-endpoint}"
     echo "3. Update the Docker image to:"
     echo -e "   ${YELLOW}${REMOTE_IMAGE}${NC}"
     echo "4. Test the updated endpoint"
