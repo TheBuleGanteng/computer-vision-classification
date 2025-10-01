@@ -94,17 +94,18 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
     console.log(`[WeightSliders] User adjusted ${component}: ${newAbsolutePercent.toFixed(1)}% (absolute)`)
 
     // Constrain to not exceed health overall weight
-    if (newAbsolutePercent > healthOverallWeight) {
-      console.log(`[WeightSliders] Clamping ${component} from ${newAbsolutePercent.toFixed(1)}% to ${healthOverallWeight.toFixed(1)}% (max health overall weight)`)
-      newAbsolutePercent = healthOverallWeight
+    let clampedAbsolutePercent = newAbsolutePercent;
+    if (clampedAbsolutePercent > healthOverallWeight) {
+      console.log(`[WeightSliders] Clamping ${component} from ${clampedAbsolutePercent.toFixed(1)}% to ${healthOverallWeight.toFixed(1)}% (max health overall weight)`)
+      clampedAbsolutePercent = healthOverallWeight
     }
 
     // Convert from absolute percentage to proportion (0-1) of health overall
-    const newProportion = healthOverallWeight > 0 ? newAbsolutePercent / healthOverallWeight : 0
+    const newProportion = healthOverallWeight > 0 ? clampedAbsolutePercent / healthOverallWeight : 0
     const oldProportion = healthProportions[component]
     const delta = newProportion - oldProportion
 
-    console.log(`[WeightSliders] Converting ${component}: ${newAbsolutePercent.toFixed(1)}% absolute → ${newProportion.toFixed(3)} proportion (delta: ${delta.toFixed(3)})`)
+    console.log(`[WeightSliders] Converting ${component}: ${clampedAbsolutePercent.toFixed(1)}% absolute → ${newProportion.toFixed(3)} proportion (delta: ${delta.toFixed(3)})`)
 
     // Calculate total of other components
     const otherComponents = Object.entries(healthProportions).filter(([key]) => key !== component)
