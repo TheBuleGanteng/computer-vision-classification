@@ -2,30 +2,18 @@
 
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Tooltip } from "@/components/ui/tooltip"
-import { 
+import {
   Target,
   Activity,
   Clock,
-  Hash,
-  Info
+  Hash
 } from "lucide-react"
 import React, { useMemo } from "react"
 import { useDashboard } from "./dashboard-provider"
 import { useTrials } from "@/hooks/use-trials"
 
-// Health component weights (matches backend health_analyzer.py)
-const HEALTH_COMPONENT_WEIGHTS = {
-  neuron_health: 0.25,
-  parameter_efficiency: 0.15,
-  training_stability: 0.20,
-  gradient_health: 0.15,
-  convergence_quality: 0.15,
-  accuracy_consistency: 0.10
-}
-
 const SummaryStats = React.memo(() => {
-  const { optimizationMode, healthWeight } = useDashboard()
+  const { optimizationMode } = useDashboard()
   const { stats, bestTrial } = useTrials()
   
   // Memoized calculations to prevent unnecessary re-renders
@@ -67,82 +55,6 @@ const SummaryStats = React.memo(() => {
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-sm font-medium text-muted-foreground">Best Total Score</span>
-                <Tooltip
-                  content={
-                    <div className="space-y-3">
-                      <p className="font-bold">Best Total Score Calculation</p>
-                      {optimizationMode === "simple" ? (
-                        <div className="space-y-2">
-                          <p>
-                            <strong>Simple Mode:</strong> Pure categorical accuracy optimization.
-                          </p>
-                          <p>
-                            The score represents the model's prediction accuracy on the test dataset.
-                          </p>
-                          <p className="text-xs">
-                             <a 
-                              href="https://www.tensorflow.org/api_docs/python/tf/keras/metrics/CategoricalAccuracy" 
-                              target="_blank" 
-                              rel="noopener noreferrer" 
-                              className="text-blue-500 hover:text-blue-700 underline"
-                            >
-                              Click here to learn more
-                            </a>
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <p>
-                            <strong>Health-Aware Mode:</strong> Balanced accuracy + model health optimization.
-                          </p>
-                          <p>
-                            {optimizationMode === "health" && healthWeight > 0 ? (
-                              <span>
-                                Score = Accuracy Weight ({((1 - healthWeight) * 100).toFixed(1)}%) × Accuracy + Health Weight ({(healthWeight * 100).toFixed(1)}%) × Health Score
-                              </span>
-                            ) : (
-                              <span>
-                                Score = (Accuracy Weight × Accuracy) + (Health Weight × Health Score)
-                              </span>
-                            )}
-                          </p>
-                          <p className="text-sm">
-                            <strong>Health Score Components:</strong>
-                          </p>
-                          <ul className="text-xs space-y-1 ml-4">
-                            <li>• Neuron utilization: {(HEALTH_COMPONENT_WEIGHTS.neuron_health * 100).toFixed(1)}% (active vs inactive neurons)</li>
-                            <li>• Parameter efficiency: {(HEALTH_COMPONENT_WEIGHTS.parameter_efficiency * 100).toFixed(1)}% (performance per parameter)</li>
-                            <li>• Training stability: {(HEALTH_COMPONENT_WEIGHTS.training_stability * 100).toFixed(1)}% (loss convergence quality)</li>
-                            <li>• Gradient health: {(HEALTH_COMPONENT_WEIGHTS.gradient_health * 100).toFixed(1)}% (gradient flow quality)</li>
-                            <li>• Convergence quality: {(HEALTH_COMPONENT_WEIGHTS.convergence_quality * 100).toFixed(1)}% (training smoothness)</li>
-                            <li>• Accuracy consistency: {(HEALTH_COMPONENT_WEIGHTS.accuracy_consistency * 100).toFixed(1)}% (cross-validation stability)</li>
-                          </ul>
-                          <p className="text-xs">
-                            Learn more: <a 
-                              href="https://www.tensorflow.org/guide/keras/train_and_evaluate" 
-                              target="_blank" 
-                              rel="noopener noreferrer" 
-                              className="text-blue-500 hover:text-blue-700 underline"
-                            >
-                              TensorFlow Model Evaluation
-                            </a> | <a 
-                              href="https://www.tensorflow.org/guide/keras/custom_callback" 
-                              target="_blank" 
-                              rel="noopener noreferrer" 
-                              className="text-blue-500 hover:text-blue-700 underline"
-                            >
-                              Training Callbacks
-                            </a>
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  }
-                >
-                  <div className="flex items-center justify-center w-4 h-4 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition-colors">
-                    <Info className="h-2.5 w-2.5" />
-                  </div>
-                </Tooltip>
                 <Badge variant="outline" className="text-xs">
                   {optimizationMode}
                 </Badge>

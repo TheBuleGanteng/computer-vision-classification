@@ -2,7 +2,16 @@ export interface OptimizationMetadata {
   dataset_name: string
   optimization_mode: 'simple' | 'health'
   optimization_objective: string
-  health_weight?: number
+  accuracy_weight?: number
+  health_overall_weight?: number
+  health_component_proportions?: {
+    neuron_utilization: number
+    parameter_efficiency: number
+    training_stability: number
+    gradient_health: number
+    convergence_quality: number
+    accuracy_consistency: number
+  }
   total_trials: number
   successful_trials: number
   optimization_time_hours: number
@@ -113,7 +122,16 @@ export interface HealthMonitoring {
 
 export interface OptimizationConfiguration {
   mode: 'simple' | 'health'
-  health_weight?: number
+  accuracy_weight?: number
+  health_overall_weight?: number
+  health_component_proportions?: {
+    neuron_utilization: number
+    parameter_efficiency: number
+    training_stability: number
+    gradient_health: number
+    convergence_quality: number
+    accuracy_consistency: number
+  }
   trials: number
   max_epochs_per_trial: number
   max_training_time_minutes: number

@@ -101,7 +101,8 @@ class OptimizationResult:
     successful_trials: int = 0
     optimization_time_hours: float = 0.0
     optimization_mode: str = "simple"
-    health_weight: float = 0.0
+    accuracy_weight: float = 1.0
+    health_overall_weight: float = 0.0
     
     # Performance analysis
     objective_history: List[float] = field(default_factory=list)
@@ -136,9 +137,9 @@ class OptimizationResult:
             overall_health = self.best_trial_health.get('overall_health', 0.0)
             health_summary = f"\nBest Trial Health Score: {overall_health:.3f}"
             
-            if mode_name == "health" and self.health_weight > 0:
-                obj_weight = 1.0 - self.health_weight
-                health_summary += f"\nWeighting: {obj_weight:.1%} objective, {self.health_weight:.1%} health"
+            if mode_name == "health" and hasattr(self, 'accuracy_weight') and self.accuracy_weight < 1.0:
+                health_weight = 1.0 - self.accuracy_weight
+                health_summary += f"\nWeighting: {self.accuracy_weight:.1%} accuracy, {health_weight:.1%} health"
         
         return f"""
 Optimization Summary for {self.dataset_name}:
@@ -365,8 +366,20 @@ class ModelOptimizer:
         logger.debug(f"running ModelOptimizer.__init__ ... Optimizer initialized for {dataset_name}")
         logger.debug(f"running ModelOptimizer.__init__ ... Mode: {self.config.mode}")
         logger.debug(f"running ModelOptimizer.__init__ ... Objective: {self.config.optimize_for}")
-        if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
-            logger.debug(f"running ModelOptimizer.__init__ ... Health weight: {self.config.health_weight} ({(1-self.config.health_weight)*100:.0f}% objective, {self.config.health_weight*100:.0f}% health)")
+
+        # Log scoring weights for all modes
+        logger.info(f"[OPTIMIZER WEIGHTS] Final scoring weights being used:")
+        acc_weight = self.config.accuracy_weight or 0.0
+        health_weight = self.config.health_overall_weight or 0.0
+        logger.info(f"[OPTIMIZER WEIGHTS]   - Accuracy weight: {acc_weight:.3f} ({acc_weight*100:.1f}%)")
+        logger.info(f"[OPTIMIZER WEIGHTS]   - Health overall weight: {health_weight:.3f} ({health_weight*100:.1f}%)")
+
+        if self.config.health_component_proportions:
+            logger.info(f"[OPTIMIZER WEIGHTS] Health component proportions in use:")
+            for component, proportion in self.config.health_component_proportions.items():
+                absolute_weight = proportion * health_weight
+                logger.info(f"[OPTIMIZER WEIGHTS]   - {component}: {proportion:.3f} ({proportion*100:.1f}% of health) = {absolute_weight:.3f} absolute ({absolute_weight*100:.1f}%)")
+
         logger.debug(f"running ModelOptimizer.__init__ ... Max trials: {self.config.trials}")
         if self.run_name:
             logger.debug(f"running ModelOptimizer.__init__ ... Run name: {self.run_name}")
@@ -1746,61 +1759,68 @@ class ModelOptimizer:
             # Calculate total score based on optimization mode and target
             if self.config.objective == OptimizationObjective.VAL_ACCURACY:
                 primary_value = test_accuracy
-                
-                if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
-                    # Weighted combination
-                    objective_weight = 1.0 - self.config.health_weight
-                    health_weight = self.config.health_weight
-                    final_value = objective_weight * primary_value + health_weight * overall_health
-                    
-                    logger.debug(f"running _calculate_total_score_from_service_response ... HEALTH mode weighted combination:")
-                    logger.debug(f"running _calculate_total_score_from_service_response ... - Primary (acc): {primary_value:.4f} * {objective_weight:.1f} = {primary_value * objective_weight:.4f}")
-                    logger.debug(f"running _calculate_total_score_from_service_response ... - Health: {overall_health:.3f} * {health_weight:.1f} = {overall_health * health_weight:.4f}")
-                    logger.debug(f"running _calculate_total_score_from_service_response ... - Final: {final_value:.4f}")
+
+                logger.debug(f"[SCORE CALCULATION DEBUG] Checking condition: mode={self.config.mode}, is_HEALTH={self.config.mode == 'health'}")
+                logger.debug(f"[SCORE CALCULATION DEBUG] is_health_only={OptimizationObjective.is_health_only(self.config.objective)}, NOT is_health_only={not OptimizationObjective.is_health_only(self.config.objective)}")
+
+                if self.config.mode == 'health' and not OptimizationObjective.is_health_only(self.config.objective):
+                    # Weighted combination using configurable weights
+                    accuracy_weight = self.config.accuracy_weight
+                    health_weight = self.config.health_overall_weight
+                    final_value = accuracy_weight * primary_value + health_weight * overall_health
+                    logger.debug(f"[SCORE CALCULATION DEBUG] Using WEIGHTED calculation: {accuracy_weight} * {primary_value} + {health_weight} * {overall_health} = {final_value}")
                 else:
                     final_value = primary_value
-                    logger.debug(f"running _calculate_total_score_from_service_response ... SIMPLE mode: using primary value {final_value:.4f}")
-                
+                    logger.debug(f"[SCORE CALCULATION DEBUG] Using SIMPLE calculation (accuracy only): {final_value}")
+
+                # Always log the score calculation
+                logger.debug(f"[SCORE CALCULATION] Trial {trial.number} - Service response score calculation:")
+                logger.debug(f"[SCORE CALCULATION]   Mode: {self.config.mode}, Objective: {self.config.objective}")
+                logger.debug(f"[SCORE CALCULATION]   Test accuracy: {primary_value:.4f}")
+                logger.debug(f"[SCORE CALCULATION]   Overall health: {overall_health:.4f}")
+                logger.debug(f"[SCORE CALCULATION]   Weights: accuracy={self.config.accuracy_weight:.3f}, health={self.config.health_overall_weight:.3f}")
+                logger.debug(f"[SCORE CALCULATION]   Final total score: {final_value:.4f}")
+
                 return float(final_value)
             
             elif self.config.objective == OptimizationObjective.ACCURACY:
                 primary_value = test_accuracy
-                
-                if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
-                    objective_weight = 1.0 - self.config.health_weight
-                    health_weight = self.config.health_weight
-                    final_value = objective_weight * primary_value + health_weight * overall_health
+
+                if self.config.mode == 'health' and not OptimizationObjective.is_health_only(self.config.objective):
+                    accuracy_weight = self.config.accuracy_weight
+                    health_weight = self.config.health_overall_weight
+                    final_value = accuracy_weight * primary_value + health_weight * overall_health
                 else:
                     final_value = primary_value
-                
+
                 return float(final_value)
-            
+
             elif self.config.objective == OptimizationObjective.PARAMETER_EFFICIENCY:
                 parameter_efficiency = health_metrics.get('parameter_efficiency', 0.0)
-                
-                if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
-                    objective_weight = 1.0 - self.config.health_weight
-                    health_weight = self.config.health_weight
+
+                if self.config.mode == 'health' and not OptimizationObjective.is_health_only(self.config.objective):
+                    objective_weight = self.config.accuracy_weight  # Using accuracy_weight for primary objective
+                    health_weight = self.config.health_overall_weight
                     final_value = objective_weight * parameter_efficiency + health_weight * overall_health
                 else:
                     final_value = parameter_efficiency
-                
+
                 return float(final_value)
-            
+
             elif self.config.objective == OptimizationObjective.TRAINING_TIME:
                 if training_time_seconds > 0:
                     training_time_minutes = training_time_seconds / 60.0
                     time_efficiency = 1.0 / (1.0 + training_time_minutes / 10.0)
                 else:
                     time_efficiency = 1.0
-                    
-                if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
-                    objective_weight = 1.0 - self.config.health_weight
-                    health_weight = self.config.health_weight
+
+                if self.config.mode == 'health' and not OptimizationObjective.is_health_only(self.config.objective):
+                    objective_weight = self.config.accuracy_weight or 0.0  # Using accuracy_weight for primary objective
+                    health_weight = self.config.health_overall_weight or 0.0
                     final_value = objective_weight * time_efficiency + health_weight * overall_health
                 else:
                     final_value = time_efficiency
-                    
+
                 return float(final_value)
             
             # Health-only objectives
@@ -2048,16 +2068,24 @@ class ModelOptimizer:
             
             # Calculate objective (reuse same logic as service response)
             if self.config.objective == OptimizationObjective.VAL_ACCURACY:
-                if self.config.mode == OptimizationMode.HEALTH and not OptimizationObjective.is_health_only(self.config.objective):
-                    objective_weight = 1.0 - self.config.health_weight
-                    health_weight = self.config.health_weight
-                    total_score = round(objective_weight * test_accuracy + health_weight * overall_health, 4)
+                if self.config.mode == 'health' and not OptimizationObjective.is_health_only(self.config.objective):
+                    accuracy_weight = self.config.accuracy_weight
+                    health_weight = self.config.health_overall_weight
+                    total_score = round(accuracy_weight * test_accuracy + health_weight * overall_health, 4)
                 else:
                     total_score = round(test_accuracy, 4)
             else:
                 # For other objectives, use test_accuracy as fallback
                 total_score = round(test_accuracy, 4)
-            
+
+            # Always log the score calculation
+            logger.debug(f"[SCORE CALCULATION] Trial {trial.number} - Local training score calculation:")
+            logger.debug(f"[SCORE CALCULATION]   Mode: {self.config.mode}, Objective: {self.config.objective}")
+            logger.debug(f"[SCORE CALCULATION]   Test accuracy: {test_accuracy:.4f}")
+            logger.debug(f"[SCORE CALCULATION]   Overall health: {overall_health:.4f}")
+            logger.debug(f"[SCORE CALCULATION]   Weights: accuracy={self.config.accuracy_weight:.3f}, health={self.config.health_overall_weight:.3f}")
+            logger.debug(f"[SCORE CALCULATION]   Final total score: {total_score:.4f}")
+
             logger.debug(f"running _train_locally_for_trial ... Trial {trial.number}: Local fallback total score: {total_score:.4f}")
             
             # Generate plots if enabled
@@ -2449,7 +2477,8 @@ class ModelOptimizer:
                 successful_trials=0,
                 optimization_time_hours=optimization_time / 3600,
                 optimization_mode=self.config.mode,
-                health_weight=self.config.health_weight,
+                accuracy_weight=self.config.accuracy_weight or 0.0,
+                health_overall_weight=self.config.health_overall_weight or 0.0,
                 objective_history=[],
                 parameter_importance={},
                 health_history=self._trial_health_history,
@@ -2482,7 +2511,8 @@ class ModelOptimizer:
             successful_trials=len(completed_trials),
             optimization_time_hours=optimization_time / 3600,
             optimization_mode=self.config.mode,
-            health_weight=self.config.health_weight,
+            accuracy_weight=self.config.accuracy_weight or 0.0,
+            health_overall_weight=self.config.health_overall_weight or 0.0,
             objective_history=[t.value for t in self.study.trials if t.value is not None],
             parameter_importance=importance,
             health_history=self._trial_health_history,
@@ -2520,7 +2550,8 @@ class ModelOptimizer:
                 "dataset": results.dataset_name,
                 "optimization_mode": results.optimization_mode,
                 "objective": results.optimization_config.objective.value if results.optimization_config else "unknown",
-                "health_weight": results.health_weight,
+                "accuracy_weight": results.accuracy_weight,
+                "health_overall_weight": results.health_overall_weight,
                 "best_total_score": float(results.best_total_score),
                 "hyperparameters": best_params,
                 "execution_method": "runpod_service" if results.optimization_config and results.optimization_config.use_runpod_service else "local"  # Track execution method
@@ -2812,7 +2843,8 @@ class ModelOptimizer:
                 'dataset': self.dataset_name,
                 'optimization_mode': self.config.mode,
                 'objective': str(self.config.objective),
-                'health_weight': getattr(self.config, 'health_weight', None),
+                'accuracy_weight': self.config.accuracy_weight,
+                'health_overall_weight': self.config.health_overall_weight,
                 'best_total_score': results.best_total_score,
                 'hyperparameters': results.best_params,
                 'execution_method': 'local'
@@ -3080,7 +3112,7 @@ if __name__ == "__main__":
     
     float_params = [
         'timeout_hours', 'max_training_time_minutes', 'validation_split', 'test_size',
-        'max_bias_change_per_epoch', 'health_weight', 'gpu_proxy_sample_percentage'
+        'max_bias_change_per_epoch', 'accuracy_weight', 'health_overall_weight', 'gpu_proxy_sample_percentage'
     ]
     for float_param in float_params:
         if float_param in args:
