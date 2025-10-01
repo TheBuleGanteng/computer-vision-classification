@@ -8,20 +8,6 @@ import { TrialGallery } from "@/components/dashboard/trial-gallery-optimized"
 import { DashboardProvider } from "@/components/dashboard/dashboard-provider"
 
 export default function Home() {
-  // Suppress React setTimeout violation warnings for non-performance-critical app
-  useEffect(() => {
-    if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
-      const originalWarn = console.warn
-      console.warn = (...args) => {
-        // Filter out React setTimeout violation warnings
-        if (args[0]?.includes?.('Violation') && args[0]?.includes?.('setTimeout')) {
-          return // Ignore these warnings
-        }
-        originalWarn.apply(console, args)
-      }
-    }
-  }, [])
-
   return (
     <DashboardProvider>
       <div className="container mx-auto px-4 sm:px-6 py-4 sm:py-6">
