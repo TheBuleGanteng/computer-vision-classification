@@ -10,6 +10,7 @@ const ModelGraph = React.lazy(() => import('./model-graph'));
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import FullscreenPopup from './fullscreen-popup';
+import { logger } from '@/lib/logger';
 
 // Use the same API base URL as the main api client
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -68,12 +69,12 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   const downloadArchitecturePNG = useCallback(async () => {
     try {
       if (!tabModelGraphRef.current?.exportToPNG) {
-        console.error('Tab ModelGraph export function not available');
+        logger.error('Tab ModelGraph export function not available');
         return;
       }
       const pngBlob = await tabModelGraphRef.current.exportToPNG();
       if (!pngBlob) {
-        console.error('Failed to generate PNG blob');
+        logger.error('Failed to generate PNG blob');
         return;
       }
 
@@ -95,14 +96,14 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
           const writable = await fileHandle.createWritable();
           await writable.write(pngBlob);
           await writable.close();
-          console.log('Architecture PNG saved successfully');
+          logger.log('Architecture PNG saved successfully');
           return;
         } catch (saveError: unknown) {
           if ((saveError as Error).name === 'AbortError') {
-            console.log('Save dialog was cancelled by user');
+            logger.log('Save dialog was cancelled by user');
             return;
           }
-          console.warn('Save As dialog failed, falling back to download:', saveError);
+          logger.warn('Save As dialog failed, falling back to download:', saveError);
         }
       }
 
@@ -115,9 +116,9 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      console.log('Architecture PNG downloaded successfully (fallback method)');
+      logger.log('Architecture PNG downloaded successfully (fallback method)');
     } catch (error) {
-      console.error('Failed to download architecture PNG:', error);
+      logger.error('Failed to download architecture PNG:', error);
     }
   }, [jobId, trialId]);
 
@@ -148,7 +149,7 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
       
       const response = await fetch(url);
       if (!response.ok) {
-        console.warn('Architecture data not available:', response.status);
+        logger.warn('Architecture data not available:', response.status);
         return null;
       }
       return response.json();

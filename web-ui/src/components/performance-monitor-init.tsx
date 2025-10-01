@@ -1,11 +1,12 @@
 "use client"
 
 import { useEffect } from 'react';
+import { logger } from '@/lib/logger';
 
 export function PerformanceMonitorInit() {
   useEffect(() => {
     // Performance monitor disabled - was causing overhead
-    console.log('⏸️ Performance Monitor disabled to eliminate monitoring overhead');
+    logger.log('⏸️ Performance Monitor disabled to eliminate monitoring overhead');
   }, []);
 
   return null; // This component renders nothing

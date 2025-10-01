@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Tooltip } from "@/components/ui/tooltip"
 import { Info, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { logger } from "@/lib/logger"
 
 export interface WeightConfig {
   accuracyWeight: number
@@ -75,7 +76,7 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
       healthOverallWeight: healthOverallWeight / 100,
       healthComponentProportions: healthProportions
     }
-    console.log('[WeightSliders] Notifying parent with weight configuration:', {
+    logger.log('[WeightSliders] Notifying parent with weight configuration:', {
       accuracyWeight: `${accuracyWeight.toFixed(1)}% (${config.accuracyWeight.toFixed(3)})`,
       healthOverallWeight: `${healthOverallWeight.toFixed(1)}% (${config.healthOverallWeight.toFixed(3)})`,
       healthComponentProportions: Object.entries(config.healthComponentProportions).map(([key, value]) =>
@@ -94,12 +95,12 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
   // Auto-balance health sub-component proportions
   // newAbsolutePercent is the absolute percentage (e.g., 7.5% out of total 100%)
   const handleHealthComponentChange = (component: keyof typeof healthProportions, newAbsolutePercent: number) => {
-    console.log(`[WeightSliders] User adjusted ${component}: ${newAbsolutePercent.toFixed(1)}% (absolute)`)
+    logger.log(`[WeightSliders] User adjusted ${component}: ${newAbsolutePercent.toFixed(1)}% (absolute)`)
 
     // Constrain to not exceed health overall weight
     let clampedAbsolutePercent = newAbsolutePercent;
     if (clampedAbsolutePercent > healthOverallWeight) {
-      console.log(`[WeightSliders] Clamping ${component} from ${clampedAbsolutePercent.toFixed(1)}% to ${healthOverallWeight.toFixed(1)}% (max health overall weight)`)
+      logger.log(`[WeightSliders] Clamping ${component} from ${clampedAbsolutePercent.toFixed(1)}% to ${healthOverallWeight.toFixed(1)}% (max health overall weight)`)
       clampedAbsolutePercent = healthOverallWeight
     }
 
@@ -108,7 +109,7 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
     const oldProportion = healthProportions[component]
     const delta = newProportion - oldProportion
 
-    console.log(`[WeightSliders] Converting ${component}: ${clampedAbsolutePercent.toFixed(1)}% absolute → ${newProportion.toFixed(3)} proportion (delta: ${delta.toFixed(3)})`)
+    logger.log(`[WeightSliders] Converting ${component}: ${clampedAbsolutePercent.toFixed(1)}% absolute → ${newProportion.toFixed(3)} proportion (delta: ${delta.toFixed(3)})`)
 
     // Calculate total of other components
     const otherComponents = Object.entries(healthProportions).filter(([key]) => key !== component)

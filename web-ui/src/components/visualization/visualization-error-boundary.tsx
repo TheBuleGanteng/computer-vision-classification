@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { logger } from '@/lib/logger';
 
 interface VisualizationErrorBoundaryState {
   hasError: boolean;
@@ -29,9 +30,9 @@ export class VisualizationErrorBoundary extends React.Component<
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     // Log the error to console with detailed information
-    console.error('3D Visualization Error Caught by Error Boundary:', error);
-    console.error('Component Stack:', errorInfo.componentStack);
-    
+    logger.error('3D Visualization Error Caught by Error Boundary:', error);
+    logger.error('Component Stack:', errorInfo.componentStack);
+
     this.setState({
       error,
       errorInfo
