@@ -26,23 +26,24 @@ interface WeightSlidersProps {
   defaults?: WeightConfig
 }
 
-// Store as proportions (0-1) that sum to 1.0
-const DEFAULT_HEALTH_PROPORTIONS = {
-  neuron_utilization: 0.25,
-  parameter_efficiency: 0.15,
-  training_stability: 0.20,
-  gradient_health: 0.15,
-  convergence_quality: 0.15,
-  accuracy_consistency: 0.10
-}
-
 export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) {
   // Tier 1: Accuracy vs Health Overall (0-100 for UI display)
-  const [accuracyWeight, setAccuracyWeight] = useState(mode === "simple" ? 100.0 : 70.0)
+  const [accuracyWeight, setAccuracyWeight] = useState(
+    defaults ? defaults.accuracyWeight * 100 : (mode === "simple" ? 100.0 : 70.0)
+  )
 
   // Tier 2: Health sub-component PROPORTIONS (0-1 range, sum to 1.0)
   // These are multiplied by healthOverallWeight to get actual percentages
-  const [healthProportions, setHealthProportions] = useState(DEFAULT_HEALTH_PROPORTIONS)
+  const [healthProportions, setHealthProportions] = useState(
+    defaults?.healthComponentProportions || {
+      neuron_utilization: 0.25,
+      parameter_efficiency: 0.15,
+      training_stability: 0.20,
+      gradient_health: 0.15,
+      convergence_quality: 0.15,
+      accuracy_consistency: 0.10
+    }
+  )
 
   // Initialize from defaults if provided
   useEffect(() => {
@@ -54,13 +55,15 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
 
   // Reset to defaults when mode changes
   useEffect(() => {
-    if (mode === "simple") {
-      setAccuracyWeight(100.0)
-    } else {
-      setAccuracyWeight(70.0)
+    if (defaults) {
+      if (mode === "simple") {
+        setAccuracyWeight(100.0)
+      } else {
+        setAccuracyWeight(defaults.accuracyWeight * 100)
+      }
+      setHealthProportions(defaults.healthComponentProportions)
     }
-    setHealthProportions(DEFAULT_HEALTH_PROPORTIONS)
-  }, [mode])
+  }, [mode, defaults])
 
   // Calculate health overall weight
   const healthOverallWeight = 100.0 - accuracyWeight
@@ -139,12 +142,14 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
   }
 
   const handleReset = () => {
-    if (mode === "simple") {
-      setAccuracyWeight(100.0)
-    } else {
-      setAccuracyWeight(70.0)
+    if (defaults) {
+      if (mode === "simple") {
+        setAccuracyWeight(100.0)
+      } else {
+        setAccuracyWeight(defaults.accuracyWeight * 100)
+      }
+      setHealthProportions(defaults.healthComponentProportions)
     }
-    setHealthProportions(DEFAULT_HEALTH_PROPORTIONS)
   }
 
   return (
