@@ -111,8 +111,9 @@ class HealthAnalyzer:
         Creates an analyzer instance that can use custom weights for health score calculation.
         """
         # Store health component proportions (weights) for health score calculation
-        if optimization_config and hasattr(optimization_config, 'health_component_proportions') and optimization_config.health_component_proportions:
-            self.component_weights = optimization_config.health_component_proportions
+        component_proportions = getattr(optimization_config, 'health_component_proportions', None) if optimization_config else None
+        if component_proportions:
+            self.component_weights = component_proportions
             logger.debug(f"running HealthAnalyzer.__init__ ... Using custom health component proportions from config")
         else:
             # Default weights if no config provided
