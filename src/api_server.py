@@ -325,7 +325,8 @@ class RunPodServiceClient:
                     "create_optuna_model_plots": request.create_optuna_model_plots,
                     "validation_split": request.validation_split,
                     "test_size": request.test_size,
-                    "health_weight": request.health_weight,
+                    "accuracy_weight": request.accuracy_weight,
+                    "health_overall_weight": request.health_overall_weight,
                     "min_epochs_per_trial": request.min_epochs_per_trial,
                     "max_epochs_per_trial": request.max_epochs_per_trial,
                     "use_multi_gpu": request.use_multi_gpu,
@@ -1467,7 +1468,8 @@ class OptimizationJob:
                     "parameter_importance": result.parameter_importance,
                     "dataset_name": result.dataset_name,
                     "optimization_mode": result.optimization_mode,
-                    "health_weight": result.health_weight,
+                    "accuracy_weight": result.accuracy_weight,
+                    "health_overall_weight": result.health_overall_weight,
                     "objective_history": result.objective_history,
                     "best_trial_health": result.best_trial_health,
                     "average_health_metrics": result.average_health_metrics
@@ -1800,7 +1802,7 @@ class OptimizationAPI:
             """Get available optimization objectives"""
             universal_objectives = [obj.value for obj in OptimizationObjective.get_universal_objectives()]
             health_objectives = [obj.value for obj in OptimizationObjective.get_health_only_objectives()]
-            
+
             return {
                 "universal_objectives": universal_objectives,
                 "health_only_objectives": health_objectives,
@@ -1809,7 +1811,33 @@ class OptimizationAPI:
                     "health_only": "Only work in health mode"
                 }
             }
-        
+
+        @self.app.get("/default-scoring-weights")
+        async def get_default_scoring_weights():
+            """
+            Get default scoring weight configuration for UI sliders.
+
+            Returns default weights for:
+            - accuracy_weight: Weight given to test accuracy in final score (0.70 for health mode)
+            - health_overall_weight: Weight given to overall health in final score (0.30 for health mode)
+            - health_component_proportions: Proportion of health weight allocated to each health metric
+
+            These defaults are used when optimization mode is "health". In "simple" mode,
+            accuracy_weight is 1.0 and health_overall_weight is 0.0.
+            """
+            return {
+                "accuracy_weight": 0.70,
+                "health_overall_weight": 0.30,
+                "health_component_proportions": {
+                    "neuron_utilization": 0.25,
+                    "parameter_efficiency": 0.15,
+                    "training_stability": 0.20,
+                    "gradient_health": 0.15,
+                    "convergence_quality": 0.15,
+                    "accuracy_consistency": 0.10
+                }
+            }
+
         # Job management endpoints
         @self.app.post("/optimize", response_model=JobResponse)
         async def start_optimization(request: OptimizationRequest, background_tasks: BackgroundTasks):
@@ -1975,7 +2003,7 @@ class OptimizationAPI:
         logger.debug(f"running OptimizationAPI._start_optimization ... Mode: {request.mode}")
         logger.debug(f"running OptimizationAPI._start_optimization ... Objective: {request.optimize_for}")
         logger.debug(f"running OptimizationAPI._start_optimization ... Trials: {request.trials}")
-        logger.debug(f"running OptimizationAPI._start_optimization ... Health weight: {request.health_weight}")
+        logger.debug(f"running OptimizationAPI._start_optimization ... Accuracy weight: {request.accuracy_weight}, Health overall weight: {request.health_overall_weight}")
         
         # Validate dataset
         if request.dataset_name not in self.dataset_manager.get_available_datasets():
@@ -2028,8 +2056,26 @@ class OptimizationAPI:
             request.max_epochs_per_trial = min_epochs
         
         logger.debug(f"running _start_optimization ... Using epoch configuration: min={request.min_epochs_per_trial}, max={request.max_epochs_per_trial}")
-        logger.debug(f"running _start_optimization ... User parameters: trials={request.trials}, mode={request.mode}, health_weight={request.health_weight}, use_runpod_service={request.use_runpod_service}")
-        
+        logger.debug(f"running _start_optimization ... User parameters: trials={request.trials}, mode={request.mode}, accuracy_weight={request.accuracy_weight}, use_runpod_service={request.use_runpod_service}")
+
+        # Log custom scoring weights if provided
+        if request.accuracy_weight is not None:
+            logger.info(f"[WEIGHT CONFIG] Custom scoring weights provided by user:")
+            logger.info(f"[WEIGHT CONFIG]   - Accuracy weight: {request.accuracy_weight:.3f} ({request.accuracy_weight*100:.1f}%)")
+            logger.info(f"[WEIGHT CONFIG]   - Health overall weight: {request.health_overall_weight:.3f} ({request.health_overall_weight*100:.1f}%)")
+            logger.info(f"[WEIGHT CONFIG]   - Total: {(request.accuracy_weight + request.health_overall_weight):.3f} (should be 1.0)")
+
+            if request.health_component_proportions:
+                logger.info(f"[WEIGHT CONFIG] Health component proportions:")
+                for component, proportion in request.health_component_proportions.items():
+                    absolute_weight = proportion * request.health_overall_weight
+                    logger.info(f"[WEIGHT CONFIG]   - {component}: {proportion:.3f} proportion ({proportion*100:.1f}% of health) = {absolute_weight:.3f} ({absolute_weight*100:.1f}% absolute)")
+
+                proportions_sum = sum(request.health_component_proportions.values())
+                logger.info(f"[WEIGHT CONFIG]   - Proportions sum: {proportions_sum:.3f} (should be 1.0)")
+        else:
+            logger.info(f"[WEIGHT CONFIG] No custom weights provided - using backend defaults for mode '{request.mode}'")
+
         # Create new job with the comprehensive request (no need to recreate)
         job = OptimizationJob(request, self.tensorboard_manager)
         self.jobs[job.job_id] = job

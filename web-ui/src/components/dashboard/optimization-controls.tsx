@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectItem } from "@/components/ui/select"
 import { Card, CardContent } from "@/components/ui/card"
@@ -8,9 +8,10 @@ import { Tooltip } from "@/components/ui/tooltip"
 import { apiClient } from "@/lib/api-client"
 import { useDashboard } from "./dashboard-provider"
 import { useComprehensiveStatus } from "@/hooks/use-comprehensive-status"
-import { 
-  Play, 
-  Square, 
+import { WeightSliders, WeightConfig } from "./weight-sliders"
+import {
+  Play,
+  Square,
   Download,
   Info
 } from "lucide-react"
@@ -94,7 +95,46 @@ export function OptimizationControls() {
   const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
   const [isModelAvailable, setIsModelAvailable] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [weightConfig, setWeightConfig] = useState<WeightConfig | null>(null)
+  const [defaultWeights, setDefaultWeights] = useState<WeightConfig | null>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Memoize weight config handler to prevent infinite re-renders
+  const handleWeightConfigChange = useCallback((config: WeightConfig) => {
+    console.log('[OptimizationControls] Received weight configuration from WeightSliders:', config)
+    setWeightConfig(config)
+  }, [])
+
+  // Fetch default weights on mount
+  useEffect(() => {
+    const fetchDefaultWeights = async () => {
+      try {
+        const weights = await apiClient.getDefaultScoringWeights()
+        const config: WeightConfig = {
+          accuracyWeight: weights.accuracy_weight,
+          healthOverallWeight: weights.health_overall_weight,
+          healthComponentProportions: weights.health_component_proportions
+        }
+        setDefaultWeights(config)
+      } catch (err) {
+        console.error("Failed to fetch default weights:", err)
+        // Use fallback defaults if API call fails
+        setDefaultWeights({
+          accuracyWeight: 0.70,
+          healthOverallWeight: 0.30,
+          healthComponentProportions: {
+            neuron_utilization: 0.25,
+            parameter_efficiency: 0.15,
+            training_stability: 0.20,
+            gradient_health: 0.15,
+            convergence_quality: 0.15,
+            accuracy_consistency: 0.10
+          }
+        })
+      }
+    }
+    fetchDefaultWeights()
+  }, [])
 
   // Sync selectedTargetMetric with shared optimization mode
   useEffect(() => {
@@ -102,8 +142,9 @@ export function OptimizationControls() {
       const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
       if (targetMetric) {
         const mode = targetMetric.mode as "simple" | "health"
-        const healthWeight = mode === 'health' ? 0.3 : 0.0
         setOptimizationMode(mode)
+        // Deprecated health_weight for backward compatibility with dashboard context
+        const healthWeight = mode === 'health' ? 0.3 : 0.0
         setHealthWeight(healthWeight)
       }
     }
@@ -133,25 +174,42 @@ export function OptimizationControls() {
       // Start optimization
       try {
         setError(null)
-        
+
         const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
         const mode = targetMetric?.mode as 'simple' | 'health'
-        const healthWeight = mode === 'health' ? 0.3 : 0.0 // Use API default
-        
-        const request = {
+
+        // Use custom weights if provided, otherwise backend uses defaults
+        const request: Record<string, unknown> = {
           // Core parameters
           dataset_name: selectedDataset,
-          mode: mode,
-          health_weight: healthWeight
+          mode: mode
         }
-        
-        // Update dashboard context with the health weight
+
+        // Add custom weights if user has adjusted them
+        if (weightConfig) {
+          request.accuracy_weight = weightConfig.accuracyWeight
+          request.health_overall_weight = weightConfig.healthOverallWeight
+          request.health_component_proportions = weightConfig.healthComponentProportions
+
+          console.log('[OptimizationControls] Using custom weight configuration:', {
+            accuracy_weight: `${(weightConfig.accuracyWeight * 100).toFixed(1)}% (${weightConfig.accuracyWeight.toFixed(3)})`,
+            health_overall_weight: `${(weightConfig.healthOverallWeight * 100).toFixed(1)}% (${weightConfig.healthOverallWeight.toFixed(3)})`,
+            health_component_proportions: Object.entries(weightConfig.healthComponentProportions).map(([key, value]) =>
+              `${key}: ${(value * 100).toFixed(1)}% of health (${value.toFixed(3)} proportion)`
+            )
+          })
+        } else {
+          console.log('[OptimizationControls] No custom weights configured - backend will use defaults')
+        }
+
+        // Update dashboard context (deprecated but still used by some components)
+        const healthWeight = weightConfig?.healthOverallWeight || (mode === 'health' ? 0.3 : 0.0)
         setHealthWeight(healthWeight)
         // All other parameters will use API defaults from OptimizationRequest
 
-        console.log(`Starting optimization:`, request)
-        
-        const response = await apiClient.startOptimization(request)
+        console.log('[OptimizationControls] Sending optimization request to API:', request)
+
+        const response = await apiClient.startOptimization(request as typeof request & { dataset_name: string, mode: 'simple' | 'health' })
         
         setIsOptimizationRunning(true)
         setIsOptimizationCompleted(false)
@@ -405,6 +463,17 @@ export function OptimizationControls() {
             </Button>
           </div>
         </div>
+
+        {/* Weight Sliders */}
+        {selectedTargetMetric && !isOptimizationRunning && defaultWeights && (
+          <div className="mt-4">
+            <WeightSliders
+              mode={TARGET_METRICS.find(m => m.value === selectedTargetMetric)?.mode as "simple" | "health" || "simple"}
+              onChange={handleWeightConfigChange}
+              defaults={defaultWeights}
+            />
+          </div>
+        )}
 
         {/* Status Indicator */}
         {error && (

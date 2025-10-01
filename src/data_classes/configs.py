@@ -76,14 +76,24 @@ class OptimizationConfig(BaseModel):
     """
     
     
-    # User-controlled variables with defaults  
+    # User-controlled variables with defaults
     dataset_name: str = Field("mnist", description="Dataset name (e.g., 'cifar10', `'mnist', 'imdb')")
     mode: str = Field("health", pattern="^(simple|health)$", description="Optimization mode")
     optimize_for: str = Field("val_accuracy", description="Optimization objective")
     trials: int = Field(2, ge=1, le=500, description="Number of optimization trials")
     max_epochs_per_trial: int = Field(6, ge=1, le=100, description="Maximum epochs per trial")
     min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
-    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting")
+    health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting (DEPRECATED - use accuracy_weight instead)")
+
+    # AUTHORITATIVE SOURCE for default scoring weights
+    # Frontend fetches these via /api/default-scoring-weights
+    # Users can customize per-optimization-run via UI sliders
+    accuracy_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="Accuracy weight in final score (0.0-1.0). Auto-set based on mode if not provided.")
+    health_overall_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="Health overall weight in final score (auto-calculated: 1.0 - accuracy_weight)")
+    health_component_proportions: Optional[Dict[str, float]] = Field(
+        None,
+        description="Health sub-component proportions (must sum to 1.0). Multiplied by health_overall_weight for absolute weights."
+    )
     
     # Execution control
     use_runpod_service: bool = Field(True, description="Use RunPod cloud service for trials and final model building")
@@ -197,10 +207,13 @@ class OptimizationConfig(BaseModel):
 
     def model_post_init(self, __context) -> None:
         """Validation and system setup after model creation"""
-        
+
+        # Initialize scoring weights based on mode
+        self._initialize_scoring_weights()
+
         # Validate mode-objective compatibility
         self._validate_mode_objective_compatibility()
-        
+
         # Log RunPod endpoint configuration
         if self.use_runpod_service:
             if self.runpod_service_endpoint:
@@ -226,6 +239,69 @@ class OptimizationConfig(BaseModel):
                             "forcing concurrent=False and concurrent_workers=1")
             self.concurrent = False
             self.concurrent_workers = 1
+
+    def _initialize_scoring_weights(self) -> None:
+        """Initialize scoring weights based on optimization mode and user input"""
+
+        # Default health component proportions (sum to 1.0)
+        DEFAULT_HEALTH_PROPORTIONS = {
+            'neuron_utilization': 0.25,
+            'parameter_efficiency': 0.15,
+            'training_stability': 0.20,
+            'gradient_health': 0.15,
+            'convergence_quality': 0.15,
+            'accuracy_consistency': 0.10
+        }
+
+        # Set defaults based on mode if not provided by user
+        if self.mode_enum == OptimizationMode.SIMPLE:
+            # Simple mode: 100% accuracy, 0% health
+            if self.accuracy_weight is None:
+                self.accuracy_weight = 1.0
+            self.health_overall_weight = 0.0
+            # Health component proportions don't matter in simple mode
+            if self.health_component_proportions is None:
+                self.health_component_proportions = DEFAULT_HEALTH_PROPORTIONS.copy()
+        else:
+            # Health-aware mode: Default 70% accuracy, 30% health
+            if self.accuracy_weight is None:
+                self.accuracy_weight = 0.70
+
+            # Health overall weight is always 1.0 - accuracy_weight
+            self.health_overall_weight = 1.0 - self.accuracy_weight
+
+            # Set default health component proportions if not provided
+            if self.health_component_proportions is None:
+                self.health_component_proportions = DEFAULT_HEALTH_PROPORTIONS.copy()
+
+        # Validate weights
+        self._validate_scoring_weights()
+
+        logger.debug(f"running OptimizationConfig._initialize_scoring_weights ... "
+                    f"Mode: {self.mode}, Accuracy weight: {self.accuracy_weight:.2f}, "
+                    f"Health overall weight: {self.health_overall_weight:.2f}")
+
+    def _validate_scoring_weights(self) -> None:
+        """Validate that scoring weights are mathematically correct"""
+
+        # Validate accuracy + health = 1.0 (allow small floating point errors)
+        total_weight = self.accuracy_weight + self.health_overall_weight
+        if not (0.99 <= total_weight <= 1.01):
+            raise ValueError(
+                f"Accuracy weight ({self.accuracy_weight}) + Health overall weight "
+                f"({self.health_overall_weight}) must sum to 1.0, got {total_weight:.4f}"
+            )
+
+        # Validate health component proportions sum to 1.0
+        if self.health_component_proportions:
+            component_sum = sum(self.health_component_proportions.values())
+            if not (0.99 <= component_sum <= 1.01):
+                raise ValueError(
+                    f"Health component proportions must sum to 1.0, got {component_sum:.4f}. "
+                    f"Proportions: {self.health_component_proportions}"
+                )
+
+        logger.debug(f"running OptimizationConfig._validate_scoring_weights ... Weight validation passed")
 
     def _validate_mode_objective_compatibility(self) -> None:
         """Validate that the objective is compatible with the selected mode"""

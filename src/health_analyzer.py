@@ -100,13 +100,32 @@ class HealthAnalyzer:
         )
     """
     
-    def __init__(self):
+    def __init__(self, optimization_config: Optional[Any] = None):
         """
-        Initialize the health analyzer
-        
-        Creates a stateless analyzer instance that can be safely used
-        across multiple threads and components.
+        Initialize the health analyzer with optional custom weight configuration
+
+        Args:
+            optimization_config: Optional OptimizationConfig with custom health_component_proportions.
+                               If None, uses default weights.
+
+        Creates an analyzer instance that can use custom weights for health score calculation.
         """
+        # Store health component proportions (weights) for health score calculation
+        if optimization_config and hasattr(optimization_config, 'health_component_proportions') and optimization_config.health_component_proportions:
+            self.component_weights = optimization_config.health_component_proportions
+            logger.debug(f"running HealthAnalyzer.__init__ ... Using custom health component proportions from config")
+        else:
+            # Default weights if no config provided
+            self.component_weights = {
+                'neuron_utilization': 0.25,
+                'parameter_efficiency': 0.15,
+                'training_stability': 0.20,
+                'gradient_health': 0.15,
+                'convergence_quality': 0.15,
+                'accuracy_consistency': 0.10
+            }
+            logger.debug(f"running HealthAnalyzer.__init__ ... Using default health component proportions")
+
         logger.debug("running HealthAnalyzer.__init__ ... Health analyzer initialized with basic metrics support")
     
     def calculate_comprehensive_health(
@@ -194,12 +213,12 @@ class HealthAnalyzer:
                 'accuracy_consistency': accuracy_consistency,
                 'overall_health': overall_health,
                 'health_breakdown': {
-                    'neuron_utilization': {'score': neuron_health, 'weight': 0.25},
-                    'parameter_efficiency': {'score': parameter_efficiency, 'weight': 0.15},
-                    'training_stability': {'score': training_stability, 'weight': 0.20},
-                    'gradient_health': {'score': gradient_health, 'weight': 0.15},
-                    'convergence_quality': {'score': convergence_quality, 'weight': 0.15},
-                    'accuracy_consistency': {'score': accuracy_consistency, 'weight': 0.10}
+                    'neuron_utilization': {'score': neuron_health, 'weight': self.component_weights['neuron_utilization']},
+                    'parameter_efficiency': {'score': parameter_efficiency, 'weight': self.component_weights['parameter_efficiency']},
+                    'training_stability': {'score': training_stability, 'weight': self.component_weights['training_stability']},
+                    'gradient_health': {'score': gradient_health, 'weight': self.component_weights['gradient_health']},
+                    'convergence_quality': {'score': convergence_quality, 'weight': self.component_weights['convergence_quality']},
+                    'accuracy_consistency': {'score': accuracy_consistency, 'weight': self.component_weights['accuracy_consistency']}
                 },
                 'recommendations': recommendations
             }
@@ -356,12 +375,12 @@ class HealthAnalyzer:
                 'accuracy_consistency': accuracy_consistency,
                 'overall_health': overall_health,
                 'health_breakdown': {
-                    'neuron_utilization': {'score': neuron_health, 'weight': 0.25, 'method': 'weight_based'},
-                    'parameter_efficiency': {'score': parameter_efficiency, 'weight': 0.15},
-                    'training_stability': {'score': training_stability, 'weight': 0.20},
-                    'gradient_health': {'score': gradient_health, 'weight': 0.15},
-                    'convergence_quality': {'score': convergence_quality, 'weight': 0.15},
-                    'accuracy_consistency': {'score': accuracy_consistency, 'weight': 0.10}
+                    'neuron_utilization': {'score': neuron_health, 'weight': self.component_weights['neuron_utilization'], 'method': 'weight_based'},
+                    'parameter_efficiency': {'score': parameter_efficiency, 'weight': self.component_weights['parameter_efficiency']},
+                    'training_stability': {'score': training_stability, 'weight': self.component_weights['training_stability']},
+                    'gradient_health': {'score': gradient_health, 'weight': self.component_weights['gradient_health']},
+                    'convergence_quality': {'score': convergence_quality, 'weight': self.component_weights['convergence_quality']},
+                    'accuracy_consistency': {'score': accuracy_consistency, 'weight': self.component_weights['accuracy_consistency']}
                 },
                 'recommendations': recommendations,
                 'analysis_mode': 'basic'
@@ -903,8 +922,11 @@ class HealthAnalyzer:
         accuracy_consistency: float
     ) -> float:
         """
-        Calculate weighted overall health score
-        
+        Calculate weighted overall health score using configurable component weights
+
+        Uses health component proportions from initialization (either custom from OptimizationConfig
+        or defaults). This enables user-customizable health scoring via UI sliders.
+
         Args:
             neuron_health: Neuron utilization score
             parameter_efficiency: Parameter efficiency score
@@ -912,29 +934,27 @@ class HealthAnalyzer:
             gradient_health: Gradient health score
             convergence_quality: Convergence quality score
             accuracy_consistency: Accuracy consistency score
-            
+
         Returns:
             Float between 0 and 1 (overall health score)
+
+        Raises:
+            KeyError: If a required component weight is missing from configuration
         """
-        # Define weights for each health component
-        weights = {
-            'neuron_health': 0.25,        # Most important for model capacity
-            'training_stability': 0.20,   # Critical for reliable training
-            'parameter_efficiency': 0.15, # Important for model practicality
-            'gradient_health': 0.15,      # Important for training dynamics
-            'convergence_quality': 0.15,  # Important for learning effectiveness
-            'accuracy_consistency': 0.10  # Important for prediction reliability
-        }
-        
-        overall_health = (
-            neuron_health * weights['neuron_health'] +
-            parameter_efficiency * weights['parameter_efficiency'] +
-            training_stability * weights['training_stability'] +
-            gradient_health * weights['gradient_health'] +
-            convergence_quality * weights['convergence_quality'] +
-            accuracy_consistency * weights['accuracy_consistency']
-        )
-        
+        # Use configurable weights from initialization
+        # Raise error if any weight is missing (no fallback values)
+        try:
+            overall_health = (
+                neuron_health * self.component_weights['neuron_utilization'] +
+                parameter_efficiency * self.component_weights['parameter_efficiency'] +
+                training_stability * self.component_weights['training_stability'] +
+                gradient_health * self.component_weights['gradient_health'] +
+                convergence_quality * self.component_weights['convergence_quality'] +
+                accuracy_consistency * self.component_weights['accuracy_consistency']
+            )
+        except KeyError as e:
+            raise KeyError(f"Missing required health component weight: {e}. All components must have weights defined.")
+
         return min(1.0, max(0.0, overall_health))
     
     def _generate_health_recommendations(

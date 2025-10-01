@@ -2,10 +2,8 @@
 
 import React, { useState, useMemo, Suspense } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { 
-  Download,
+import {
   Info,
   Layers,
   Activity,
@@ -33,20 +31,6 @@ const BestArchitectureView = React.memo(() => {
   )
   
   const stableJobId = useMemo(() => currentJobId, [currentJobId])
-
-  const handleDownloadVisualization = () => {
-    if (bestTrial && currentJobId) {
-      // Use the existing download functionality from the visualization component
-      import('@/lib/api/visualization').then(({ downloadVisualizationFile, generateVisualizationFilename }) => {
-        const filename = generateVisualizationFilename(
-          currentJobId,
-          bestTrial.architecture?.type,
-          bestTrial.performance?.total_score
-        )
-        downloadVisualizationFile(currentJobId, filename)
-      })
-    }
-  }
 
   // Trigger animation when new best trial is detected (only when trial ID changes)
   React.useEffect(() => {
