@@ -24,7 +24,7 @@ class PerformanceMonitor {
     return PerformanceMonitor.instance;
   }
 
-  startMonitoring() {
+  startMonitoring(): void {
     if (this.isMonitoring) return;
     this.isMonitoring = true;
 
@@ -50,7 +50,7 @@ class PerformanceMonitor {
     setInterval(() => this.logPerformanceReport(), 10000);
   }
 
-  private monitorSetTimeout() {
+  private monitorSetTimeout(): void {
     type TimeoutCallback = (...args: unknown[]) => void;
     window.setTimeout = ((callback: TimeoutCallback, delay?: number) => {
       const stackTrace = new Error().stack?.split('\n').slice(2, 5).join('\n');
@@ -78,7 +78,7 @@ class PerformanceMonitor {
     }) as typeof setTimeout;
   }
 
-  private monitorRequestAnimationFrame() {
+  private monitorRequestAnimationFrame(): void {
     window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
       const wrappedCallback = (timestamp: number) => {
         const start = performance.now();
@@ -105,7 +105,7 @@ class PerformanceMonitor {
     });
   }
 
-  private monitorReactScheduler() {
+  private monitorReactScheduler(): void {
     // Monitor React's internal scheduler if available
     interface WindowWithReact extends Window {
       React?: {
@@ -154,7 +154,7 @@ class PerformanceMonitor {
     };
   }
 
-  private monitorFetchRequests() {
+  private monitorFetchRequests(): void {
     const originalFetch = window.fetch;
     
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -184,7 +184,7 @@ class PerformanceMonitor {
     };
   }
 
-  private recordEntry(entry: PerformanceEntry) {
+  private recordEntry(entry: PerformanceEntry): void {
     this.entries.push(entry);
     
     // Keep only last 100 entries to prevent memory leaks
@@ -193,7 +193,7 @@ class PerformanceMonitor {
     }
   }
 
-  private logPerformanceReport() {
+  private logPerformanceReport(): void {
     if (this.entries.length === 0) return;
 
     const recent = this.entries.filter(e => Date.now() - e.timestamp < 10000);
@@ -235,7 +235,7 @@ class PerformanceMonitor {
     };
   }
 
-  stopMonitoring() {
+  stopMonitoring(): void {
     if (!this.isMonitoring) return;
     
     console.log('🔍 Performance Monitor: Stopping...');

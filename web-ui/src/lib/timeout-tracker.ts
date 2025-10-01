@@ -25,7 +25,7 @@ class TimeoutTracker {
     this.originalClearTimeout = clearTimeout
   }
 
-  enable() {
+  enable(): void {
     if (this.enabled || typeof window === 'undefined') return
 
     this.enabled = true
@@ -97,7 +97,7 @@ class TimeoutTracker {
     }
   }
 
-  disable() {
+  disable(): void {
     if (!this.enabled || typeof window === 'undefined') return
 
     this.enabled = false
@@ -111,7 +111,7 @@ class TimeoutTracker {
     return Array.from(this.timeouts.values())
   }
 
-  logStats() {
+  logStats(): void {
     const active = this.getActiveTimeouts()
     console.log(`📊 setTimeout tracker stats:`)
     console.log(`   Active timeouts: ${active.length}`)
@@ -136,7 +136,7 @@ class TimeoutTracker {
 export const timeoutTracker = new TimeoutTracker()
 
 // Helper to enable tracking in development
-export const enableTimeoutTracking = () => {
+export const enableTimeoutTracking = (): void => {
   if (process.env.NODE_ENV === 'development') {
     timeoutTracker.enable()
     
@@ -147,6 +147,6 @@ export const enableTimeoutTracking = () => {
   }
 }
 
-export const disableTimeoutTracking = () => {
+export const disableTimeoutTracking = (): void => {
   timeoutTracker.disable()
 }
