@@ -516,7 +516,7 @@ class ModelOptimizer:
 
 ## IV. Detailed Implementation Roadmap
 
-### **Phase 1: Local Orchestration with Distributed GPU Training & Batch Download** ✅ **COMPLETED**
+### **ROADMAP PHASE 1: Local Orchestration with Distributed GPU Training & Batch Download** ✅ **COMPLETED**
 **Status**: Successfully implemented - complete distributed architecture with local coordination
 
 **Objective:**
@@ -938,7 +938,7 @@ print(f"Best score: {result.best_total_score}")
 3. You confirm behavior matches expected results
 4. Only tests passing both phases are considered complete
 
-**Phase 3 - UI Testing**:
+**Phase 3 - UI Testing**: **COMPLETE**
 1. Repeat all 8 test configurations via Web UI interface
 2. Verify UI updates and progress display for all scenarios
 3. Confirm UI behavior matches API behavior across all test cases
@@ -952,3 +952,1127 @@ print(f"Best score: {result.best_total_score}")
 6. **Higher Trial Count** (`trials=4`)
 7. **Extended Training** (`max_epochs_per_trial=10`)
 8. **Direct Optimizer Call** (Programmatic usage)
+
+
+### **ROADMAP PHASE 2: REMOVING HARDCODED HEALTH WEIGHTS (COPILOT FLAG)**
+
+**Status**: Not started
+
+**Objective:**
+Eliminate hardcoded health component weights from the frontend to prevent sync issues with backend. Implement single source of truth by using backend-calculated health scores directly, removing frontend duplication of business logic.
+
+---
+
+#### **Problem Analysis**
+
+**Current Issue:**
+Health component weights are duplicated in two locations:
+1. **Backend**: `src/health_analyzer.py` (Python) - Authoritative source
+   ```python
+   COMPONENT_WEIGHTS = {
+       'neuron_utilization': 0.25,
+       'parameter_efficiency': 0.15,
+       'training_stability': 0.20,
+       'gradient_health': 0.15,
+       'convergence_quality': 0.15,
+       'accuracy_consistency': 0.10
+   }
+   ```
+
+2. **Frontend**: `web-ui/src/components/dashboard/summary-stats.tsx` (TypeScript) - Duplicate
+   ```typescript
+   const HEALTH_COMPONENT_WEIGHTS = {
+     neuron_health: 0.25,
+     parameter_efficiency: 0.15,
+     training_stability: 0.20,
+     gradient_health: 0.15,
+     convergence_quality: 0.15,
+     accuracy_consistency: 0.10
+   }
+   ```
+
+**Risks:**
+- ❌ Violates DRY (Don't Repeat Yourself) principle
+- ❌ Backend weight changes don't propagate to frontend automatically
+- ❌ Frontend shows incorrect health scores if weights diverge
+- ❌ Maintenance burden (must update two files for any weight change)
+- ❌ Potential for silent calculation errors (frontend and backend disagree)
+
+---
+
+#### **Solution: Option 1 - Backend Calculates, Frontend Displays**
+
+**Approach:**
+- Backend's `health_analyzer.py` already calculates composite `health_score`
+- Backend API already returns `health_score` in trial results
+- Frontend should **display** pre-calculated scores, not recalculate them
+- Remove all health weight logic from frontend code
+
+**Benefits:**
+- ✅ Single source of truth (backend owns health calculation)
+- ✅ No duplication of business logic
+- ✅ Guaranteed consistency between backend and frontend
+- ✅ Simpler frontend code (less complexity)
+- ✅ Weight changes only require backend update
+- ✅ No API overhead (already returning health_score)
+
+---
+
+#### **Implementation Plan**
+
+##### **Phase 2.1: Code Audit and Analysis**
+
+**Step 1: Identify All Frontend Health Weight Usage**
+- **Action**: Search frontend codebase for hardcoded weights
+  ```bash
+  grep -r "HEALTH_COMPONENT_WEIGHTS" web-ui/src/
+  grep -r "neuron_health.*0.25" web-ui/src/
+  grep -r "parameter_efficiency.*0.15" web-ui/src/
+  ```
+- **Expected Files**:
+  - `web-ui/src/components/dashboard/summary-stats.tsx` (confirmed)
+  - Any other components calculating health scores
+- **Documentation**: List all files using hardcoded weights
+
+**Step 2: Verify Backend API Returns Health Scores**
+- **Action**: Check API response structure for trial results
+- **Endpoints to verify**:
+  - `GET /jobs/{job_id}/status` - Returns trial results with health_score
+  - `GET /jobs/{job_id}/best-model` - Returns best model with health_score
+- **Expected Response**:
+  ```json
+  {
+    "trials": [
+      {
+        "trial_number": 0,
+        "health_score": 0.78,
+        "test_accuracy": 0.95,
+        ...
+      }
+    ]
+  }
+  ```
+- **Validation**: Confirm `health_score` field present in all relevant endpoints
+
+**Step 3: Review Frontend Health Score Display Logic**
+- **Action**: Understand how frontend currently uses health scores
+- **Questions to answer**:
+  - Does frontend recalculate health scores from components?
+  - Does frontend display pre-calculated backend health scores?
+  - Are health weights used for anything besides score calculation?
+  - Does UI show individual health component breakdowns?
+- **Documentation**: Document current frontend health score usage patterns
+
+---
+
+##### **Phase 2.2: Frontend Code Refactoring**
+
+**Step 4: Remove Hardcoded Health Weights**
+- **File**: `web-ui/src/components/dashboard/summary-stats.tsx`
+- **Changes**:
+  1. Delete `HEALTH_COMPONENT_WEIGHTS` constant definition
+  2. Remove any local health score calculation logic
+  3. Use `trial.health_score` directly from API response
+- **Before**:
+  ```typescript
+  const HEALTH_COMPONENT_WEIGHTS = { ... }
+  const calculatedHealthScore = calculateHealthScore(components, HEALTH_COMPONENT_WEIGHTS)
+  ```
+- **After**:
+  ```typescript
+  const healthScore = trial.health_score // Use backend-calculated value
+  ```
+
+**Step 5: Update TypeScript Interfaces**
+- **File**: `web-ui/src/types/` (or wherever trial types are defined)
+- **Changes**:
+  - Ensure `Trial` interface includes `health_score: number` field
+  - Add JSDoc comments indicating backend calculates this value
+- **Example**:
+  ```typescript
+  interface Trial {
+    trial_number: number
+    test_accuracy: number
+    health_score: number  // Calculated by backend health_analyzer.py
+    // ... other fields
+  }
+  ```
+
+**Step 6: Remove Any Health Calculation Helper Functions**
+- **Action**: Search for and remove frontend health calculation utilities
+  ```bash
+  grep -r "calculateHealth" web-ui/src/
+  grep -r "computeHealth" web-ui/src/
+  ```
+- **Files to check**:
+  - `web-ui/src/lib/` (utility functions)
+  - `web-ui/src/utils/` (helper functions)
+- **Changes**: Delete any functions that recalculate health scores from components
+
+**Step 7: Update Frontend Tests**
+- **Files**: Any test files that mock health score calculations
+- **Changes**:
+  - Remove tests for frontend health calculation logic (no longer exists)
+  - Update mocks to include `health_score` field in API responses
+  - Add tests verifying frontend displays backend health scores correctly
+- **Example Test Update**:
+  ```typescript
+  // BEFORE: Test frontend calculation
+  test('calculates health score correctly', () => {
+    const score = calculateHealthScore(components, weights)
+    expect(score).toBe(0.78)
+  })
+
+  // AFTER: Test frontend displays backend value
+  test('displays backend health score', () => {
+    const trial = { health_score: 0.78, ... }
+    render(<SummaryStats trial={trial} />)
+    expect(screen.getByText('0.78')).toBeInTheDocument()
+  })
+  ```
+
+---
+
+##### **Phase 2.3: Testing and Validation**
+
+**Step 8: Backend API Testing**
+- **Action**: Verify backend returns health_score in all scenarios
+- **Test Cases**:
+  1. Single trial optimization - `health_score` present in response
+  2. Multi-trial optimization - All trials have `health_score` field
+  3. Best model endpoint - `health_score` included
+  4. Edge case: Health monitoring disabled - `health_score` is null or 0.0
+- **Commands**:
+  ```bash
+  # Test single trial run
+  curl -X POST http://localhost:8000/optimize -d '{"dataset_name":"mnist","trials":1}'
+
+  # Check response includes health_score
+  curl http://localhost:8000/jobs/{job_id}/status | jq '.trials[].health_score'
+  ```
+- **Expected**: All trials return valid `health_score` field
+
+**Step 9: Frontend Unit Testing**
+- **Action**: Run frontend test suite to verify refactoring
+- **Commands**:
+  ```bash
+  cd web-ui
+  npm test
+  ```
+- **Validation**:
+  - ✅ All tests pass
+  - ✅ No tests reference removed `HEALTH_COMPONENT_WEIGHTS`
+  - ✅ Tests verify backend health_score display
+
+**Step 10: Frontend Integration Testing (Manual)**
+- **Action**: Start full stack and verify UI displays health scores correctly
+- **Test Procedure**:
+  1. Start backend: `python api_server.py`
+  2. Start frontend: `cd web-ui && npm run dev`
+  3. Run optimization via UI (2 trials, mnist, 6 epochs)
+  4. Verify health scores appear in trial results
+  5. Verify summary statistics show correct health scores
+  6. Verify best model health score matches backend calculation
+
+**Step 11: Cross-Reference Health Scores**
+- **Action**: Verify frontend health scores match backend logs
+- **Test Procedure**:
+  1. Run optimization with health monitoring enabled
+  2. Check backend logs for calculated health scores:
+     ```
+     grep "Health score:" logs/api_server.log
+     ```
+  3. Check frontend UI for displayed health scores
+  4. Compare values: Backend log value === Frontend display value
+- **Validation**: All health scores match exactly (no calculation drift)
+
+**Step 12: Edge Case Testing**
+- **Test Cases**:
+  1. **Health monitoring disabled**: Verify frontend handles null/missing health_score gracefully
+  2. **Zero health score**: Verify UI displays 0.0 correctly (not "N/A" or error)
+  3. **Perfect health score (1.0)**: Verify UI displays without rounding errors
+  4. **Invalid health score**: Verify frontend validates range (0.0-1.0)
+- **Expected Behavior**:
+  - Missing health_score → Display "N/A" or "-"
+  - Valid health_score → Display with 2 decimal places (e.g., "0.78")
+
+---
+
+##### **Phase 2.4: Code Quality and Documentation**
+
+**Step 13: Code Review Checklist**
+- **Frontend Code Quality**:
+  - ✅ No hardcoded health weights remain
+  - ✅ No frontend health calculation logic
+  - ✅ TypeScript types updated with `health_score` field
+  - ✅ All health score references use backend-provided values
+  - ✅ No unused imports or dead code
+
+- **Backend Code Quality**:
+  - ✅ Backend health calculation logic unchanged
+  - ✅ API responses include `health_score` field
+  - ✅ Health weights documented in `health_analyzer.py`
+
+**Step 14: Update Code Comments**
+- **Frontend Files**:
+  - Add comments explaining health_score is backend-calculated:
+    ```typescript
+    // Health score calculated by backend health_analyzer.py
+    // Do not recalculate on frontend - use API value directly
+    const healthScore = trial.health_score
+    ```
+
+- **Backend Files**:
+  - Add comments in `health_analyzer.py` confirming it's the authoritative source:
+    ```python
+    # AUTHORITATIVE SOURCE for health component weights
+    # Frontend displays these calculated values - DO NOT duplicate weights
+    COMPONENT_WEIGHTS = { ... }
+    ```
+
+**Step 15: Update Documentation**
+- **README.md Updates**:
+  - Document that health scores are backend-calculated
+  - Note that weight changes only require backend updates
+  - Add to architecture documentation:
+    ```
+    Health Score Calculation:
+    - Single source of truth: src/health_analyzer.py
+    - Frontend displays pre-calculated values from API
+    - No weight duplication between backend and frontend
+    ```
+
+---
+
+#### **Testing Matrix**
+
+| **Test Phase** | **Test Type** | **Action** | **Expected Result** |
+|----------------|---------------|------------|---------------------|
+| **2.1: Audit** | Manual | Search codebase for hardcoded weights | All instances identified |
+| **2.1: Audit** | Manual | Verify API returns health_score | All endpoints include field |
+| **2.2: Refactor** | Automated | Remove hardcoded weights | No compilation errors |
+| **2.2: Refactor** | Automated | Update TypeScript types | Type checking passes |
+| **2.3: Testing** | Automated | Backend API tests | health_score in all responses |
+| **2.3: Testing** | Automated | Frontend unit tests | All tests pass |
+| **2.3: Testing** | Manual | Full stack integration | UI displays correct scores |
+| **2.3: Testing** | Manual | Cross-reference logs | Backend and frontend values match |
+| **2.3: Testing** | Manual | Edge cases | Null/zero/perfect scores handled correctly |
+| **2.4: Quality** | Manual | Code review checklist | All items checked |
+
+---
+
+#### **Success Criteria**
+
+- ✅ **No Hardcoded Weights**: All `HEALTH_COMPONENT_WEIGHTS` removed from frontend
+- ✅ **Single Source of Truth**: Backend `health_analyzer.py` is only place defining weights
+- ✅ **API Consistency**: All backend endpoints return `health_score` field
+- ✅ **Frontend Simplification**: Frontend only displays backend-calculated values
+- ✅ **Test Coverage**: All tests pass and verify correct behavior
+- ✅ **Cross-Reference Match**: Frontend displays exactly match backend calculations
+- ✅ **Edge Case Handling**: Null/missing health scores handled gracefully
+- ✅ **Documentation Updated**: README.md and code comments reflect new architecture
+
+---
+
+#### **Rollback Plan**
+
+If issues arise during implementation:
+1. Revert frontend changes: `git checkout web-ui/src/components/dashboard/summary-stats.tsx`
+2. Verify backend still returns `health_score` in API responses
+3. Re-test with original hardcoded weights to confirm functionality
+4. Debug issue before retrying removal
+
+---
+
+#### **Timeline Estimate**
+
+- **Phase 2.1 (Audit)**: 30-60 minutes
+- **Phase 2.2 (Refactor)**: 1-2 hours
+- **Phase 2.3 (Testing)**: 2-3 hours
+- **Phase 2.4 (Documentation)**: 30-60 minutes
+
+**Total Estimated Time**: 4-6.5 hours
+
+---
+
+
+
+
+
+### **ROADMAP PHASE 3: CONTAINERIZATION AND PREPARATION FOR HOSTING**
+
+**Status**: Not started
+
+**Objective:**
+Containerize both the front-end and back-end of the program to enable web hosting on GCP VM. The application will be accessible via https://kebayorantechnologies.com/hyperparameter-tuning/demo-computer-vision, running independently alongside an existing containerized professional website (https://www.kebayorantechnologies.com) on the same GCP infrastructure.
+
+---
+
+#### **Current vs Target Architecture Analysis**
+
+##### **Current Architecture (Local Development)**
+
+**Components:**
+1. **Frontend (Next.js Web UI)**
+   - Runtime: Node.js 22.16.0
+   - Started via: `start_servers.py` → `npm run dev` (port 3000)
+   - Mode: Development server with hot reload
+   - Access: Direct browser access to `localhost:3000`
+   - Communication: HTTP requests to `localhost:8000`
+
+2. **Backend (FastAPI Server)**
+   - Runtime: Python 3.12.9
+   - Started via: `start_servers.py` → `uvicorn api_server:app` (port 8000)
+   - Mode: Local development server
+   - Access: Publicly exposed on port 8000 (security risk)
+   - Responsibilities:
+     - Runs `optimizer.py` orchestrator with Optuna
+     - Coordinates hyperparameter trials across RunPod workers
+     - Downloads trial results from RunPod S3 storage
+     - Serves plots and metrics to frontend
+
+3. **RunPod Workers (Remote GPU Training)**
+   - Location: RunPod serverless infrastructure
+   - Runtime: Python 3.12 with TensorFlow/CUDA
+   - Communication: Backend → RunPod API (HTTPS)
+   - Responsibilities:
+     - Execute individual model training trials on GPUs
+     - Generate comprehensive plots and performance metrics
+     - Upload results to RunPod S3 storage
+     - Return presigned URLs to backend
+
+**Current Data Flow:**
+```
+User Browser → Frontend (localhost:3000) → Backend (localhost:8000) → RunPod API
+                    ↑                              ↑                       ↓
+                    └──────── Plots/Metrics ───────┘                 RunPod Workers
+                                                                           ↓
+                                                                    RunPod S3 Storage
+```
+
+**Current Limitations:**
+- Both services run as foreground processes (no automatic restarts)
+- Backend port 8000 publicly accessible (security vulnerability)
+- No service isolation (dependency conflicts possible)
+- Manual startup via `start_servers.py` required
+- Not portable across environments
+- Cannot coexist cleanly with other web applications
+- No resource limits or health monitoring
+- Development mode only (not production-optimized)
+
+---
+
+##### **Target Architecture (Containerized GCP Deployment)**
+
+**Components:**
+1. **Frontend Container (Next.js)**
+   - Base Image: `node:22-alpine`
+   - Exposed Port: `3000` (publicly accessible via reverse proxy)
+   - Production Mode: `npm run build && npm start` (optimized build)
+   - Network: Docker internal network `app-network`
+   - Communication: HTTP to `http://backend:8000` (container DNS)
+   - Resource Limits: CPU/memory constraints enforced by Docker
+   - Health Check: `curl http://localhost:3000/` every 30s
+   - Restart Policy: `unless-stopped` (automatic recovery)
+
+2. **Backend Container (FastAPI)**
+   - Base Image: `python:3.12-slim`
+   - Internal Port: `8000` (NOT exposed to host - network isolation)
+   - Production Mode: `uvicorn api_server:app --host 0.0.0.0`
+   - Network: Docker internal network `app-network`
+   - Dependencies: Full ML stack (TensorFlow, Optuna, NumPy) for orchestration
+   - Communication:
+     - Receives requests from frontend container only
+     - Sends HTTPS requests to RunPod API (no restrictions)
+   - Resource Limits: CPU/memory constraints enforced by Docker
+   - Health Check: `curl http://localhost:8000/health` every 30s
+   - Restart Policy: `unless-stopped` (automatic recovery)
+
+3. **RunPod Workers (Remote GPU Training)**
+   - Unchanged from current architecture
+   - Backend container communicates with RunPod API via HTTPS
+   - No firewall issues (outbound HTTPS allowed by default on GCP)
+
+4. **Docker Compose Orchestration**
+   - Manages both containers as unified application stack
+   - Defines shared network for inter-container communication
+   - Enforces network isolation (backend not accessible from host)
+   - Provides unified logging and monitoring
+   - Enables single-command deployment (`docker-compose up -d`)
+   - Automatic container restart on failure or VM reboot
+
+5. **Reverse Proxy Integration (Nginx)**
+   - Routes `kebayorantechnologies.com/hyperparameter-tuning/demo-computer-vision` → Frontend container port 3000
+   - Handles SSL/TLS certificates
+   - Coexists with existing professional website routing
+
+**Target Data Flow:**
+```
+External Users → GCP VM (HTTPS) → Reverse Proxy → Frontend Container (port 3000)
+                                                           ↓
+                                                   Docker Network (app-network)
+                                                           ↓
+                                                   Backend Container (port 8000)
+                                                           ↓
+                                                   Internet (HTTPS) → RunPod API
+                                                                           ↓
+                                                                     RunPod Workers
+                                                                           ↓
+                                                                     RunPod S3 Storage
+                                                                           ↓
+                                                   Backend Container ← S3 Downloads (boto3)
+```
+
+**Security Improvements:**
+- ✅ Backend port 8000 NOT exposed to external network (internal only)
+- ✅ Only frontend container accessible from internet (via reverse proxy)
+- ✅ Network isolation prevents direct backend API access
+- ✅ Container isolation prevents dependency conflicts with other apps
+- ✅ Environment variables secured in `.env.docker` file (not committed to git)
+- ✅ RunPod API credentials isolated within backend container
+- ✅ No credential exposure via public endpoints
+
+**Operational Improvements:**
+- ✅ Automatic container restarts on failure or VM reboot
+- ✅ Resource limits prevent runaway processes
+- ✅ Consistent environment (development/staging/production parity)
+- ✅ Easy rollback to previous versions (Docker image tags)
+- ✅ Runs alongside other containerized apps on same VM (isolated networks)
+- ✅ Unified logging via Docker (`docker-compose logs`)
+- ✅ Health checks enable automatic failure detection
+- ✅ Production builds optimized (minified JS, smaller images)
+
+---
+
+#### **Implementation Plan**
+
+##### **Phase 2.1: Docker Configuration Files Creation**
+
+**Step 1: Create `.dockerignore` File**
+- **Purpose**: Exclude unnecessary files from Docker build context
+- **Excludes**:
+  - `node_modules/` (reinstalled in container)
+  - `__pycache__/`, `*.pyc` (Python bytecode)
+  - `.git/` (version control not needed in container)
+  - `.env`, `.env.local` (secrets not committed)
+  - `optimization_results/` (user data not part of image)
+  - `logs/` (runtime data)
+  - `datasets/` (can be volume-mounted if needed)
+- **Benefits**:
+  - Faster builds (smaller context size)
+  - Smaller images (no unnecessary files)
+  - Prevents secrets leaking into images
+
+**Step 2: Create `Dockerfile.backend` (Development Mode)**
+- **Base Image**: `python:3.12-slim`
+- **System Dependencies**: `curl` (for health checks), `gcc`, `build-essential` (for some pip packages)
+- **Working Directory**: `/app`
+- **Installation Steps**:
+  1. Copy `requirements.txt`
+  2. Run `pip install --no-cache-dir -r requirements.txt`
+  3. Copy backend source code (`src/`, `runpod_service/`, `data_classes/`)
+  4. Copy `api_server.py`
+- **Port**: `EXPOSE 8000`
+- **Health Check**: `curl http://localhost:8000/health || exit 1` (30s interval)
+- **Command**: `uvicorn api_server:app --host 0.0.0.0 --port 8000 --log-level info`
+- **Environment**:
+  - `PYTHONUNBUFFERED=1` (real-time logging)
+  - `LOG_LEVEL=DEBUG` (verbose logs for development)
+
+**Step 3: Create `Dockerfile.frontend` (Development Mode)**
+- **Base Image**: `node:22-alpine`
+- **Working Directory**: `/app`
+- **Installation Steps**:
+  1. Copy `web-ui/package.json` and `web-ui/package-lock.json`
+  2. Run `npm ci` (clean install)
+  3. Copy `web-ui/` source code
+- **Port**: `EXPOSE 3000`
+- **Health Check**: `curl http://localhost:3000/ || exit 1` (30s interval)
+- **Command**: `npm run dev` (development mode with hot reload)
+- **Environment**:
+  - `NODE_ENV=development`
+  - `API_BASE_URL=http://backend:8000` (container DNS)
+
+**Step 4: Create `docker-compose.yml` (Development Configuration)**
+```yaml
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cv-classification-backend
+    ports:
+      - "8000"  # Internal only - NOT exposed to host
+    networks:
+      - app-network
+    env_file:
+      - .env.docker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    volumes:
+      - ./optimization_results:/app/optimization_results  # Persist results
+      - ./logs:/app/logs  # Persist logs
+
+  frontend:
+    build:
+      context: ./web-ui
+      dockerfile: ../Dockerfile.frontend
+    container_name: cv-classification-frontend
+    ports:
+      - "3000:3000"  # Exposed to host for testing
+    networks:
+      - app-network
+    environment:
+      - NODE_ENV=development
+      - API_BASE_URL=http://backend:8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy  # Wait for backend health check
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+**Step 5: Create `.env.docker` File (Environment Variables)**
+- **Purpose**: Centralized environment configuration for containers
+- **Contents**:
+  ```bash
+  # RunPod Configuration
+  RUNPOD_API_KEY=your_runpod_api_key
+  RUNPOD_ENDPOINT_ID=your_endpoint_id
+  S3_ACCESS_KEY_RUNPOD=your_s3_access_key
+  S3_SECRET_KEY_RUNPOD=your_s3_secret_key
+  S3_BUCKET_RUNPOD=your_s3_bucket_name
+
+  # Application Configuration
+  LOG_LEVEL=DEBUG
+  PYTHONUNBUFFERED=1
+
+  # Add any other backend environment variables here
+  ```
+- **Security**:
+  - Add `.env.docker` to `.gitignore`
+  - Provide `.env.docker.example` template in repository
+  - Transfer `.env.docker` to GCP VM via secure method (scp with SSH keys)
+
+**Step 6: Create `.env.docker.example` Template**
+- **Purpose**: Guide users on required environment variables without exposing secrets
+- **Contents**: Same structure as `.env.docker` but with placeholder values
+
+---
+
+##### **Phase 2.2: Local Testing (Development Mode)**
+
+**Step 7: Build Backend Container (Automated)**
+- **Command**: `docker-compose build backend`
+- **Validation Checks**:
+  - ✅ Build completes without errors
+  - ✅ Image size reasonable (~1.5-2GB expected for ML stack)
+  - ✅ Python 3.12 installed correctly
+  - ✅ All `requirements.txt` packages installed successfully
+  - ✅ Source code copied to `/app` directory
+  - ✅ Health check script functional
+- **Troubleshooting**:
+  - If build fails, check Dockerfile syntax
+  - Verify `requirements.txt` compatibility with Python 3.12
+  - Check Docker build logs for missing system dependencies
+
+**Step 8: Build Frontend Container (Automated)**
+- **Command**: `docker-compose build frontend`
+- **Validation Checks**:
+  - ✅ Build completes without errors
+  - ✅ Image size reasonable (~500MB-1GB expected)
+  - ✅ Node 22 installed correctly
+  - ✅ All npm packages from `package.json` installed
+  - ✅ Next.js dependencies resolved
+  - ✅ Health check script functional
+- **Troubleshooting**:
+  - If build fails, check Dockerfile syntax
+  - Verify `package-lock.json` consistency
+  - Check for platform-specific npm package issues
+
+**Step 9: Start Full Stack (Automated + Manual)**
+- **Command**: `docker-compose up -d`
+- **Automated Validation**:
+  - ✅ Both containers start successfully (`docker ps` shows 2 containers)
+  - ✅ Health checks pass within 60 seconds (`docker ps` health status: "healthy")
+  - ✅ No crash loops in logs (`docker-compose logs` shows no repeated restarts)
+  - ✅ Backend accessible from frontend container (`docker exec cv-classification-frontend curl http://backend:8000/health` returns success)
+  - ✅ Backend NOT accessible from host (`curl http://localhost:8000` fails with connection refused)
+- **Manual UI Testing**:
+  - ✅ Open browser to `http://localhost:3000`
+  - ✅ UI loads correctly without errors
+  - ✅ Dataset list populates from backend
+  - ✅ API connectivity indicators show "connected"
+  - ✅ Test basic navigation (tabs, panels, configuration page)
+
+**Step 10: Network Isolation Verification (Automated)**
+- **Test 1: Backend Port NOT Exposed to Host**
+  - Command: `curl http://localhost:8000/health`
+  - Expected: Connection refused or timeout (backend port not accessible)
+  - Validates: Backend container port 8000 not exposed to host machine
+
+- **Test 2: Frontend CAN Reach Backend Internally**
+  - Command: `docker exec cv-classification-frontend curl http://backend:8000/health`
+  - Expected: `{"status": "ok"}` or similar success response
+  - Validates: Frontend container can reach backend via Docker DNS
+
+- **Test 3: External Access to Frontend Only**
+  - Command: `curl http://localhost:3000`
+  - Expected: Next.js HTML response
+  - Validates: Frontend container accessible from host (port 3000 exposed)
+
+- **Test 4: RunPod API Reachability from Backend**
+  - Command: `docker exec cv-classification-backend curl -I https://api.runpod.io`
+  - Expected: HTTP 200 or 401 (connection successful, authentication expected)
+  - Validates: Backend can reach RunPod API for trial coordination
+
+**Step 11: Functional Testing - Single Trial Run (Manual via UI)**
+- **Action**: Start simple hyperparameter optimization via web UI
+  - Dataset: `mnist` or `fashion_mnist`
+  - Trials: 2
+  - Concurrent workers: 1
+  - Max epochs per trial: 3
+  - Use RunPod service: True
+- **Validation**:
+  - ✅ Run starts successfully (UI shows "RUNNING" status)
+  - ✅ Backend container logs show `optimizer.py` execution
+  - ✅ RunPod API requests sent successfully (logs show trial dispatch)
+  - ✅ Trial progress updates appear in UI in real-time
+  - ✅ Plots download from S3 to backend container
+  - ✅ Plots served to frontend and displayed correctly
+  - ✅ Run completes without errors (status changes to "COMPLETED")
+  - ✅ Final model assembled from best trial
+  - ✅ Results persist in `optimization_results/` volume after container restart
+
+**Step 12: Container Restart Testing (Automated)**
+- **Command**: `docker-compose restart`
+- **Validation**:
+  - ✅ Both containers restart cleanly (no errors in logs)
+  - ✅ Health checks pass after restart
+  - ✅ Previous optimization results still accessible (volumes persisted)
+  - ✅ UI reconnects automatically to backend
+  - ✅ No data loss or corruption
+
+**Step 13: Container Logs Review (Manual)**
+- **Commands**:
+  - `docker-compose logs backend | tail -100` - Review recent backend logs
+  - `docker-compose logs frontend | tail -100` - Review recent frontend logs
+- **Validation**:
+  - ✅ No critical errors or exceptions
+  - ✅ Appropriate log levels (DEBUG in development mode)
+  - ✅ Timestamps formatted correctly
+  - ✅ Request/response cycles visible in backend logs
+  - ✅ API calls to RunPod logged properly
+
+---
+
+##### **Phase 2.3: Production Mode Optimization**
+
+**Step 14: Switch Frontend to Production Build**
+- **Modify `Dockerfile.frontend`**:
+  ```dockerfile
+  # Change from development to production mode
+  FROM node:22-alpine
+  WORKDIR /app
+  COPY web-ui/package*.json ./
+  RUN npm ci --production
+  COPY web-ui/ .
+  RUN npm run build  # Build optimized production bundle
+  EXPOSE 3000
+  CMD ["npm", "start"]  # Start production server
+  ```
+- **Update `docker-compose.yml` frontend service**:
+  ```yaml
+  environment:
+    - NODE_ENV=production
+    - API_BASE_URL=http://backend:8000
+  ```
+- **Rebuild**: `docker-compose build frontend`
+- **Test**: Full UI regression testing (repeat Step 11)
+- **Validation**:
+  - ✅ Production build smaller than development build
+  - ✅ JavaScript minified and optimized
+  - ✅ Page load times faster than development mode
+  - ✅ No console errors related to production build
+  - ✅ All UI functionality works identically to development mode
+
+**Step 15: Switch Backend to Production Mode**
+- **Modify `Dockerfile.backend`**:
+  ```dockerfile
+  # Add production optimizations
+  ENV PYTHONUNBUFFERED=1
+  ENV LOG_LEVEL=INFO  # Less verbose than DEBUG
+  ```
+- **Update `docker-compose.yml` backend service**:
+  ```yaml
+  environment:
+    - LOG_LEVEL=INFO
+    - PYTHONUNBUFFERED=1
+  ```
+- **Rebuild**: `docker-compose build backend`
+- **Test**: Full functional testing (repeat Step 11)
+- **Validation**:
+  - ✅ Log level reduced to INFO (fewer debug messages)
+  - ✅ All API endpoints function correctly
+  - ✅ RunPod integration works identically to development mode
+  - ✅ No performance regressions
+
+**Step 16: Production Stack Full Regression Testing (Manual via UI)**
+- **Test Suite**:
+  1. **Single Trial Run** (2 trials, mnist, 3 epochs)
+  2. **Multi-Trial Run** (4 trials, fashion_mnist, 6 epochs)
+  3. **Concurrent Workers** (2 workers, 2 trials each, cifar10, 3 epochs)
+  4. **Plot Generation and Download** (verify all plot types generated)
+  5. **Error Handling** (cancel run mid-execution, verify graceful handling)
+  6. **Edge Cases** (invalid dataset name, zero trials - should show user-friendly errors)
+
+- **Performance Validation**:
+  - ✅ Frontend page load times <2 seconds
+  - ✅ API response times <500ms for status checks
+  - ✅ No memory leaks over extended runs (monitor `docker stats`)
+  - ✅ Container resource usage within expected limits
+  - ✅ No JavaScript console errors in browser
+
+**Step 17: Long-Running Stability Test (Automated)**
+- **Action**: Leave containers running for 24 hours
+- **Monitoring**:
+  - Run `docker stats` periodically to monitor resource usage
+  - Check container health status: `docker ps` (should show "healthy")
+  - Monitor memory usage trend (should be stable, not growing)
+  - Monitor CPU baseline (should be low when idle)
+  - Check for container restarts: `docker ps -a` (restart count should be 0)
+  - Review logs for errors: `docker-compose logs --since 24h`
+- **Validation**:
+  - ✅ Containers remain healthy and responsive after 24 hours
+  - ✅ Memory usage stable (no memory leaks)
+  - ✅ No unexpected restarts or crashes
+  - ✅ Health checks continue passing
+  - ✅ Backend can still communicate with RunPod API
+
+---
+
+##### **Phase 2.4: Pre-Deployment Security and Documentation**
+
+**Step 18: Security Audit (Automated + Manual)**
+
+**Check 1: Verify No Secrets in Docker Images**
+- Command: `docker history cv-classification-backend --no-trunc`
+- Validation: No API keys, passwords, or credentials visible in image layers
+- Remediation: Ensure all secrets passed via `.env.docker`, not hardcoded in Dockerfiles
+
+**Check 2: Verify `.env.docker` in `.gitignore`**
+- Command: `cat .gitignore | grep .env.docker`
+- Validation: `.env.docker` listed in `.gitignore`
+- Remediation: Add if missing
+
+**Check 3: Verify Backend Port Isolation (Repeat)**
+- Command: `curl http://localhost:8000/health`
+- Expected: Connection refused
+- Validation: Backend port not accessible externally
+
+**Check 4: Review Environment Variables for Sensitive Data Exposure**
+- Review `docker-compose.yml` and `.env.docker`
+- Ensure no credentials logged or exposed via API endpoints
+- Verify RunPod credentials only accessible within backend container
+
+**Check 5: Verify No Debug Endpoints Exposed in Production Build**
+- Review backend API endpoints
+- Ensure no `/debug`, `/admin`, or similar endpoints accessible without authentication
+- Validate production mode disables verbose error messages to users
+
+**Step 19: Documentation Creation**
+- **Create Deployment Section in README.md**:
+  - Prerequisites: Docker 24+, Docker Compose 2.20+
+  - Environment variable setup (`.env.docker` template)
+  - Build commands (`docker-compose build`)
+  - Deployment commands (`docker-compose up -d`)
+  - Monitoring commands (`docker-compose logs`, `docker stats`)
+  - Troubleshooting guide:
+    - Container won't start: Check health check logs
+    - Backend can't reach RunPod: Verify credentials in `.env.docker`
+    - Frontend can't reach backend: Check Docker network configuration
+  - Rollback procedures:
+    - How to revert to previous image version (`docker tag`, `docker-compose up`)
+    - How to restore environment variables from backup
+
+**Step 20: Backup and Rollback Planning**
+- **Document Rollback Procedures**:
+  1. Tag current working images before deploying new version
+  2. How to revert to previous image: `docker tag <image>:<old-tag> <image>:latest`
+  3. How to restore `.env.docker` from backup
+  4. How to recover from failed deployment (stop containers, restore previous version)
+
+- **Create Backup Checklist**:
+  1. Backup `.env.docker` before making changes
+  2. Tag Docker images before rebuilding: `docker tag cv-classification-backend:latest cv-classification-backend:backup-YYYY-MM-DD`
+  3. Backup `optimization_results/` directory (user data)
+  4. Document current Docker Compose configuration
+
+---
+
+##### **Phase 2.5: GCP VM Deployment**
+
+**Step 21: GCP VM Preparation (Manual)**
+- **Prerequisites Check**:
+  - Verify Docker installed: `docker --version` (should be 24.0+)
+  - Verify Docker Compose installed: `docker-compose --version` (should be 2.20+)
+  - If not installed, run installation script for Ubuntu/Debian
+
+- **Directory Setup**:
+  - Create deployment directory: `sudo mkdir -p /opt/cv-classification`
+  - Set ownership: `sudo chown $USER:$USER /opt/cv-classification`
+  - Navigate: `cd /opt/cv-classification`
+
+- **Transfer Files**:
+  - Transfer repository via git: `git clone <repo-url> .`
+  - OR transfer Docker images directly (if repo is private)
+  - Securely transfer `.env.docker`: `scp .env.docker user@gcp-vm:/opt/cv-classification/`
+
+- **Port Availability Check**:
+  - Check if port 3000 available: `sudo lsof -i :3000` (should show nothing)
+  - If port in use, either stop conflicting service or use alternative port
+
+- **Reverse Proxy Configuration (Nginx Example)**:
+  ```nginx
+  # Add to existing Nginx config
+  location /hyperparameter-tuning/demo-computer-vision {
+      proxy_pass http://localhost:3000;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection 'upgrade';
+      proxy_set_header Host $host;
+      proxy_cache_bypass $http_upgrade;
+  }
+  ```
+  - Reload Nginx: `sudo nginx -s reload`
+  - Verify configuration: `sudo nginx -t`
+
+**Step 22: Deploy to GCP VM (Manual)**
+- **Build Containers**:
+  - Build both images: `docker-compose build`
+  - Verify builds succeeded: `docker images | grep cv-classification`
+
+- **Start Containers**:
+  - Start in detached mode: `docker-compose up -d`
+  - Monitor startup logs: `docker-compose logs -f`
+  - Wait for health checks: `watch docker ps` (wait for "healthy" status)
+
+- **Verify Containers Running**:
+  - Check container status: `docker ps`
+  - Verify health: Both containers should show "healthy"
+  - Check logs for errors: `docker-compose logs --tail=50`
+
+**Step 23: Post-Deployment Testing on GCP VM (Manual)**
+
+**Test 1: Access Frontend via Public URL**
+- URL: `https://kebayorantechnologies.com/hyperparameter-tuning/demo-computer-vision`
+- Validation:
+  - ✅ UI loads correctly without errors
+  - ✅ SSL certificate valid (browser shows padlock)
+  - ✅ No mixed content warnings
+  - ✅ All assets (CSS, JS, images) load properly
+
+**Test 2: Verify Backend Isolation**
+- Try accessing backend directly: `curl https://kebayorantechnologies.com:8000` (should fail)
+- Try from VM: `curl http://localhost:8000` (should fail - port not exposed)
+- Validates: Backend only accessible from frontend container
+
+**Test 3: Run Complete Optimization Workflow**
+- Perform same tests as Step 11, but via public URL:
+  - Start optimization via web UI
+  - Monitor real-time progress
+  - Verify RunPod integration works
+  - Confirm plots download and display
+  - Verify final model assembly
+  - Download optimized model
+- Validation: All functionality works identically to local testing
+
+**Test 4: Monitor Resource Usage**
+- Command: `docker stats`
+- Monitor CPU, memory, disk usage for both containers
+- Validation:
+  - ✅ CPU usage reasonable (idle: <5%, active: varies by workload)
+  - ✅ Memory usage within limits (backend: <4GB, frontend: <1GB)
+  - ✅ No interference with other containerized websites on VM
+  - ✅ Disk I/O normal
+
+**Step 24: Production Monitoring Setup (Manual)**
+- **Container Health Monitoring**:
+  - Set up cron job to check health: `0 * * * * docker ps | grep cv-classification | grep unhealthy && systemctl restart docker-compose@cv-classification`
+  - Or use monitoring tools like Portainer, Grafana, Prometheus
+
+- **Log Aggregation** (Optional):
+  - Configure centralized logging if desired
+  - Or rely on Docker logs: `docker-compose logs --since 24h`
+
+- **Alerts** (Optional):
+  - Set up email alerts for container failures
+  - Monitor disk space for `optimization_results/` directory
+
+- **Documentation**:
+  - Document monitoring dashboard access (if applicable)
+  - Create operational runbook for common maintenance tasks:
+    - How to view logs
+    - How to restart containers
+    - How to check resource usage
+    - How to update application
+
+**Step 25: Final Validation and Handoff (Manual)**
+- **End-to-End Test via Public URL**:
+  - Complete full optimization run (4 trials, mnist, 6 epochs)
+  - Verify all features working:
+    - Real-time progress updates
+    - Plot generation and display
+    - Model download
+    - Multiple concurrent trials
+  - Confirm performance acceptable
+
+- **Production-Specific Configuration Documentation**:
+  - Document any GCP-specific settings
+  - Note any differences from local development environment
+  - Record reverse proxy configuration details
+
+- **Operational Runbook**:
+  - Daily operations: How to monitor health
+  - Weekly maintenance: Log rotation, disk space checks
+  - Emergency procedures: What to do if containers fail
+  - Update procedures: How to deploy new versions
+
+---
+
+#### **Testing Matrix Summary**
+
+| **Test Phase** | **Automated Tests** | **Manual Tests** | **Environment** |
+|----------------|---------------------|------------------|-----------------|
+| **2.2: Dev Mode** | Build validation, network isolation, health checks, container restart | UI functionality, single trial run, logs review | Local Docker |
+| **2.3: Prod Mode** | Build validation, 24-hour stability test | Full regression suite, performance validation, edge cases | Local Docker |
+| **2.4: Pre-Deploy** | Security audit (partial), .gitignore check | Documentation review, rollback planning, security review | Local Docker |
+| **2.5: GCP Deploy** | None (manual deployment only) | Full deployment workflow, public URL testing, resource monitoring | GCP VM |
+
+---
+
+#### **Success Criteria**
+
+##### **Development Mode Success:**
+- ✅ Both containers build without errors
+- ✅ Health checks pass consistently
+- ✅ Backend port isolated (not accessible from host)
+- ✅ Frontend can communicate with backend via Docker network
+- ✅ Single optimization run completes successfully via UI
+- ✅ No critical errors in container logs
+- ✅ Containers restart cleanly without data loss
+
+##### **Production Mode Success:**
+- ✅ All development mode criteria met
+- ✅ Production builds optimized (smaller bundles, faster load times)
+- ✅ Full regression test suite passes (6 test scenarios)
+- ✅ 24-hour stability test passes (no crashes, memory leaks, or restarts)
+- ✅ Performance metrics meet targets (page load <2s, API response <500ms)
+- ✅ No memory leaks detected over extended runs
+
+##### **Deployment Success:**
+- ✅ Application accessible via public URL with valid SSL
+- ✅ No interference with existing containerized websites on GCP VM
+- ✅ All features work identically to local testing
+- ✅ Monitoring and alerts configured
+- ✅ Documentation complete and accurate
+- ✅ Rollback procedures tested and documented
+
+---
+
+#### **Risk Mitigation**
+
+##### **Risk 1: Port Conflicts on GCP VM**
+- **Likelihood**: Medium
+- **Impact**: High (deployment failure)
+- **Mitigation**: Survey existing port usage before deployment (`lsof -i :3000`)
+- **Backup Plan**: Use alternative port (e.g., 3001) and update reverse proxy configuration
+
+##### **Risk 2: Resource Exhaustion on Shared VM**
+- **Likelihood**: Medium
+- **Impact**: High (affects all apps on VM)
+- **Mitigation**: Set Docker memory/CPU limits in `docker-compose.yml`:
+  ```yaml
+  deploy:
+    resources:
+      limits:
+        cpus: '2.0'
+        memory: 4G
+  ```
+- **Monitoring**: Alert if containers approach resource limits
+- **Backup Plan**: Move to dedicated VM if resource contention occurs
+
+##### **Risk 3: Secrets Exposure**
+- **Likelihood**: Low (if best practices followed)
+- **Impact**: Critical (API credentials compromised)
+- **Mitigation**:
+  - Never commit `.env.docker` to git
+  - Use secure transfer methods (scp with SSH keys)
+  - Audit Docker image history for embedded secrets
+- **Validation**: Security audit in Step 18
+- **Backup Plan**: Rotate all credentials immediately if exposure suspected
+
+##### **Risk 4: RunPod Connectivity Issues from GCP VM**
+- **Likelihood**: Low
+- **Impact**: High (can't run optimizations)
+- **Mitigation**: Test RunPod API access from GCP VM before deployment
+- **Debugging**:
+  - Check firewall rules (outbound HTTPS should be allowed)
+  - Verify DNS resolution: `docker exec cv-classification-backend nslookup api.runpod.io`
+  - Test with curl: `docker exec cv-classification-backend curl -I https://api.runpod.io`
+- **Backup Plan**: Contact GCP support if firewall blocks RunPod API
+
+##### **Risk 5: Failed Deployment**
+- **Likelihood**: Medium (first deployment always risky)
+- **Impact**: Medium (can rollback)
+- **Mitigation**:
+  - Complete all local testing before GCP deployment
+  - Tag working Docker images before deploying new versions
+  - Document rollback procedures (Step 19)
+- **Prevention**: Full regression testing in Steps 16-17
+- **Backup Plan**:
+  - Rollback to previous Docker image: `docker-compose down && docker tag cv-classification-backend:backup-<date> cv-classification-backend:latest && docker-compose up -d`
+  - Restore `.env.docker` from backup
+
+##### **Risk 6: Reverse Proxy Misconfiguration**
+- **Likelihood**: Medium
+- **Impact**: Medium (public URL doesn't work)
+- **Mitigation**:
+  - Test Nginx configuration before reloading: `sudo nginx -t`
+  - Keep backup of working Nginx config
+  - Test reverse proxy routing after deployment
+- **Debugging**:
+  - Check Nginx error logs: `sudo tail -f /var/log/nginx/error.log`
+  - Verify proxy_pass directive points to correct port
+  - Test direct access to container: `curl http://localhost:3000` on VM
+- **Backup Plan**: Revert Nginx config to previous working version
+
+---
+
+#### **Deployment Timeline Estimate**
+
+- **Phase 2.1 (Docker Files)**: 2-3 hours
+- **Phase 2.2 (Dev Testing)**: 3-4 hours
+- **Phase 2.3 (Prod Optimization)**: 4-5 hours (includes 24-hour stability test)
+- **Phase 2.4 (Pre-Deploy)**: 2-3 hours
+- **Phase 2.5 (GCP Deployment)**: 2-3 hours
+
+**Total Estimated Time**: 13-18 hours (excluding 24-hour stability test waiting time)
+
+--- 
