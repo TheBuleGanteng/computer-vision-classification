@@ -340,6 +340,10 @@ class ModelOptimizer:
         self._trial_start_times: Dict[int, float] = {}
         self._trial_statuses: Dict[int, str] = {}  # "running", "completed", "failed"
         self._current_epoch_info: Dict[int, Dict[str, Any]] = {}  # Trial -> {current_epoch, total_epochs, epoch_progress}
+
+        # RunPod job tracking for cancellation support
+        self._active_runpod_jobs: Dict[int, str] = {}  # trial_number -> job_id
+        self._runpod_jobs_lock = threading.Lock()  # Thread-safe access to job tracking
         
         # Architecture and health trends (protected by _state_lock)
         self._architecture_trends: Dict[str, List[float]] = {}
@@ -647,13 +651,96 @@ class ModelOptimizer:
             return self._best_trial_number, self._best_trial_value
     
     def cancel(self) -> None:
-        """Request cancellation of the optimization process"""
+        """
+        Request cancellation of the optimization process
+
+        Cancels:
+        1. The local Optuna study (stops submitting new trials)
+        2. All active RunPod jobs (stops GPU workers)
+        """
         logger.info("running ModelOptimizer.cancel ... Cancellation requested")
         self._cancelled.set()
+
+        # Cancel all active RunPod jobs
+        if self.config.use_runpod_service:
+            with self._runpod_jobs_lock:
+                if self._active_runpod_jobs:
+                    logger.info(f"running ModelOptimizer.cancel ... Cancelling {len(self._active_runpod_jobs)} active RunPod jobs")
+                    cancelled_count = 0
+                    failed_count = 0
+
+                    for trial_num, job_id in list(self._active_runpod_jobs.items()):
+                        try:
+                            self._cancel_runpod_job(job_id)
+                            logger.info(f"running ModelOptimizer.cancel ... ✓ Cancelled RunPod job {job_id} for trial {trial_num}")
+                            cancelled_count += 1
+                        except Exception as e:
+                            logger.error(f"running ModelOptimizer.cancel ... ✗ Failed to cancel RunPod job {job_id} for trial {trial_num}: {e}")
+                            failed_count += 1
+
+                    self._active_runpod_jobs.clear()
+
+                    if failed_count > 0:
+                        logger.warning(f"running ModelOptimizer.cancel ... Cancellation complete: {cancelled_count} succeeded, {failed_count} failed")
+                    else:
+                        logger.info(f"running ModelOptimizer.cancel ... Successfully cancelled all {cancelled_count} RunPod jobs")
+                else:
+                    logger.info("running ModelOptimizer.cancel ... No active RunPod jobs to cancel")
+        else:
+            logger.debug("running ModelOptimizer.cancel ... RunPod service not enabled, no remote jobs to cancel")
     
     def is_cancelled(self) -> bool:
         """Check if cancellation has been requested"""
         return self._cancelled.is_set()
+
+    def _cancel_runpod_job(self, job_id: str) -> None:
+        """
+        Cancel a specific RunPod job using the RunPod API
+
+        Args:
+            job_id: The RunPod job ID to cancel
+
+        Raises:
+            Exception: If the cancellation request fails
+        """
+        try:
+            # Get API key from environment
+            api_key = os.environ.get('API_KEY_RUNPOD')
+            if not api_key:
+                raise RuntimeError("API_KEY_RUNPOD environment variable not set")
+
+            # Validate endpoint is configured
+            if not self.config.runpod_service_endpoint:
+                raise RuntimeError("RunPod service endpoint not configured")
+
+            # Construct cancel URL from the run endpoint
+            # Example: https://api.runpod.ai/v2/{endpoint_id}/run -> https://api.runpod.ai/v2/{endpoint_id}/cancel/{job_id}
+            cancel_url = f"{self.config.runpod_service_endpoint.rsplit('/run', 1)[0]}/cancel/{job_id}"
+
+            logger.debug(f"running _cancel_runpod_job ... Sending cancel request to: {cancel_url}")
+
+            # Send cancel request
+            response = requests.post(
+                cancel_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+
+            logger.debug(f"running _cancel_runpod_job ... Cancel request successful for job {job_id}")
+
+        except requests.exceptions.HTTPError as e:
+            # Log the response body for debugging
+            logger.error(f"running _cancel_runpod_job ... HTTP error cancelling job {job_id}: {e}")
+            if hasattr(e.response, 'text'):
+                logger.error(f"running _cancel_runpod_job ... Response body: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"running _cancel_runpod_job ... Error cancelling job {job_id}: {e}")
+            raise
     
     def get_trial_history(self) -> List[Dict[str, Any]]:
         """
@@ -1247,7 +1334,12 @@ class ModelOptimizer:
                 if not job_id:
                     raise RuntimeError("No job ID returned from RunPod service")
 
+                # Track this job for cancellation support
+                with self._runpod_jobs_lock:
+                    self._active_runpod_jobs[trial.number] = job_id
+
                 logger.debug(f"running _train_via_runpod_service ... Job submitted with ID: {job_id}")
+                logger.debug(f"running _train_via_runpod_service ... Job tracked for cancellation support")
                 logger.debug(f"running _train_via_runpod_service ... Polling for completion...")
 
                 # Report initial trial progress to UI (no epoch estimates)
@@ -1300,6 +1392,10 @@ class ModelOptimizer:
                         logger.info(f"🔍 RUNPOD POLLING - No output data available yet")
 
                     if job_status == 'COMPLETED':
+                        # Remove from active jobs tracking
+                        with self._runpod_jobs_lock:
+                            self._active_runpod_jobs.pop(trial.number, None)
+
                         logger.info(f"🎉 RUNPOD COMPLETED - Trial {trial.number} job finished!")
                         logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ Training COMPLETED for trial {trial.number} on worker_id={worker_id}")
 
@@ -1491,6 +1587,10 @@ class ModelOptimizer:
                         return total_score
 
                     if job_status == 'FAILED':
+                        # Remove from active jobs tracking
+                        with self._runpod_jobs_lock:
+                            self._active_runpod_jobs.pop(trial.number, None)
+
                         error_logs = status_data.get('error', 'Job failed without details')
 
                         # Let standard exception handling in _objective_function deal with failure progress
@@ -1508,6 +1608,10 @@ class ModelOptimizer:
                 raise RuntimeError(f"RunPod job {job_id} did not complete within {max_poll_time} seconds")
 
         except Exception as e:
+            # Remove from active jobs tracking on error
+            with self._runpod_jobs_lock:
+                self._active_runpod_jobs.pop(trial.number, None)
+
             # ========================================
             # RUNPOD FAILURE AND FALLBACK ANALYSIS
             # ========================================
@@ -1515,7 +1619,7 @@ class ModelOptimizer:
             logger.error(f"❌ Error type: {type(e).__name__}")
             logger.error(f"❌ Error message: {str(e)}")
             logger.error(f"🔍 Failure occurred during RunPod request/response cycle")
-            
+
             # Check fallback configuration
             if self.config.runpod_service_fallback_local:
                 logger.warning(f"🔄 LOCAL FALLBACK ENABLED - Switching to local execution")
