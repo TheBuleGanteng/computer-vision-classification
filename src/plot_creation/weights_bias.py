@@ -1110,7 +1110,8 @@ Layer Details:"""
         from datetime import datetime
         
         if run_timestamp is None:
-            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            # run_timestamp should always be provided from optimizer.py
+            raise ValueError("run_timestamp should always be provided from optimizer.py")
         
         dataset_name_clean = dataset_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
         filename = f"weights_bias_analysis_{run_timestamp}_{dataset_name_clean}.png"

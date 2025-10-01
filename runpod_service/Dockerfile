@@ -27,7 +27,7 @@ COPY datasets/ /app/datasets/
 
 # Copy handler and service files
 COPY runpod_service/handler.py /app/
-COPY runpod_service/deploy.sh /app/
+COPY runpod_service/deploy_simple.sh /app/
 
 # Create logs directory for consistency with main project
 RUN mkdir -p /app/logs
@@ -35,8 +35,11 @@ RUN mkdir -p /app/logs
 # Set Python path to include src directory
 ENV PYTHONPATH="/app/src:/app:${PYTHONPATH}"
 
-# Expose port for health checks (optional)
-EXPOSE 8080
+# Set timezone to Jakarta (Asia/Jakarta)
+ENV TZ=Asia/Jakarta
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# RunPod handler entry point
+# No port exposure needed - using RunPod's standard handler approach
+
+# RunPod handler entry point - simplified approach
 CMD ["python", "-u", "handler.py"]

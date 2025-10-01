@@ -74,7 +74,13 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
     },
     enabled: !!jobId,
     staleTime: 30000, // 30 seconds
-    refetchInterval: 10000, // Check every 10 seconds for new plots
+    refetchInterval: () => {
+      // Coordinate with other polling to prevent overlapping requests
+      const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+      // Offset from trial polling (3-5s) to avoid simultaneous requests
+      return isMobile ? false : 12000; // 12s desktop, disabled on mobile
+    },
+    refetchIntervalInBackground: false
   });
 
   // Query to keep TensorBoard as fallback option
@@ -370,6 +376,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                       className="w-full h-auto max-h-[600px] object-contain"
                       width={800}
                       height={600}
+                      style={{ height: 'auto' }}
                       unoptimized={true}
                       onError={(e) => {
                         const fullUrl = `${API_BASE_URL}${currentPlot.url}`;

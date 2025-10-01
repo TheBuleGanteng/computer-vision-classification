@@ -7,14 +7,15 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Tooltip } from "@/components/ui/tooltip"
 import { apiClient } from "@/lib/api-client"
 import { useDashboard } from "./dashboard-provider"
+import { useComprehensiveStatus } from "@/hooks/use-comprehensive-status"
 import { 
   Play, 
   Square, 
   Download,
-  Database,
-  Target,
   Info
 } from "lucide-react"
+import { TrialProgress } from "@/types/optimization"
+import { ProgressData } from "./dashboard-provider"
 
 // Supported datasets from your optimization system
 const DATASETS = [
@@ -34,47 +35,79 @@ const TARGET_METRICS = [
 ]
 
 export function OptimizationControls() {
-  const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
+  const { progress, isOptimizationRunning, currentJobId, setProgress, setOptimizationMode, setHealthWeight, setIsOptimizationRunning, setCurrentJobId } = useDashboard()
+  const { jobStatus, elapsedSeconds, trials } = useComprehensiveStatus()
+  
+  // Sync comprehensive status data with dashboard context
+  useEffect(() => {
+    if (jobStatus?.progress) {
+      // Create enhanced progress object with proper typing
+      const enhancedProgress = { ...jobStatus.progress } as ProgressData
+      
+      // Extract plot_generation from the current running trial
+      if (trials && trials.length > 0) {
+        const runningTrial = trials.find(trial => trial.status === 'running')
+        const runningTrialWithType = runningTrial as TrialProgress | undefined
+        if (runningTrialWithType?.plot_generation) {
+          enhancedProgress.plot_generation = runningTrialWithType.plot_generation
+        }
+      }
+      
+      // Final model building progress comes from job_status.progress directly (not from trials)
+      const progressWithExtensions = jobStatus.progress as Record<string, unknown>
+      if (progressWithExtensions.final_model_building) {
+        enhancedProgress.final_model_building = progressWithExtensions.final_model_building as ProgressData['final_model_building']
+      }
+      
+      setProgress(enhancedProgress)
+    }
+  }, [jobStatus?.progress, trials, setProgress])
+
+  // Monitor job status changes for completion/failure
+  useEffect(() => {
+    if (!jobStatus) return
+
+    if (jobStatus.status === 'completed') {
+      setIsOptimizationRunning(false)
+      setIsOptimizationCompleted(true)
+      // Keep currentJobId for 3D visualization access
+      
+      // Check if final optimized model is available for download
+      if (currentJobId) {
+        checkModelAvailability(currentJobId)
+      }
+      console.log("Optimization completed successfully")
+    } else if (jobStatus.status === 'failed' || jobStatus.status === 'cancelled') {
+      setIsOptimizationRunning(false)
+      setCurrentJobId(null)
+      setIsModelAvailable(false)
+      setProgress(null)
+      if (jobStatus.error) {
+        setError(jobStatus.error)
+      }
+      console.log(`Optimization ${jobStatus.status}`)
+    }
+  }, [jobStatus?.status, jobStatus?.error, jobStatus, currentJobId, setIsOptimizationRunning, setCurrentJobId, setProgress])
   
   const [selectedDataset, setSelectedDataset] = useState("")
   const [selectedTargetMetric, setSelectedTargetMetric] = useState("") // Default to empty (placeholder state)
   const [isOptimizationCompleted, setIsOptimizationCompleted] = useState(false)
   const [isModelAvailable, setIsModelAvailable] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [clientElapsedTime, setClientElapsedTime] = useState<number>(0)
-  const [optimizationStartTime, setOptimizationStartTime] = useState<number | null>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
-
-  // Real-time elapsed time counter
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null
-    
-    if (isOptimizationRunning && optimizationStartTime) {
-      interval = setInterval(() => {
-        const now = Date.now()
-        const elapsedSeconds = Math.floor((now - optimizationStartTime) / 1000)
-        setClientElapsedTime(elapsedSeconds)
-      }, 1000) // Update every second
-    } else {
-      setClientElapsedTime(0)
-    }
-
-    return () => {
-      if (interval) {
-        clearInterval(interval)
-      }
-    }
-  }, [isOptimizationRunning, optimizationStartTime])
 
   // Sync selectedTargetMetric with shared optimization mode
   useEffect(() => {
     if (selectedTargetMetric && selectedTargetMetric !== "") {
       const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
       if (targetMetric) {
-        setOptimizationMode(targetMetric.mode as "simple" | "health")
+        const mode = targetMetric.mode as "simple" | "health"
+        const healthWeight = mode === 'health' ? 0.3 : 0.0
+        setOptimizationMode(mode)
+        setHealthWeight(healthWeight)
       }
     }
-  }, [selectedTargetMetric, setOptimizationMode])
+  }, [selectedTargetMetric, setOptimizationMode, setHealthWeight])
 
   const handleOptimizationToggle = async () => {
     if (isOptimizationRunning && currentJobId) {
@@ -91,8 +124,6 @@ export function OptimizationControls() {
         setIsOptimizationRunning(false)
         setCurrentJobId(null)
         setIsModelAvailable(false) // Reset model availability on cancellation
-        setOptimizationStartTime(null) // Clear timer state
-        setClientElapsedTime(0)
         console.log("Optimization cancelled successfully")
       } catch (err) {
         console.error("Failed to cancel optimization:", err)
@@ -105,12 +136,17 @@ export function OptimizationControls() {
         
         const targetMetric = TARGET_METRICS.find(m => m.value === selectedTargetMetric)
         const mode = targetMetric?.mode as 'simple' | 'health'
+        const healthWeight = mode === 'health' ? 0.3 : 0.0 // Use API default
         
         const request = {
           // Core parameters
           dataset_name: selectedDataset,
-          mode: mode
+          mode: mode,
+          health_weight: healthWeight
         }
+        
+        // Update dashboard context with the health weight
+        setHealthWeight(healthWeight)
         // All other parameters will use API defaults from OptimizationRequest
 
         console.log(`Starting optimization:`, request)
@@ -121,12 +157,11 @@ export function OptimizationControls() {
         setIsOptimizationCompleted(false)
         setIsModelAvailable(false) // Reset model availability for new optimization
         setCurrentJobId(response.job_id)
-        setOptimizationStartTime(Date.now()) // Record start time for real-time counter
         
         console.log(`Optimization started with job ID: ${response.job_id}`)
         
         // Start polling for progress updates
-        startProgressPolling(response.job_id)
+        startProgressPolling()
         
       } catch (err) {
         console.error("Failed to start optimization:", err)
@@ -198,10 +233,17 @@ export function OptimizationControls() {
       document.body.appendChild(link)
       link.click()
       
-      // Clean up immediately 
-      setTimeout(() => {
-        document.body.removeChild(link)
-      }, 100)
+      // Clean up immediately using non-blocking approach
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(() => {
+          document.body.removeChild(link)
+        }, { timeout: 150 })
+      } else {
+        // Fallback for older browsers
+        setTimeout(() => {
+          document.body.removeChild(link)
+        }, 100)
+      }
       
       console.log("Model package download initiated - save dialog should appear")
     } catch (err) {
@@ -210,89 +252,19 @@ export function OptimizationControls() {
     }
   }
 
-  const startProgressPolling = (jobId: string) => {
+  const startProgressPolling = () => {
     // Clear any existing polling interval
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current)
     }
     
-    const pollInterval = setInterval(async () => {
-      try {
-        const status = await apiClient.getJobStatus(jobId)
-        console.log(`Polling update for job ${jobId}:`, status.progress)
-        
-        // Force state update by creating new object to ensure React re-renders
-        if (status.progress) {
-          setProgress({...status.progress})
-        }
-        
-        if (status.status === 'completed') {
-          setIsOptimizationRunning(false)
-          setIsOptimizationCompleted(true)
-          // Keep currentJobId for 3D visualization access - don't set to null
-          setOptimizationStartTime(null) // Clear timer state
-          
-          // Check if final optimized model is available for download
-          checkModelAvailability(jobId)
-          
-          if (pollingIntervalRef.current) {
-            clearInterval(pollingIntervalRef.current)
-            pollingIntervalRef.current = null
-          }
-          console.log("Optimization completed successfully")
-        } else if (status.status === 'failed' || status.status === 'cancelled') {
-          setIsOptimizationRunning(false)
-          setCurrentJobId(null)
-          setIsModelAvailable(false) // Reset model availability on failure/cancellation
-          setProgress(null) // Reset progress data to clear UI statistics
-          setOptimizationStartTime(null) // Clear timer state
-          if (pollingIntervalRef.current) {
-            clearInterval(pollingIntervalRef.current)
-            pollingIntervalRef.current = null
-          }
-          if (status.error) {
-            setError(status.error)
-          }
-          console.log(`Optimization ${status.status}`)
-        }
-      } catch (err) {
-        console.error("Failed to poll job status:", err)
-        
-        // If job is not found (e.g., server restarted), stop polling and reset state
-        if (err instanceof Error && err.message.includes('not found')) {
-          console.log("Job not found - likely server restarted. Stopping optimization state.")
-          setIsOptimizationRunning(false)
-          setIsOptimizationCompleted(false)
-          setCurrentJobId(null)
-          setIsModelAvailable(false) // Reset model availability on server restart
-          setProgress(null)
-          setOptimizationStartTime(null) // Clear timer state
-          setError("Optimization was interrupted (server restarted). Please start a new optimization.")
-          if (pollingIntervalRef.current) {
-            clearInterval(pollingIntervalRef.current)
-            pollingIntervalRef.current = null
-          }
-        }
-        // Don't clear interval on other polling errors - backend might be temporarily unavailable
-      }
-    }, 2000) // Poll every 2 seconds
-    
-    // Store the interval reference
-    pollingIntervalRef.current = pollInterval
-
-    // Cleanup polling on component unmount or job completion
-    return () => {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current)
-        pollingIntervalRef.current = null
-      }
-    }
+    // No longer need separate polling - comprehensive status hook handles this
+    return () => {}  // Cleanup not needed since useComprehensiveStatus handles polling
   }
 
-  // Helper function to format elapsed time and choose appropriate time source
+  // Helper function to format elapsed time from unified status
   const formatElapsedTime = () => {
-    // Use real-time client elapsed time when optimization is running, otherwise use server time
-    const timeToUse = isOptimizationRunning ? clientElapsedTime : (progress?.elapsed_time || 0)
+    const timeToUse = elapsedSeconds || (progress?.elapsed_time || 0)
     const minutes = Math.floor(timeToUse / 60)
     const seconds = Math.round(timeToUse % 60)
     return `${minutes}m ${seconds}s`
@@ -301,11 +273,31 @@ export function OptimizationControls() {
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="flex flex-col sm:flex-row items-center gap-4">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
           {/* Dataset Selection */}
-          <div className="flex items-center gap-3">
-            <Database className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-            <div className="w-auto min-w-[280px]">
+          <div className="flex items-center gap-3 w-full sm:w-auto">
+            <Tooltip
+              content={
+                <div className="space-y-3">
+                  <p className="font-bold">Dataset Information</p>
+                  <p>To learn more about each dataset, see the links below:</p>
+                  <ul className="space-y-1 text-sm">
+                    <li>• <strong><a href="https://keras.io/api/datasets/mnist/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">MNIST</a>:</strong> Handwritten digits 0-9</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/cifar10/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">CIFAR-10</a>:</strong> Color images</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/cifar100/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">CIFAR-100</a>:</strong> Color images</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/fashion_mnist/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">Fashion-MNIST</a>:</strong> Greyscale images</li>
+                    <li>• <strong><a href="https://www.kaggle.com/datasets/meowmeowmeowmeowmeow/gtsrb-german-traffic-sign" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">GTSRB</a>:</strong> Color images</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/imdb/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">IMDB</a>:</strong> Text-based classification</li>
+                    <li>• <strong><a href="https://keras.io/api/datasets/reuters/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 underline">Reuters</a>:</strong> Text-based classification</li>
+                  </ul>
+                </div>
+              }
+            >
+              <div className="flex items-center justify-center w-5 h-5 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition-colors">
+                <Info className="h-3 w-3" />
+              </div>
+            </Tooltip>
+            <div className="w-full sm:w-auto sm:min-w-[280px]">
               <Select
                 value={selectedDataset}
                 onValueChange={setSelectedDataset}
@@ -322,26 +314,11 @@ export function OptimizationControls() {
           </div>
 
           {/* Target Metric Selection */}
-          <div className="flex items-center gap-3">
-            <Target className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-            <div className="w-auto min-w-[240px]">
-              <Select
-                value={selectedTargetMetric}
-                onValueChange={setSelectedTargetMetric}
-                placeholder="Select target metric"
-                disabled={isOptimizationRunning}
-              >
-                {TARGET_METRICS.map((metric) => (
-                  <SelectItem key={metric.value} value={metric.value}>
-                    {metric.label}
-                  </SelectItem>
-                ))}
-              </Select>
-            </div>
+          <div className="flex items-center gap-3 w-full sm:w-auto">
             <Tooltip
               content={
                 <div className="space-y-2">
-                  <p className="font-medium">Model health vs accuracy</p>
+                  <p className="font-bold">Model health vs. accuracy</p>
                   <p>
                     <strong>Accuracy only:</strong> Optimizes solely for prediction correctness on test data.
                   </p>
@@ -371,15 +348,29 @@ export function OptimizationControls() {
                 <Info className="h-3 w-3" />
               </div>
             </Tooltip>
+            <div className="w-full sm:w-auto sm:min-w-[240px]">
+              <Select
+                value={selectedTargetMetric}
+                onValueChange={setSelectedTargetMetric}
+                placeholder="Select target metric"
+                disabled={isOptimizationRunning}
+              >
+                {TARGET_METRICS.map((metric) => (
+                  <SelectItem key={metric.value} value={metric.value}>
+                    {metric.label}
+                  </SelectItem>
+                ))}
+              </Select>
+            </div>
           </div>
 
           {/* Control Buttons */}
-          <div className="flex items-center gap-3 flex-shrink-0">
+          <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto sm:flex-shrink-0">
             {/* Start/Cancel Optimization Toggle */}
             <Button
               onClick={handleOptimizationToggle}
               disabled={!selectedDataset || selectedDataset === "" || !selectedTargetMetric || selectedTargetMetric === ""}
-              className={`min-w-[140px] ${
+              className={`w-full sm:w-auto sm:min-w-[140px] ${
                 isOptimizationRunning 
                   ? "bg-red-600 hover:bg-red-700 text-white" 
                   : "bg-green-600 hover:bg-green-700 text-white"
@@ -402,7 +393,7 @@ export function OptimizationControls() {
             <Button
               onClick={handleDownloadModel}
               disabled={!isModelAvailable || !currentJobId}
-              className="min-w-[180px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
+              className="w-full sm:w-auto sm:min-w-[180px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white"
               title={
                 !isModelAvailable 
                   ? "Model package will be available after optimization completes and final model is built"
@@ -437,13 +428,15 @@ export function OptimizationControls() {
                   <span>Progress: </span>
                 </div>
                 <div className="pl-2 space-y-1">
-                  <div>
-                    <span>Trials: </span>
-                    <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20}</span>
-                  </div>
                   {progress.current_epoch !== undefined && progress.total_epochs !== undefined && (
                     <div>
-                      <span>Epoch: </span>
+                      <span>Trials: </span>
+                      <span className="font-medium">{progress.current_trial || 0}/{progress.total_trials || 20}</span>
+                    </div>
+                  )}
+                  {progress.current_epoch !== undefined && progress.total_epochs !== undefined && (
+                    <div>
+                      <span>{progress.is_gpu_mode ? 'Trial epochs complete: ' : 'Epoch: '}</span>
                       <span className="font-medium">{progress.current_epoch}/{progress.total_epochs}</span>
                       {progress.epoch_progress !== undefined && (
                         <div className="ml-2 mt-1">
@@ -455,6 +448,38 @@ export function OptimizationControls() {
                           </div>
                         </div>
                       )}
+                    </div>
+                  )}
+                  {progress.plot_generation && progress.plot_generation.status === 'generating' && (
+                    <div>
+                      <span>Plots: </span>
+                      <span className="font-medium">{progress.plot_generation.current_plot}</span>
+                      <span className="ml-1 text-gray-500">({progress.plot_generation.completed_plots}/{progress.plot_generation.total_plots})</span>
+                      <div className="ml-2 mt-1">
+                        <div className="w-32 bg-gray-200 rounded-full h-1.5">
+                          <div 
+                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
+                            style={{width: `${Math.max(0, Math.min(100, (progress.plot_generation.plot_progress || 0) * 100))}%`}}
+                          ></div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {progress.final_model_building && progress.final_model_building.status === 'building' && (
+                    <div>
+                      <span>Final Model: </span>
+                      <span className="font-medium">{progress.final_model_building.current_step}</span>
+                      {progress.final_model_building.detailed_info && (
+                        <span className="ml-1 text-gray-500">({progress.final_model_building.detailed_info})</span>
+                      )}
+                      <div className="ml-2 mt-1">
+                        <div className="w-32 bg-gray-200 rounded-full h-1.5">
+                          <div 
+                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" 
+                            style={{width: `${Math.max(0, Math.min(100, (progress.final_model_building.progress || 0) * 100))}%`}}
+                          ></div>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>

@@ -24,38 +24,40 @@ Supported Architectures:
 - CNN: For image data (GTSRB, CIFAR-10, MNIST, etc.)
 - LSTM: For text data (IMDB, Reuters, etc.)
 """
+import base64
 import copy
 from dataset_manager import DatasetConfig, DatasetManager
-import datetime
-from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
-from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
-from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
-from plot_creation.training_history import TrainingHistoryAnalyzer
-from plot_creation.weights_bias import WeightsBiasAnalyzer
-from plot_creation.gradient_flow import GradientFlowAnalyzer
-#from gpu_proxy_code import get_gpu_proxy_training_code
-
 from dataclasses import dataclass, field
-from datetime import datetime
+from enum import Enum
+import gc
+import gzip
 import json
-import matplotlib.pyplot as plt
+from keras.callbacks import Callback
+import os
+import random
 import numpy as np
 from pathlib import Path
 import seaborn as sns
-from sklearn.metrics import confusion_matrix
 import subprocess
 import sys
 import tensorflow as tf
 from tensorflow import keras # type: ignore
 import traceback
-from typing import Dict, Any, List, Tuple, Optional, Union, TYPE_CHECKING
+from typing import Dict, Any, List, Tuple, Optional, Union, TYPE_CHECKING, Callable
 from utils.logger import logger, PerformanceLogger, TimedOperation
 
 if TYPE_CHECKING:
     from optimizer import OptimizationConfig
 
 from dataclasses import dataclass, field
-from enum import Enum
+
+from plot_creation.realtime_gradient_flow import RealTimeGradientFlowCallback, RealTimeGradientFlowMonitor
+from plot_creation.realtime_training_visualization import RealTimeTrainingVisualizer, RealTimeTrainingCallback
+from plot_creation.realtime_weights_bias import create_realtime_weights_bias_monitor, RealTimeWeightsBiasMonitor, RealTimeWeightsBiasCallback
+from plot_creation.training_history import TrainingHistoryAnalyzer
+from plot_creation.weights_bias import WeightsBiasAnalyzer
+from plot_creation.gradient_flow import GradientFlowAnalyzer
+from utils.logger import logger
 
 # Move PaddingOption outside the class to avoid issues
 class PaddingOption(Enum):
@@ -201,7 +203,7 @@ class ModelConfig:
                 self.padding = PaddingOption(self.padding)
             except ValueError:
                 # If the string value doesn't match enum values, default to SAME
-                from utils.logger import logger
+                
                 logger.warning(f"running ModelConfig.__post_init__ ... Invalid padding value '{self.padding}', defaulting to 'same'")
                 self.padding = PaddingOption.SAME
     
@@ -238,7 +240,7 @@ class ModelBuilder:
     - Better logging and performance monitoring
     """
     
-    def __init__(self, dataset_config: DatasetConfig, model_config: Optional[ModelConfig] = None, trial_number: Optional[int] = None, run_timestamp: Optional[str] = None, results_dir: Optional[Path] = None, optimization_config: Optional['OptimizationConfig'] = None) -> None:
+    def __init__(self, dataset_config: DatasetConfig, run_timestamp: str, model_config: Optional[ModelConfig] = None, trial_number: Optional[int] = None, results_dir: Optional[Path] = None, optimization_config: Optional['OptimizationConfig'] = None) -> None:
         """
         Initialize ModelBuilder with enhanced configuration and GPU proxy setup
         
@@ -253,7 +255,7 @@ class ModelBuilder:
         self.dataset_config: DatasetConfig = dataset_config
         self.model_config: ModelConfig = model_config or ModelConfig()
         self.trial_number: Optional[int] = trial_number
-        self.run_timestamp: Optional[str] = run_timestamp
+        self.run_timestamp: str = run_timestamp
         self.results_dir: Optional[Path] = results_dir
         self.optimization_config: Optional['OptimizationConfig'] = optimization_config
         self.model: Optional[keras.Model] = None
@@ -664,12 +666,15 @@ class ModelBuilder:
         self, 
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
-        use_multi_gpu: bool = False
+        use_multi_gpu: bool = False,
+        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None,
+        epoch_progress_callback: Optional[Callable[[int, float], None]] = None,
+        create_plots: bool = True
     ) -> keras.callbacks.History:
         """
         Enhanced training with optimized GPU proxy execution
         """
-        # For multi-GPU, model building happens inside _train_locally_optimized
+        # For multi-GPU, model building happens inside _train_locally
         # For single-GPU, build model here if not already built
         if not use_multi_gpu and self.model is None:
             logger.debug("running train ... No model found, building model first...")
@@ -679,7 +684,7 @@ class ModelBuilder:
         
         # Execute local training
         logger.debug("running train ... Using local training execution")
-        return self._train_locally_optimized(data, validation_split, use_multi_gpu)
+        return self._train_locally(data, validation_split, use_multi_gpu, plot_progress_callback, epoch_progress_callback, create_plots)
     
     
     def _should_use_gpu_proxy(self) -> bool:
@@ -713,8 +718,6 @@ class ModelBuilder:
         y_train: np.ndarray
     ) -> Dict[str, Any]:
         """Compress training data for large payload transmission with improved error handling"""
-        import gzip
-        import base64
         
         logger.debug("running _compress_context_data ... compressing training data with improved handling")
         
@@ -1297,7 +1300,6 @@ class ModelBuilder:
                 logger.debug(f"running _process_training_results ... - cuDNN: {env_info.get('cudnn_version', 'Unknown')}")
                 
             # Local environment for comparison
-            import tensorflow as tf
             logger.debug("running _process_training_results ... Local Environment (for comparison):")
             logger.debug(f"running _process_training_results ... - TensorFlow: {tf.__version__}")
             logger.debug(f"running _process_training_results ... - Keras (TF): {tf.keras.__version__}")             # type: ignore
@@ -1402,6 +1404,8 @@ class ModelBuilder:
         Returns:
             True if model is complex enough to benefit from multi-GPU
         """
+        logger.debug("running _is_model_suitable_for_multi_gpu ... starting function")
+        
         # Check if model has sufficient complexity for multi-GPU benefits
         min_params_for_multi_gpu = 100_000  # Minimum parameters to benefit from multi-GPU
         min_epochs_for_multi_gpu = 15      # Minimum epochs to amortize multi-GPU overhead
@@ -1475,16 +1479,19 @@ class ModelBuilder:
         
         return max(1000, int(total_params))  # Minimum of 1000 parameters
     
-    def _train_locally_optimized(
+    def _train_locally(
         self, 
         data: Dict[str, Any], 
         validation_split: Optional[float] = None,
-        use_multi_gpu: bool = False
+        use_multi_gpu: bool = False,
+        plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None,
+        epoch_progress_callback: Optional[Callable[[int, float], None]] = None,
+        create_plots: bool = True
     ) -> keras.callbacks.History:
         """
-        Optimized local training execution with PROPER multi-GPU implementation
+        Local training execution with multi-GPU support when available, falls back to CPU when no GPU detected
         """
-        logger.debug("running _train_locally_optimized ... Starting optimized local training")
+        logger.debug("running _train_locally ... Starting optimized local training")
         
         # Log performance information
         self.perf_logger.log_data_info(
@@ -1497,24 +1504,66 @@ class ModelBuilder:
         # Enhanced callback setup
         callbacks_list = self._setup_training_callbacks_optimized()
         
+        # Add epoch progress callback if provided (for final model building)
+        if epoch_progress_callback:
+                        
+            class FinalModelEpochCallback(Callback):
+                def __init__(self, progress_callback):
+                    super().__init__()
+                    self.progress_callback = progress_callback
+                    self.current_epoch = 0
+                    self.total_epochs = 0
+
+                def on_train_begin(self, logs=None):
+                    self.total_epochs = self.params.get('epochs', 0) if self.params else 0
+
+                def on_epoch_begin(self, epoch, logs=None):
+                    self.current_epoch = epoch + 1  # Convert to 1-based
+                    self.progress_callback(self.current_epoch, 0.0)  # Start of epoch
+
+                def on_batch_end(self, batch, logs=None):
+                    if hasattr(self, 'params') and self.params:
+                        # Apply same modulo frequency control as local operation (% 300)
+                        # Only send progress updates every 300 batches to reduce RunPod log spam
+                        if batch > 0 and batch % 600 == 0:
+                            total_batches = self.params.get('steps', 1)
+                            batch_progress = (batch + 1) / total_batches
+                            self.progress_callback(self.current_epoch, batch_progress)
+
+                def on_epoch_end(self, epoch, logs=None):
+                    self.progress_callback(self.current_epoch, 1.0)  # End of epoch
+            
+            callbacks_list.append(FinalModelEpochCallback(epoch_progress_callback))
+        
         # Check multi-GPU availability and model requirements
         available_gpus = tf.config.list_physical_devices('GPU')
+
+        # RUNPOD FIX: Disable multi-GPU in RunPod to avoid CollectiveReduceV2 shape mismatches
+        # RunPod's distributed environment causes collective ops state persistence between trials
+        is_runpod_environment = os.environ.get('RUNPOD_POD_ID') is not None
+
         should_use_multi_gpu = (
-            use_multi_gpu and 
+            use_multi_gpu and
             len(available_gpus) > 1 and
-            self._is_model_suitable_for_multi_gpu()
+            self._is_model_suitable_for_multi_gpu() # and
+            # not is_runpod_environment  # Disable multi-GPU in RunPod
         )
         
-        logger.debug(f"running _train_locally_optimized ... Available GPUs: {len(available_gpus)}")
-        logger.debug(f"running _train_locally_optimized ... Multi-GPU requested: {use_multi_gpu}")
-        logger.debug(f"running _train_locally_optimized ... Will use multi-GPU: {should_use_multi_gpu}")
+        logger.debug(f"running _train_locally ... Available GPUs: {len(available_gpus)}")
+        logger.debug(f"running _train_locally ... Multi-GPU requested: {use_multi_gpu}")
+        logger.debug(f"running _train_locally ... RunPod environment: {is_runpod_environment}")
+        logger.debug(f"running _train_locally ... Will use multi-GPU: {should_use_multi_gpu}")
+
+        if is_runpod_environment and use_multi_gpu and len(available_gpus) > 1:
+            logger.info("🚫 RUNPOD MULTI-GPU DISABLED: Preventing CollectiveReduceV2 shape mismatches between trials")
+            logger.info(f"🚫 Available GPUs ({len(available_gpus)}) will be used in single-GPU mode for stability")
         
         # Apply manual validation split for consistency
         validation_split_value = validation_split or self.model_config.validation_split
-        logger.debug(f"running _train_locally_optimized ... validation_split_value: {validation_split_value}")
+        logger.debug(f"running _train_locally ... validation_split_value: {validation_split_value}")
         
         if validation_split_value > 0:
-            logger.debug("running _train_locally_optimized ... Applying manual validation split")
+            logger.debug("running _train_locally ... Applying manual validation split")
             
             x_train = data['x_train']
             y_train = data['y_train']
@@ -1525,49 +1574,111 @@ class ModelBuilder:
             x_val_manual = x_train[split_idx:]
             y_val_manual = y_train[split_idx:]
             
-            logger.debug(f"running _train_locally_optimized ... Training samples: {len(x_train_manual)}")
-            logger.debug(f"running _train_locally_optimized ... Validation samples: {len(x_val_manual)}")
+            logger.debug(f"running _train_locally ... Training samples: {len(x_train_manual)}")
+            logger.debug(f"running _train_locally ... Validation samples: {len(x_val_manual)}")
             
             training_data = (x_train_manual, y_train_manual)
             validation_data = (x_val_manual, y_val_manual)
         else:
-            logger.debug("running _train_locally_optimized ... No validation split")
+            logger.debug("running _train_locally ... No validation split")
             training_data = (data['x_train'], data['y_train'])
             validation_data = None
         
         # Proper multi-GPU model building and training
         if should_use_multi_gpu:
-            logger.debug("running _train_locally_optimized ... Using MirroredStrategy for multi-GPU training")
+            logger.debug("running _train_locally ... Using MirroredStrategy for multi-GPU training")
+
+            # COLLECTIVE OPS RESET: Clear TensorFlow's collective operations state
+            # This prevents shape mismatches between trials with different model architectures
+            try:
+                # Force cleanup of any existing collective operations
+                tf.keras.backend.clear_session() # type: ignore
+
+                # Reset TensorFlow's collective operations context
+                if hasattr(tf.distribute.experimental, 'CommunicationOptions'):
+                    logger.debug("running _train_locally ... Resetting TensorFlow collective operations state")
+
+                # gc for garbage collection
+                gc.collect()
+
+                logger.debug("running _train_locally ... TensorFlow session and collective ops cleared")
+            except Exception as e:
+                logger.warning(f"running _train_locally ... Could not reset collective ops: {e}")
+
             strategy = tf.distribute.MirroredStrategy()
-            logger.debug(f"running _train_locally_optimized ... Strategy devices: {strategy.extended.worker_devices}")
-            logger.debug(f"running _train_locally_optimized ... Number of replicas: {strategy.num_replicas_in_sync}")
-            
+            logger.debug(f"running _train_locally ... Strategy devices: {strategy.extended.worker_devices}")
+            logger.debug(f"running _train_locally ... Number of replicas: {strategy.num_replicas_in_sync}")
+
+            # IMPROVED FIX: Build model completely outside strategy scope first for absolute consistency
+            logger.debug("running _train_locally ... Building template model outside strategy scope")
+
+            # Set deterministic seeds before any model building
+            config_seed = hash(str(self.model_config.__dict__)) % (2**31)
+            random.seed(config_seed)
+            np.random.seed(config_seed % (2**31))
+            tf.random.set_seed(config_seed % (2**31))
+
+            logger.debug(f"running _train_locally ... Using deterministic seed: {config_seed}")
+
+            # Build template model outside strategy scope
+            data_type = self._detect_data_type_enhanced()
+            template_model = None
+
+            if data_type == "text":
+                logger.debug("running _train_locally ... Building TEXT template model")
+                template_model = self._build_text_model_optimized()
+            else:
+                logger.debug("running _train_locally ... Building CNN template model")
+                template_model = self._build_cnn_model_optimized()
+
+            if template_model is None:
+                raise RuntimeError("Failed to build template model outside strategy scope")
+
+            # Get template model architecture details for verification
+            template_config = template_model.get_config()
+            template_weights_shapes = [w.shape for w in template_model.get_weights()] if template_model.built else []
+            param_count = template_model.count_params()
+            model_layers = len(template_model.layers)
+
+            logger.info(f"running _train_locally ... Template model built with {param_count:,} parameters across {model_layers} layers")
+            logger.info(f"running _train_locally ... Template model architecture frozen with seed {config_seed}")
+
             with strategy.scope():
-                # CRITICAL FIX: Build model components directly inside strategy scope
-                # Do NOT call self.build_model() which may have its own strategy logic
-                self.model = None  # Reset any existing model
-                
-                logger.debug("running _train_locally_optimized ... Building model components inside strategy scope")
-                
-                # Detect data type
-                data_type = self._detect_data_type_enhanced()
-                
-                # Build appropriate model architecture directly
+                # Reset any existing model
+                self.model = None
+
+                # Recreate model inside strategy scope using exact same architecture
+                # Reset seeds to same values for identical replication
+                random.seed(config_seed)
+                np.random.seed(config_seed % (2**31))
+                tf.random.set_seed(config_seed % (2**31))
+
+                logger.debug("running _train_locally ... Replicating template model inside strategy scope")
+
+                # Create new model from template configuration for distributed training
                 if data_type == "text":
-                    logger.debug("running _train_locally_optimized ... Building TEXT model inside strategy")
                     self.model = self._build_text_model_optimized()
                 else:
-                    logger.debug("running _train_locally_optimized ... Building CNN model inside strategy")
                     self.model = self._build_cnn_model_optimized()
-                
-                # Compile model directly inside strategy scope
+
+                # Compile model inside strategy scope
                 self._compile_model_optimized()
-                
-                # TYPE SAFETY: Ensure model was built successfully
+
+                # Verify model consistency with template
                 if self.model is None:
-                    raise RuntimeError("Failed to build model inside strategy scope")
-                
-                logger.debug("running _train_locally_optimized ... Model built and compiled inside strategy scope")
+                    raise RuntimeError("Failed to replicate model inside strategy scope")
+
+                replicated_param_count = self.model.count_params()
+                replicated_layers = len(self.model.layers)
+
+                if replicated_param_count != param_count:
+                    raise RuntimeError(f"Model replication failed: parameter count mismatch {replicated_param_count} != {param_count}")
+                if replicated_layers != model_layers:
+                    raise RuntimeError(f"Model replication failed: layer count mismatch {replicated_layers} != {model_layers}")
+
+                logger.info("running _train_locally ... Model successfully replicated inside strategy scope")
+                logger.info(f"running _train_locally ... Verified identical architecture: {param_count:,} params, {model_layers} layers")
+                logger.info("running _train_locally ... CollectiveReduceV2 consistency fix applied")
                 
                 # Scale batch size for multi-GPU (optional optimization)
                 # ENHANCED: Ensure minimum effective batch size for multi-GPU
@@ -1581,14 +1692,14 @@ class ModelBuilder:
                     min_total_batch_size
                 )
 
-                logger.debug(f"running _train_locally_optimized ... Multi-GPU batch size optimization:")
-                logger.debug(f"running _train_locally_optimized ... - Original batch size: {original_batch_size}")
-                logger.debug(f"running _train_locally_optimized ... - Min per GPU: {min_batch_size_per_gpu}")
-                logger.debug(f"running _train_locally_optimized ... - GPUs: {strategy.num_replicas_in_sync}")
-                logger.debug(f"running _train_locally_optimized ... - Final batch size: {scaled_batch_size}")
-                logger.debug(f"running _train_locally_optimized ... - Per GPU batch size: {scaled_batch_size // strategy.num_replicas_in_sync}")
-                logger.debug(f"running _train_locally_optimized ... About to start training with scaled_batch_size: {scaled_batch_size}")
-                logger.debug(f"running _train_locally_optimized ... Training data shapes: {training_data[0].shape}, {training_data[1].shape}")
+                logger.debug(f"running _train_locally ... Multi-GPU batch size optimization:")
+                logger.debug(f"running _train_locally ... - Original batch size: {original_batch_size}")
+                logger.debug(f"running _train_locally ... - Min per GPU: {min_batch_size_per_gpu}")
+                logger.debug(f"running _train_locally ... - GPUs: {strategy.num_replicas_in_sync}")
+                logger.debug(f"running _train_locally ... - Final batch size: {scaled_batch_size}")
+                logger.debug(f"running _train_locally ... - Per GPU batch size: {scaled_batch_size // strategy.num_replicas_in_sync}")
+                logger.debug(f"running _train_locally ... About to start training with scaled_batch_size: {scaled_batch_size}")
+                logger.debug(f"running _train_locally ... Training data shapes: {training_data[0].shape}, {training_data[1].shape}")
 
                 with TimedOperation("multi-GPU model training", "model_builder"):
                     if validation_data:
@@ -1611,7 +1722,7 @@ class ModelBuilder:
                             callbacks=callbacks_list
                         )
         else:
-            logger.debug("running _train_locally_optimized ... Using single-GPU training")
+            logger.debug("running _train_locally ... Using single-GPU training")
             
             # Build model normally for single GPU
             if self.model is None:
@@ -1640,14 +1751,17 @@ class ModelBuilder:
                         callbacks=callbacks_list
                     )
         
-        logger.debug("running _train_locally_optimized ... Training completed")
+        logger.debug("running _train_locally ... Training completed")
         
         # TYPE SAFETY: Ensure training history was created
         if self.training_history is None:
             raise RuntimeError("Training failed - no history returned")
         
-        # Generate training visualization plots after successful training
-        self._generate_training_plots(training_data, validation_data)
+        # Generate training visualization plots after successful training (if enabled)
+        if create_plots:
+            self._generate_training_plots(training_data, validation_data, plot_progress_callback)
+        else:
+            logger.debug("running _train_locally ... Skipping plot generation (create_plots=False)")
         
         return self.training_history
 
@@ -1743,7 +1857,7 @@ class ModelBuilder:
         
         return HealthMetricsCallback(log_dir, self.health_analyzer)
 
-    def _generate_training_plots(self, training_data: Tuple[np.ndarray, np.ndarray], validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None) -> None:
+    def _generate_training_plots(self, training_data: Tuple[np.ndarray, np.ndarray], validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None, plot_progress_callback: Optional[Callable[[str, int, int, float], None]] = None) -> None:
         """
         Generate comprehensive training visualization plots after training completion
         
@@ -1785,13 +1899,15 @@ class ModelBuilder:
             if validation_data is not None:
                 test_data = {'x_test': validation_data[0], 'y_test': validation_data[1]}
                 test_loss, test_accuracy = self.model.evaluate(validation_data[0], validation_data[1], verbose=0)
+                test_accuracy = round(test_accuracy, 4)
             else:
                 # Use a sample from training data as test data
                 sample_size = min(1000, len(training_data[0]))
                 test_data = {'x_test': training_data[0][:sample_size], 'y_test': training_data[1][:sample_size]}
                 test_loss, test_accuracy = self.model.evaluate(test_data['x_test'], test_data['y_test'], verbose=0)
+                test_accuracy = round(test_accuracy, 4)
             
-            # Use comprehensive PlotGenerator (delayed import to avoid circular dependency)
+            # Use comprehensive PlotGenerator (delayed to avoid circular dependency)
             from plot_generator import PlotGenerator
             
             # Create optimization config with plot flags (if not available, all plots enabled by default)
@@ -1812,10 +1928,11 @@ class ModelBuilder:
                 data=test_data,
                 test_loss=test_loss,
                 test_accuracy=test_accuracy,
-                run_timestamp=self.run_timestamp or datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
+                run_timestamp=self.run_timestamp,
                 plot_dir=plot_dir,
                 log_detailed_predictions=True,
-                max_predictions_to_show=20
+                max_predictions_to_show=20,
+                progress_callback=plot_progress_callback
             )
             
             # Log which plot types were generated
@@ -1829,6 +1946,11 @@ class ModelBuilder:
             else:
                 logger.warning("running _generate_training_plots ... No plots were generated successfully")
             
+            # Store S3 upload result for progress updates (if plots were uploaded to S3)
+            if 'plots_s3' in analysis_results:
+                self._last_plot_s3_result = analysis_results['plots_s3']
+                logger.debug(f"running _generate_training_plots ... Stored S3 result with {len(self._last_plot_s3_result.get('uploaded_files', []))} files for progress updates")
+
             logger.info(f"running _generate_training_plots ... Successfully generated training plots in: {plot_dir}")
             
         except Exception as e:
@@ -1859,11 +1981,21 @@ class ModelBuilder:
         logger.debug("running evaluate ... Starting CONSOLIDATED model evaluation via HealthAnalyzer...")
         
         # ✅ Use HealthAnalyzer as single source of truth for evaluation
+        # Fix retracing: Always use exactly 50 samples to ensure consistent tensor shapes
+        sample_size = 50
+        if len(data['x_test']) >= sample_size:
+            sample_data = data['x_test'][:sample_size]
+        else:
+            # Pad with repeated samples to maintain consistent shape
+            needed = sample_size - len(data['x_test'])
+            repeated_samples = data['x_test'][:(needed % len(data['x_test'])) if needed % len(data['x_test']) > 0 else len(data['x_test'])]
+            sample_data = np.concatenate([data['x_test'], repeated_samples[:needed]], axis=0)
+
         comprehensive_metrics = self.health_analyzer.calculate_comprehensive_health(
             model=self.model,
             history=self.training_history,
             data=data,  # ✅ KEY: Pass data to get basic metrics
-            sample_data=data['x_test'][:50] if len(data['x_test']) > 50 else data['x_test'],
+            sample_data=sample_data,  # Always exactly 50 samples
             training_time_minutes=getattr(self, 'training_time_minutes', None),
             total_params=self.model.count_params()
         )
@@ -1889,11 +2021,11 @@ class ModelBuilder:
         """Extract loss and accuracy from evaluation results"""
         if isinstance(evaluation_results, list):
             test_loss = float(evaluation_results[0])
-            test_accuracy = float(evaluation_results[1]) if len(evaluation_results) > 1 else 0.0
+            test_accuracy = round(float(evaluation_results[1]), 4) if len(evaluation_results) > 1 else 0.0
         else:
             test_loss = float(evaluation_results)
             test_accuracy = 0.0
-        
+
         return test_loss, test_accuracy
     
     
@@ -1979,12 +2111,24 @@ class ModelBuilder:
         """
         project_root = Path(__file__).parent.parent.parent  # Go up 3 levels to project root
         
-        if run_name and run_name.startswith("optimized_"):
-            # For optimized runs, save to optimized_model directory
-            save_dir = project_root / "optimized_model"
+        # Check if we're actually in RunPod container environment (not just endpoint configured)
+        # RunPod containers have /app directory and ENDPOINT_ID_RUNPOD set
+        if os.getenv('ENDPOINT_ID_RUNPOD') and os.path.exists('/app'):
+            logger.debug("running _determine_save_directory ... Detected RunPod container environment")
+            # Use /app/optimization_results structure for RunPod to match local behavior
+            if run_name:
+                save_dir = Path("/app/optimization_results") / run_name / "optimized_model"
+            else:
+                save_dir = Path("/app/optimization_results") / "default_run" / "optimized_model"
         else:
-            # For regular runs, save to trained_models directory
-            save_dir = project_root / "trained_models"
+            logger.debug("running _determine_save_directory ... running in local environment")
+            # Local execution - determine if this is a final optimized model or training run
+            if run_name:
+                # For optimization runs, use optimization_results structure
+                save_dir = project_root / "optimization_results" / run_name / "optimized_model"
+            else:
+                # For regular training runs, save to trained_models directory
+                save_dir = project_root / "trained_models"
         
         # Create directory if it doesn't exist
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -2040,12 +2184,11 @@ class ModelBuilder:
         
         logger.debug("running save_model ... Starting optimized model saving...")
         
-        # Create timestamp if not provided
-        if run_timestamp is None:
-            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        
+        # Use the run timestamp from optimizer if not provided
+        effective_timestamp = run_timestamp or self.run_timestamp
+
         filename = self._generate_optimized_filename(
-            run_timestamp=run_timestamp, 
+            run_timestamp=effective_timestamp, 
             test_accuracy=test_accuracy, 
             run_name=run_name
             )
@@ -2061,11 +2204,18 @@ class ModelBuilder:
         
         try:
             # Save with optimized settings
+            logger.debug(f"running save_model ... About to save model to: {final_filepath}")
             self.model.save(final_filepath)
-            
+
+            # Immediate verification that file was created
+            if final_filepath.exists():
+                logger.debug(f"running save_model ... ✅ Model file created successfully")
+            else:
+                logger.error(f"running save_model ... ❌ Model file was not created after save() call")
+
             # Save additional metadata
-            self._save_model_metadata(save_dir, filename, test_accuracy, run_timestamp, run_name)
-            
+            self._save_model_metadata(save_dir, filename, test_accuracy, effective_timestamp, run_name)
+
             logger.debug(f"running save_model ... Model saved successfully")
             # Inline model save summary logging
             logger.debug(f"running save_model ... Model save summary:")
@@ -2083,6 +2233,7 @@ class ModelBuilder:
             else:
                 logger.debug(f"running save_model ... - File size: Unknown")
             
+            # S3 upload removed - now using direct downloads
             return str(final_filepath)
             
         except Exception as e:
@@ -2212,8 +2363,10 @@ def create_and_train_model(
     load_model_path: Optional[str] = None,
     test_size: float = 0.4,
     run_name: Optional[str] = None,
+    run_timestamp: Optional[str] = None,
     enable_performance_monitoring: bool = True,
     use_multi_gpu: bool = False,
+    progress_callback: Optional[Callable] = None,
     **config_overrides
 ) -> Dict[str, Any]:
     """
@@ -2223,13 +2376,14 @@ def create_and_train_model(
     This function now focuses purely on model building, training, and evaluation.
     """
     
-    # Enhanced timestamp generation
-    if run_name:
+    # Use provided timestamp or extract from run_name as fallback
+    if run_timestamp:
+        logger.debug(f"running create_and_train_model ... Using provided timestamp: {run_timestamp}")
+    elif run_name:
         run_timestamp = run_name.split('_')[0]
         logger.debug(f"running create_and_train_model ... Using timestamp from run_name: {run_timestamp}")
     else:
-        run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        logger.debug(f"running create_and_train_model ... Generated new timestamp: {run_timestamp}")
+        raise ValueError("Either run_timestamp or run_name must be provided")
     
     # Enhanced validation
     if data is None and dataset_name is None:
@@ -2278,7 +2432,7 @@ def create_and_train_model(
             dataset_config, data, model_config, config_overrides,
             run_timestamp, run_name, 
             architecture_type, dataset_name_clean, enable_performance_monitoring,
-            use_multi_gpu
+            use_multi_gpu, progress_callback
         )
 
 
@@ -2299,7 +2453,7 @@ def _handle_model_loading_refactored(
         raise FileNotFoundError(f"Model file not found: {load_model_path}")
     
     # Create ModelBuilder with timestamp for TensorBoard logging
-    builder = ModelBuilder(dataset_config, None, None, run_timestamp)
+    builder = ModelBuilder(dataset_config, run_timestamp)
     
     with TimedOperation("model loading", "refactored_model_builder"):
         builder.model = keras.models.load_model(load_model_path)
@@ -2323,6 +2477,7 @@ def _handle_model_loading_refactored(
         'run_timestamp': run_timestamp,
         'architecture_type': architecture_type,
         'dataset_name': dataset_name_clean,
+        'test_data': {'x_test': data.get('x_test'), 'y_test': data.get('y_test')},
         'refactored': True  # Indicate this is the refactored version
     }
 
@@ -2337,7 +2492,8 @@ def _handle_model_training_refactored(
     architecture_type: str,
     dataset_name_clean: str,
     enable_performance_monitoring: bool,
-    use_multi_gpu: bool = False
+    use_multi_gpu: bool = False,
+    progress_callback: Optional[Callable] = None
 ) -> Dict[str, Any]:
     """Model training handler without embedded plot generation"""
     
@@ -2360,7 +2516,7 @@ def _handle_model_training_refactored(
                 logger.warning(f"running _handle_model_training_refactored ... Unknown config parameter: {key}")
     
     # Create ModelBuilder with timestamp for TensorBoard logging
-    builder = ModelBuilder(dataset_config, model_config, None, run_timestamp)
+    builder = ModelBuilder(dataset_config, run_timestamp, model_config)
     
     # Training pipeline without plot generation
     with TimedOperation("refactored model training pipeline", "refactored_model_builder"):
@@ -2371,8 +2527,8 @@ def _handle_model_training_refactored(
         else:
             logger.debug("running _handle_model_training_refactored ... Skipping model building - will be done inside MirroredStrategy scope")
         
-        logger.debug("running _handle_model_training_refactored ... Training model...")
-        builder.train(data, use_multi_gpu=use_multi_gpu)
+        logger.debug("running _handle_model_training_refactored ... Training model without plot generation...")
+        builder.train(data, use_multi_gpu=use_multi_gpu, epoch_progress_callback=progress_callback, create_plots=False)
         
         logger.debug("running _handle_model_training_refactored ... Evaluating model...")
         test_loss, test_accuracy = builder.evaluate(data=data)
@@ -2396,6 +2552,7 @@ def _handle_model_training_refactored(
         'run_timestamp': run_timestamp,
         'architecture_type': architecture_type,
         'dataset_name': dataset_name_clean,
+        'test_data': {'x_test': data.get('x_test'), 'y_test': data.get('y_test')},
         'refactored': True,  # Indicate this is the refactored version
         'gpu_proxy_used': builder.gpu_proxy_available and model_config.use_gpu_proxy,
         'performance_monitoring': enable_performance_monitoring

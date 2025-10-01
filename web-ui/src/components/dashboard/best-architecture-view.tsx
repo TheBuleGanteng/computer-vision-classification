@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState } from "react"
+import React, { useState, useMemo, Suspense } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -14,12 +14,25 @@ import {
 } from "lucide-react"
 import { useTrials } from "@/hooks/use-trials"
 import { useDashboard } from "@/components/dashboard/dashboard-provider"
-import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
+// Lazy load heavy visualization component to prevent blocking renders
+const UnifiedEducationalInterface = React.lazy(() => 
+  import("@/components/visualization/unified-educational-interface").then(module => ({
+    default: module.UnifiedEducationalInterface
+  }))
+)
 
 const BestArchitectureView = React.memo(() => {
   const { currentJobId, isOptimizationRunning } = useDashboard()
   const { bestTrial, isLoading, error } = useTrials()
   const [isNewBest, setIsNewBest] = useState(false)
+
+  // Memoize stable props to prevent unnecessary re-renders of expensive components
+  const stableTrialId = useMemo(() => 
+    bestTrial?.trial_number?.toString() || bestTrial?.trial_id, 
+    [bestTrial?.trial_number, bestTrial?.trial_id]
+  )
+  
+  const stableJobId = useMemo(() => currentJobId, [currentJobId])
 
   const handleDownloadVisualization = () => {
     if (bestTrial && currentJobId) {
@@ -39,8 +52,17 @@ const BestArchitectureView = React.memo(() => {
   React.useEffect(() => {
     if (bestTrial?.trial_id) {
       setIsNewBest(true)
-      const timer = setTimeout(() => setIsNewBest(false), 3000) // Animation lasts 3 seconds
-      return () => clearTimeout(timer)
+      // Use requestIdleCallback for non-urgent animation cleanup
+      const cleanup = () => setIsNewBest(false)
+      
+      if ('requestIdleCallback' in window) {
+        const handle = requestIdleCallback(cleanup, { timeout: 3100 }) // 3 seconds + buffer
+        return () => cancelIdleCallback(handle)
+      } else {
+        // Fallback to setTimeout for older browsers
+        const timer = setTimeout(cleanup, 3000)
+        return () => clearTimeout(timer)
+      }
     }
   }, [bestTrial?.trial_id]) // Only depend on trial_id, not the entire object
 
@@ -177,25 +199,27 @@ const BestArchitectureView = React.memo(() => {
             </CardDescription>
           </div>
           
-          {/* Download Controls */}
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={handleDownloadVisualization}>
-              <Download className="h-4 w-4 mr-2" />
-              Download 3D
-            </Button>
-          </div>
         </div>
       </CardHeader>
       
       <CardContent>
         {/* Real-time 3D Visualization */}
-        <div className="relative min-h-[500px] bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg overflow-hidden">
-          {currentJobId && bestTrial ? (
-            <UnifiedEducationalInterface 
-              jobId={currentJobId} 
-              trialId={bestTrial.trial_number?.toString()}
-              className="w-full h-full"
-            />
+        <div className="relative min-h-[300px] sm:min-h-[400px] lg:min-h-[500px] bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg overflow-hidden">
+          {stableJobId && stableTrialId ? (
+            <Suspense fallback={
+              <div className="w-full h-full flex items-center justify-center">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                  <p className="text-sm text-gray-600">Loading visualization...</p>
+                </div>
+              </div>
+            }>
+              <UnifiedEducationalInterface 
+                jobId={stableJobId} 
+                trialId={stableTrialId}
+                className="w-full h-full"
+              />
+            </Suspense>
           ) : (
             <div className="w-full h-full flex items-center justify-center">
               <div className="text-center text-gray-400">
@@ -208,7 +232,7 @@ const BestArchitectureView = React.memo(() => {
         </div>
 
         {/* Real-time Trial Details */}
-        <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="mt-4 sm:mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
           {/* Architecture Details */}
           <div className="space-y-4">
             <h4 className="text-sm font-medium flex items-center gap-2">
@@ -216,7 +240,7 @@ const BestArchitectureView = React.memo(() => {
               Architecture Details
             </h4>
             
-            <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 text-sm">
               <div className="space-y-2">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Type:</span>
@@ -306,14 +330,15 @@ const BestArchitectureView = React.memo(() => {
               Performance & Health
             </h4>
             
-            <div className="grid grid-cols-2 gap-3 text-xs">
+            {/* Responsive layout: cards on large screens, key-value pairs on small screens */}
+            <div className="hidden sm:grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               <div className="p-2 bg-muted/50 rounded">
                 <div className="font-medium text-muted-foreground">Total Score</div>
-                <div className="text-sm font-semibold">{bestTrial.performance?.total_score ? `${(bestTrial.performance.total_score * 100).toFixed(2)}%` : 'N/A'}</div>
+                <div className="text-sm font-semibold">{bestTrial.performance?.total_score ? `${(bestTrial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}</div>
               </div>
               <div className="p-2 bg-muted/50 rounded">
                 <div className="font-medium text-muted-foreground">Accuracy</div>
-                <div className="text-sm font-semibold">{bestTrial.performance?.accuracy ? `${(bestTrial.performance.accuracy * 100).toFixed(2)}%` : 'N/A'}</div>
+                <div className="text-sm font-semibold">{bestTrial.performance?.accuracy ? `${(bestTrial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}</div>
               </div>
               <div className="p-2 bg-muted/50 rounded">
                 <div className="font-medium text-muted-foreground">Test Loss</div>
@@ -345,6 +370,50 @@ const BestArchitectureView = React.memo(() => {
                 <div className="p-2 bg-muted/50 rounded">
                   <div className="font-medium text-muted-foreground">Dropout Rate</div>
                   <div className="text-sm font-semibold">{(bestTrial.hyperparameters.first_hidden_layer_dropout * 100).toFixed(1)}%</div>
+                </div>
+              )}
+            </div>
+            
+            {/* Mobile layout with left-justified labels and right-justified values */}
+            <div className="sm:hidden space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Total Score:</span>
+                <span className="font-semibold">{bestTrial.performance?.total_score ? `${(bestTrial.performance.total_score * 100).toFixed(1)}%` : 'N/A'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Accuracy:</span>
+                <span className="font-semibold">{bestTrial.performance?.accuracy ? `${(bestTrial.performance.accuracy * 100).toFixed(1)}%` : 'N/A'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Test Loss:</span>
+                <span className="font-semibold">{bestTrial.health_metrics?.test_loss ? bestTrial.health_metrics.test_loss.toFixed(4) : 'N/A'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Overall Health:</span>
+                <span className="font-semibold">{bestTrial.health_metrics?.overall_health ? `${(bestTrial.health_metrics.overall_health * 100).toFixed(1)}%` : 'N/A'}</span>
+              </div>
+              {bestTrial.health_metrics?.training_stability && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Training Stability:</span>
+                  <span className="font-semibold">{(bestTrial.health_metrics.training_stability * 100).toFixed(1)}%</span>
+                </div>
+              )}
+              {bestTrial.health_metrics?.parameter_efficiency && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Param Efficiency:</span>
+                  <span className="font-semibold">{(bestTrial.health_metrics.parameter_efficiency * 100).toFixed(1)}%</span>
+                </div>
+              )}
+              {bestTrial.hyperparameters?.learning_rate !== undefined && typeof bestTrial.hyperparameters.learning_rate === 'number' && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Learning Rate:</span>
+                  <span className="font-semibold">{bestTrial.hyperparameters.learning_rate}</span>
+                </div>
+              )}
+              {bestTrial.hyperparameters?.first_hidden_layer_dropout !== undefined && typeof bestTrial.hyperparameters.first_hidden_layer_dropout === 'number' && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Dropout Rate:</span>
+                  <span className="font-semibold">{(bestTrial.hyperparameters.first_hidden_layer_dropout * 100).toFixed(1)}%</span>
                 </div>
               )}
             </div>

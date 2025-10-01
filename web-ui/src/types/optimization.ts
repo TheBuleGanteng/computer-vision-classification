@@ -193,6 +193,23 @@ export interface TrialProgress {
   
   // Pruning Information
   pruning_info?: Record<string, unknown>
+  
+  // Plot Generation Progress
+  plot_generation?: {
+    status: 'generating' | 'completed' | 'failed'
+    current_plot: string
+    completed_plots: number
+    total_plots: number
+    plot_progress: number
+  }
+  
+  // Final Model Building Progress
+  final_model_building?: {
+    status: 'building' | 'completed' | 'failed'
+    current_step: string
+    progress: number
+    detailed_info?: string
+  }
 }
 
 // Trial data from CSV

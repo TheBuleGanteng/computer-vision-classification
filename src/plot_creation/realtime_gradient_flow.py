@@ -1971,7 +1971,8 @@ class RealTimeGradientFlowMonitor:
         
         # Generate timestamp if not provided
         if run_timestamp is None:
-            run_timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            # run_timestamp should always be provided from optimizer.py
+            raise ValueError("run_timestamp should always be provided from optimizer.py")
         
         # Determine save directory - use the main plot directory (not intermediate)
         if self.plot_dir is not None:

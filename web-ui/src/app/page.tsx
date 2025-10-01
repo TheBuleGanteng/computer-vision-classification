@@ -1,4 +1,6 @@
-import { Suspense } from "react"
+"use client"
+
+import { Suspense, useEffect } from "react"
 import { OptimizationControls } from "@/components/dashboard/optimization-controls"
 import { SummaryStats } from "@/components/dashboard/summary-stats"
 import { BestArchitectureView } from "@/components/dashboard/best-architecture-view"
@@ -8,8 +10,8 @@ import { DashboardProvider } from "@/components/dashboard/dashboard-provider"
 export default function Home() {
   return (
     <DashboardProvider>
-      <div className="container mx-auto px-6 py-6">
-        <div className="space-y-6">
+      <div className="container mx-auto px-4 sm:px-6 py-4 sm:py-6">
+        <div className="space-y-4 sm:space-y-6">
           {/* Optimization Controls Row */}
           <Suspense fallback={<div className="h-16 bg-muted animate-pulse rounded-lg" />}>
             <OptimizationControls />

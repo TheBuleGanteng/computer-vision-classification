@@ -509,7 +509,7 @@ class ActivationMapAnalyzer:
                     
                     # Extract activations for this layer
                     logger.debug(f"running _extract_all_activations ... Extracting activations for layer {layer_name}")
-                    activations = intermediate_model.predict(sample_images, verbose=0)
+                    activations = intermediate_model.predict(sample_images, verbose=0, batch_size=32)
                     layer_activations[layer_name] = activations
                     
                     activation_shape = activations.shape

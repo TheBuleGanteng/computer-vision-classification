@@ -49,7 +49,13 @@ export function useVisualizationAvailability(jobId: string | null) {
     },
     enabled: !!jobId,
     staleTime: 30 * 1000, // 30 seconds
-    refetchInterval: 10 * 1000, // Poll every 10 seconds for updates
+    refetchInterval: () => {
+      // Coordinate with other polling to prevent simultaneous requests  
+      const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+      // Offset from other polling systems to stagger requests
+      return isMobile ? false : 15000; // 15s desktop, disabled on mobile
+    },
+    refetchIntervalInBackground: false
   });
 }
 

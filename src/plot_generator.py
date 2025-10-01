@@ -7,29 +7,26 @@ Handles all plot generation and visualization logic for model training analysis.
 This module contains visualization domain knowledge and coordinates between
 different plot analysis modules to create comprehensive training reports.
 """
-
+from dataset_manager import DatasetManager
 from datetime import datetime
 import numpy as np
+import os
 from pathlib import Path
+import sys
 from tensorflow import keras # type: ignore
-from typing import Dict, Any, List, Tuple, Optional, Union
+from typing import Dict, Any, List, Tuple, TYPE_CHECKING, Optional, Union, Callable
 from utils.logger import logger
 
 # Import all the plot analysis modules
+from dataset_manager import DatasetConfig
+from model_builder import ModelConfig
+from optimizer import OptimizationConfig
 from plot_creation.confusion_matrix import ConfusionMatrixAnalyzer
 from plot_creation.training_history import TrainingHistoryAnalyzer
 from plot_creation.training_animation import TrainingAnimationAnalyzer
 from plot_creation.gradient_flow import GradientFlowAnalyzer
 from plot_creation.weights_bias import WeightsBiasAnalyzer
 from plot_creation.activation_map import ActivationMapAnalyzer
-
-from dataset_manager import DatasetConfig
-from typing import TYPE_CHECKING, Union
-
-if TYPE_CHECKING:
-    from model_builder import ModelConfig
-    from optimizer import OptimizationConfig
-
 
 class PlotGenerator:
     """
@@ -69,7 +66,8 @@ class PlotGenerator:
         run_timestamp: str,
         plot_dir: Path,
         log_detailed_predictions: bool = True,
-        max_predictions_to_show: int = 20
+        max_predictions_to_show: int = 20,
+        progress_callback: Optional[Callable[[str, int, int, float], None]] = None
     ) -> Dict[str, Any]:
         """
         Generate comprehensive plots and analysis for model training results
@@ -84,6 +82,8 @@ class PlotGenerator:
             plot_dir: Directory to save plots
             log_detailed_predictions: Whether to log detailed predictions
             max_predictions_to_show: Maximum number of predictions to analyze
+            progress_callback: Optional callback function for progress updates
+                              Signature: (current_plot_name, completed_plots, total_plots, overall_progress)
             
         Returns:
             Dictionary containing analysis results from all plot generators
@@ -108,49 +108,81 @@ class PlotGenerator:
         # Determine which config to use for plot flags (prefer optimization_config)
         config_source = self.optimization_config if self.optimization_config else self.model_config
         
-        # Generate confusion matrix analysis (if enabled)
+        # Progress tracking setup
+        plot_tasks = []
+        completed_plots = 0
+        
+        # Build list of plots to generate
         if getattr(config_source, 'show_confusion_matrix', True):
-            analysis_results['confusion_matrix'] = self.generate_confusion_matrix(
-                model, data, run_timestamp, plot_dir
-            )
-        
-        # Generate training history analysis (if enabled and available)
+            plot_tasks.append(('confusion_matrix', 'Confusion Matrix'))
         if training_history and getattr(config_source, 'show_training_history', True):
-            analysis_results['training_history'] = self.generate_training_history(
-                training_history, model, run_timestamp, plot_dir
-            )
-        
-        # Generate training animation (if enabled and available)
+            plot_tasks.append(('training_history', 'Training History'))
         if training_history and getattr(config_source, 'show_training_animation', True):
-            analysis_results['training_animation'] = self.generate_training_animation(
-                training_history, model, run_timestamp, plot_dir
-            )
+            plot_tasks.append(('training_animation', 'Training Animation'))
         
-        # Generate gradient flow analysis (always enabled for now)
-        analysis_results['gradient_flow'] = self.generate_gradient_flow(
-            model, data, run_timestamp, plot_dir
-        )
+        # Check gradient flow sub-components individually
+        show_any_gradient_flow = (getattr(config_source, 'show_gradient_magnitudes', True) or 
+                                 getattr(config_source, 'show_gradient_distributions', True) or 
+                                 getattr(config_source, 'show_dead_neuron_analysis', True))
+        if show_any_gradient_flow:
+            plot_tasks.append(('gradient_flow', 'Gradient Flow'))
         
-        # Generate weights and bias analysis (always enabled for now)
-        analysis_results['weights_bias'] = self.generate_weights_bias(
-            model, run_timestamp, plot_dir
-        )
-        
-        # Generate activation maps (if enabled and CNN only)
+        if getattr(config_source, 'show_weights_bias', True):
+            plot_tasks.append(('weights_bias', 'Weights & Bias'))
         if self.data_type == "image" and getattr(config_source, 'show_activation_maps', True):
-            analysis_results['activation_maps'] = self.generate_activation_maps(
-                model, data, run_timestamp, plot_dir
-            )
+            plot_tasks.append(('activation_maps', 'Activation Maps'))
+        if log_detailed_predictions and max_predictions_to_show > 0 and getattr(config_source, 'show_detailed_predictions', True):
+            plot_tasks.append(('detailed_predictions', 'Detailed Predictions'))
         
-        # Generate detailed predictions analysis
-        if log_detailed_predictions and max_predictions_to_show > 0:
-            analysis_results['detailed_predictions'] = self.generate_detailed_predictions(
-                model, data, max_predictions_to_show, run_timestamp, plot_dir
-            )
+        total_plots = len(plot_tasks)
+        
+        # Generate plots with progress tracking
+        for plot_key, plot_name in plot_tasks:
+            # Report progress before starting current plot
+            if progress_callback:
+                overall_progress = completed_plots / total_plots if total_plots > 0 else 0.0
+                progress_callback(plot_name, completed_plots, total_plots, overall_progress)
+            
+            # Generate the plot
+            if plot_key == 'confusion_matrix':
+                analysis_results['confusion_matrix'] = self.generate_confusion_matrix(
+                    model, data, run_timestamp, plot_dir
+                )
+            elif plot_key == 'training_history':
+                analysis_results['training_history'] = self.generate_training_history(
+                    training_history, model, run_timestamp, plot_dir
+                )
+            elif plot_key == 'training_animation':
+                analysis_results['training_animation'] = self.generate_training_animation(
+                    training_history, model, run_timestamp, plot_dir
+                )
+            elif plot_key == 'gradient_flow':
+                analysis_results['gradient_flow'] = self.generate_gradient_flow(
+                    model, data, run_timestamp, plot_dir
+                )
+            elif plot_key == 'weights_bias':
+                analysis_results['weights_bias'] = self.generate_weights_bias(
+                    model, run_timestamp, plot_dir
+                )
+            elif plot_key == 'activation_maps':
+                analysis_results['activation_maps'] = self.generate_activation_maps(
+                    model, data, run_timestamp, plot_dir
+                )
+            elif plot_key == 'detailed_predictions':
+                analysis_results['detailed_predictions'] = self.generate_detailed_predictions(
+                    model, data, max_predictions_to_show, run_timestamp, plot_dir
+                )
+            
+            completed_plots += 1
+        
+        # Report final completion
+        if progress_callback:
+            progress_callback("Plots Complete", total_plots, total_plots, 1.0)
         
         # Log summary
         self._log_generation_summary(analysis_results, test_loss, test_accuracy)
         
+        # S3 upload removed - now using direct downloads
         return analysis_results
     
     def generate_confusion_matrix(
@@ -175,8 +207,8 @@ class PlotGenerator:
         try:
             logger.debug(f"running generate_confusion_matrix ... Generating confusion matrix analysis")
             
-            # Get predictions efficiently
-            predictions = model.predict(data['x_test'], verbose=0, batch_size=64)
+            # Get predictions efficiently - standardized batch size to reduce retracing
+            predictions = model.predict(data['x_test'], verbose=0, batch_size=32)
             
             # Convert labels efficiently
             true_labels, predicted_labels = self._convert_labels_for_analysis(data['y_test'], predictions)
@@ -303,7 +335,7 @@ class PlotGenerator:
         plot_dir: Path
     ) -> Optional[Dict[str, Any]]:
         """
-        Generate gradient flow analysis
+        Generate gradient flow analysis with individual sub-component control
         
         Args:
             model: Trained Keras model
@@ -317,6 +349,17 @@ class PlotGenerator:
         try:
             logger.debug(f"running generate_gradient_flow ... Generating gradient flow analysis")
             
+            # Get individual gradient flow flags
+            config_source = self.optimization_config if self.optimization_config else self.model_config
+            show_gradient_magnitudes = getattr(config_source, 'show_gradient_magnitudes', True)
+            show_gradient_distributions = getattr(config_source, 'show_gradient_distributions', True) 
+            show_dead_neuron_analysis = getattr(config_source, 'show_dead_neuron_analysis', True)
+            
+            # Skip if all sub-components are disabled
+            if not (show_gradient_magnitudes or show_gradient_distributions or show_dead_neuron_analysis):
+                logger.debug(f"running generate_gradient_flow ... All gradient flow sub-components disabled, skipping")
+                return {'skipped': True, 'reason': 'All gradient flow sub-components disabled'}
+            
             # Intelligent sample selection for gradient analysis
             default_gradient_sample_size = 100  # Default for gradient analysis
             sample_size = min(default_gradient_sample_size, len(data['x_test']))
@@ -327,13 +370,15 @@ class PlotGenerator:
             
             gradient_analyzer = GradientFlowAnalyzer(model_name=self.dataset_config.name)
             
+            # Pass configuration to analyzer for selective plotting
             results = gradient_analyzer.analyze_and_visualize(
                 model=model,
                 sample_data=sample_x,
                 sample_labels=sample_y,
                 dataset_name=self.dataset_config.name,
                 run_timestamp=run_timestamp,
-                plot_dir=plot_dir
+                plot_dir=plot_dir,
+                config=config_source  # Pass the configuration object
             )
             
             if 'error' not in results:
@@ -472,8 +517,8 @@ class PlotGenerator:
         try:
             logger.debug(f"running generate_detailed_predictions ... Generating detailed prediction analysis")
             
-            # Efficient prediction generation
-            predictions = model.predict(data['x_test'], verbose=0, batch_size=128)
+            # Efficient prediction generation - standardized batch size to reduce retracing
+            predictions = model.predict(data['x_test'], verbose=0, batch_size=32)
             
             # Convert labels efficiently
             true_labels, predicted_labels = self._convert_labels_for_analysis(data['y_test'], predictions)
@@ -705,9 +750,7 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
     
     Args:
         dataset_name: Name of dataset to test with
-    """
-    from dataset_manager import DatasetManager
-    
+    """    
     logger.debug(f"running test_plot_generator ... Testing with dataset: {dataset_name}")
     
     # Load dataset config
@@ -715,7 +758,6 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
     dataset_config = dataset_manager.get_dataset_config(dataset_name)
     
     # Create model config (delayed import to avoid circular dependency)
-    from model_builder import ModelConfig
     model_config = ModelConfig()
     
     # Create plot generator
@@ -727,8 +769,6 @@ def test_plot_generator(dataset_name: str = "cifar10") -> None:
 
 
 if __name__ == "__main__":
-    # Simple test when run directly
-    import sys
-    
+    # Simple test when run directly    
     dataset_name = sys.argv[1] if len(sys.argv) > 1 else "cifar10"
     test_plot_generator(dataset_name)

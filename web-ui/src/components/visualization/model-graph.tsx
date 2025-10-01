@@ -1,7 +1,6 @@
 "use client"
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import React, { useEffect, useRef, useImperativeHandle } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
@@ -213,6 +212,33 @@ export const ModelGraph = React.forwardRef<
   ModelGraphProps
 >(({ architectureData, onNodeClick, className = "", onPngExportRequest, showLegend = false }, ref) => {
   const cyRef = useRef<cytoscape.Core | null>(null);
+  
+  // Type definitions for experimental web APIs
+  interface SchedulerPostTaskOptions {
+    priority: 'background' | 'user-visible' | 'user-blocking'
+    delay?: number
+  }
+  
+  interface WindowWithScheduler extends Window {
+    scheduler?: {
+      postTask: (callback: () => void, options: SchedulerPostTaskOptions) => void
+    }
+  }
+
+  // Non-blocking scheduler to prevent React setTimeout violations
+  const scheduleNonUrgent = useCallback((callback: () => void, delay: number = 0) => {
+    const windowWithScheduler = window as WindowWithScheduler
+    if (windowWithScheduler.scheduler?.postTask) {
+      // Use modern Scheduler API if available
+      windowWithScheduler.scheduler.postTask(callback, { priority: 'background', delay });
+    } else if ('requestIdleCallback' in window) {
+      // Fallback to requestIdleCallback
+      requestIdleCallback(callback, { timeout: delay + 50 });
+    } else {
+      // Final fallback to setTimeout (but try to avoid React's main thread)
+      setTimeout(callback, Math.max(delay, 0));
+    }
+  }, []);
 
   // Cytoscape.js stylesheet for educational neural network visualization
   const cytoscapeStylesheet = [
@@ -635,7 +661,7 @@ export const ModelGraph = React.forwardRef<
           cyRef.current.center();
           
           // Second pass for better fit after DOM settles
-          setTimeout(() => {
+          scheduleNonUrgent(() => {
             if (cyRef.current) {
               cyRef.current.fit(undefined, 10);
               cyRef.current.center();
@@ -644,12 +670,13 @@ export const ModelGraph = React.forwardRef<
         }
       };
       
-      // Initial refit
-      setTimeout(refitGraph, 100);
+      // Initial refit using non-blocking scheduler
+      scheduleNonUrgent(refitGraph, 100);
       
-      // Setup resize observer to handle container size changes
+      // Setup resize observer with debouncing to handle container size changes  
       const resizeObserver = new ResizeObserver(() => {
-        setTimeout(refitGraph, 50);
+        // Use non-blocking scheduler for resize debouncing
+        scheduleNonUrgent(refitGraph, 150);
       });
       
       const container = cyRef.current.container();
@@ -661,12 +688,22 @@ export const ModelGraph = React.forwardRef<
         resizeObserver.disconnect();
       };
     }
-  }, [architectureData]);
+  }, [architectureData, scheduleNonUrgent]);
 
-  // Toggle-based looping animation system
+  // Toggle-based looping animation system with viewport optimization
   const [isAnimating, setIsAnimating] = React.useState(false);
   const animationIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isAnimatingRef = useRef(false);
+  const [isMobileView, setIsMobileView] = React.useState(false);
+  
+  // Detect mobile viewport
+  React.useEffect(() => {
+    const checkMobileView = () => setIsMobileView(window.innerWidth <= 768);
+    checkMobileView();
+    const handleResize = () => checkMobileView();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
   
   const resetAnimations = () => {
     if (!cyRef.current) return;
@@ -694,117 +731,144 @@ export const ModelGraph = React.forwardRef<
   };
 
   const runSingleAnimationCycle = () => {
-    if (!cyRef.current) return;
-    
-    console.log('Running animation cycle, isAnimatingRef:', isAnimatingRef.current); // Debug log
+    if (!cyRef.current || !isAnimatingRef.current) return;
     
     const nodes = cyRef.current.nodes();
-    
-    // Get all trainable nodes (excluding input)
     const trainableNodes = nodes.toArray().filter(node => {
       const nodeType = node.data('type');
       return nodeType !== 'input';
     });
     
-    console.log('Found nodes:', nodes.length, 'trainable nodes:', trainableNodes.length); // Debug log
+    // Reduce animation frequency on mobile to improve performance
+    const animationSpeed = isMobileView ? 0.5 : 1;
+    const forwardDelay = Math.max(300, 600 * animationSpeed);
+    const backwardDelay = Math.max(200, 400 * animationSpeed);
     
-    // PHASE 1: Forward pass - data flows through all layers
-    nodes.forEach((node, index) => {
-      const timeoutId = setTimeout(() => {
-        if (!isAnimatingRef.current) {
-          console.log('Animation stopped during forward pass'); // Debug log
-          return;
-        }
-        
-        console.log('Animating forward node', index); // Debug log
-        node.addClass('processing');
-        
-        // Show data flow on outgoing edges
-        const outgoingEdges = node.outgoers().edges();
-        outgoingEdges.addClass('flowing-data');
-        
-        // Replace labels with "DATA" during forward pass
-        outgoingEdges.style('label', 'DATA');
-        outgoingEdges.style('color', '#10B981');
-        outgoingEdges.style('text-background-color', '#064E3B');
-        outgoingEdges.style('font-weight', 'bold');
-        
-        // Remove forward animation but keep node processing  
-        setTimeout(() => {
-          if (outgoingEdges && outgoingEdges.length > 0) {
-            outgoingEdges.removeClass('flowing-data');
-          }
-        }, 800);
-      }, index * 600);
-      
-      // Store timeout for cleanup
-      if (animationIntervalRef.current === null) {
-        animationIntervalRef.current = timeoutId;
-      }
-    });
+    // Use requestAnimationFrame for smoother animations
+    let currentNodeIndex = 0;
     
-    // PHASE 2: Backward pass - errors flow backward through trainable layers only
-    const forwardDuration = nodes.length * 600 + 800;
-    
-    setTimeout(() => {
-      if (!isAnimatingRef.current) {
-        console.log('Animation stopped before backward pass'); // Debug log
+    const animateForwardPass = () => {
+      if (!isAnimatingRef.current || currentNodeIndex >= nodes.length) {
+        scheduleNonUrgent(animateBackwardPass, forwardDelay);
         return;
       }
       
-      console.log('Starting backward pass'); // Debug log
-      trainableNodes.reverse().forEach((node, index) => {
-        setTimeout(() => {
+      const node = nodes[currentNodeIndex];
+      requestAnimationFrame(() => {
+        if (!isAnimatingRef.current) return;
+        
+        node.addClass('processing');
+        const outgoingEdges = node.outgoers().edges();
+        
+        // Batch DOM updates to reduce reflows
+        requestAnimationFrame(() => {
+          const rafStart = performance.now();
           if (!isAnimatingRef.current) return;
           
-          console.log('Animating backward node', index); // Debug log
-          
-          // Show error flow on incoming edges (for trainable layers only)
-          const incomingEdges = node.incomers().edges();
-          incomingEdges.addClass('flowing-errors');
-          
-          // Replace labels with "ERRORS" during backward pass
-          incomingEdges.style('label', 'ERRORS');
-          incomingEdges.style('color', '#EF4444');
-          incomingEdges.style('text-background-color', '#7F1D1D');
-          incomingEdges.style('font-weight', 'bold');
-          
-          // Remove error animation and node processing
-          setTimeout(() => {
-            if (node) {
-              node.removeClass('processing');
+          try {
+            outgoingEdges.addClass('flowing-data');
+            outgoingEdges.style({
+              'label': 'DATA',
+              'color': '#10B981',
+              'text-background-color': '#064E3B',
+              'font-weight': 'bold'
+            });
+          } finally {
+            const rafDuration = performance.now() - rafStart;
+            if (rafDuration > 16.67) {
+              console.warn(`🎨 Cytoscape RAF slow: ${rafDuration.toFixed(2)}ms in forward pass animation`);
             }
-            if (incomingEdges && incomingEdges.length > 0) {
-              incomingEdges.removeClass('flowing-errors');
+          }
+          
+          // Cleanup after animation duration
+          scheduleNonUrgent(() => {
+            if (outgoingEdges.length > 0) {
+              outgoingEdges.removeClass('flowing-data');
             }
-          }, 800);
-        }, index * 400); // Faster backward pass
+          }, 600);
+        });
       });
-    }, forwardDuration);
+      
+      currentNodeIndex++;
+      scheduleNonUrgent(animateForwardPass, forwardDelay);
+    };
     
-    // PHASE 3: Clean up and schedule next cycle
-    const backwardDuration = trainableNodes.length * 400 + 800;
-    const totalCycleDuration = forwardDuration + backwardDuration;
+    let currentBackwardIndex = 0;
+    const reversedTrainableNodes = [...trainableNodes].reverse();
     
-    setTimeout(() => {
-      if (!isAnimatingRef.current) {
-        console.log('Animation stopped during cleanup'); // Debug log
+    const animateBackwardPass = () => {
+      if (!isAnimatingRef.current || currentBackwardIndex >= reversedTrainableNodes.length) {
+        scheduleNonUrgent(cleanupAndLoop, backwardDelay);
         return;
       }
       
-      // Remove processing class from input node
-      const inputNodes = nodes.filter(node => node.data('type') === 'input');
-      inputNodes.removeClass('processing');
+      const node = reversedTrainableNodes[currentBackwardIndex];
+      requestAnimationFrame(() => {
+        if (!isAnimatingRef.current) return;
+        
+        const incomingEdges = node.incomers().edges();
+        
+        requestAnimationFrame(() => {
+          const rafStart = performance.now();
+          if (!isAnimatingRef.current) return;
+          
+          try {
+            incomingEdges.addClass('flowing-errors');
+            incomingEdges.style({
+              'label': 'ERRORS',
+              'color': '#EF4444',
+              'text-background-color': '#7F1D1D',
+              'font-weight': 'bold'
+            });
+          } finally {
+            const rafDuration = performance.now() - rafStart;
+            if (rafDuration > 16.67) {
+              console.warn(`🎨 Cytoscape RAF slow: ${rafDuration.toFixed(2)}ms in backward pass animation`);
+            }
+          }
+          
+          scheduleNonUrgent(() => {
+            if (node) node.removeClass('processing');
+            if (incomingEdges.length > 0) {
+              incomingEdges.removeClass('flowing-errors');
+            }
+          }, 600);
+        });
+      });
       
-      console.log('Cycle complete, scheduling next cycle'); // Debug log
+      currentBackwardIndex++;
+      scheduleNonUrgent(animateBackwardPass, backwardDelay);
+    };
+    
+    const cleanupAndLoop = () => {
+      if (!isAnimatingRef.current) return;
       
-      // Schedule next cycle if still animating
-      setTimeout(() => {
-        if (isAnimatingRef.current) {
-          runSingleAnimationCycle(); // Loop!
-        }
-      }, 500); // Small pause between cycles
-    }, totalCycleDuration);
+      requestAnimationFrame(() => {
+        if (!cyRef.current || !isAnimatingRef.current) return;
+        
+        // Reset all animations
+        nodes.removeClass('processing');
+        cyRef.current.edges().style({
+          'label': 'data(label)',
+          'color': '#64748B',
+          'text-background-color': '#1E293B',
+          'font-weight': 'normal'
+        });
+        
+        // Schedule next cycle with longer pause on mobile
+        const pauseDuration = isMobileView ? 1000 : 500;
+        scheduleNonUrgent(() => {
+          if (isAnimatingRef.current) {
+            runSingleAnimationCycle();
+          }
+        }, pauseDuration);
+      });
+    };
+    
+    // Start the animation cycle
+    currentNodeIndex = 0;
+    currentBackwardIndex = 0;
+    animateForwardPass();
   };
 
   const toggleAnimation = () => {
@@ -859,8 +923,8 @@ export const ModelGraph = React.forwardRef<
         resetAnimations();
       }
 
-      // Wait a moment for animations to clear
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Wait a moment for animations to clear with non-blocking scheduler
+      await new Promise(resolve => scheduleNonUrgent(() => resolve(undefined), 100));
 
       // Generate PNG with high quality settings
       const pngBlob = cyRef.current.png({
@@ -966,13 +1030,13 @@ export const ModelGraph = React.forwardRef<
             cy.center();
             
             // Multiple passes to ensure proper fitting with progressive adjustments
-            setTimeout(() => {
+            scheduleNonUrgent(() => {
               if (cyRef.current) {
                 cyRef.current.fit(undefined, 15);
                 cyRef.current.center();
                 
                 // Final adjustment after layout settles
-                setTimeout(() => {
+                scheduleNonUrgent(() => {
                   if (cyRef.current) {
                     cyRef.current.fit(undefined, 10); // Very tight fit for maximum use of space
                     cyRef.current.center();

@@ -286,7 +286,7 @@ class HealthAnalyzer:
             if isinstance(evaluation_results, list):
                 # Multiple metrics returned: [loss, metric1, metric2, ...]
                 test_loss = float(evaluation_results[0])
-                test_accuracy = float(evaluation_results[1]) if len(evaluation_results) > 1 else 0.0
+                test_accuracy = round(float(evaluation_results[1]), 4) if len(evaluation_results) > 1 else 0.0
                 logger.debug(f"running HealthAnalyzer._extract_basic_metrics ... Extracted from list: loss={test_loss:.4f}, accuracy={test_accuracy:.4f}")
             else:
                 # Single metric returned (loss only)

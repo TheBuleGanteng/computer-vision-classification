@@ -27,6 +27,12 @@ const EducationalVisualizationContainer = React.memo(({
   jobId: string | null; 
   selectedTrial: TrialProgress | null;
 }) => {
+  // Memoize stable props to prevent unnecessary re-renders
+  const stableTrialId = useMemo(() => 
+    selectedTrial?.trial_number?.toString() || selectedTrial?.trial_id, 
+    [selectedTrial?.trial_number, selectedTrial?.trial_id]
+  )
+
   if (!jobId || !selectedTrial) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground">
@@ -42,7 +48,7 @@ const EducationalVisualizationContainer = React.memo(({
     <div className="w-full h-full min-h-[600px]">
       <UnifiedEducationalInterface 
         jobId={jobId} 
-        trialId={selectedTrial.trial_number?.toString() || selectedTrial.trial_id}
+        trialId={stableTrialId}
         className="h-full"
       />
     </div>
@@ -55,6 +61,7 @@ const TrialGallery = React.memo(() => {
   const { currentJobId } = useDashboard()
   const [selectedTrial, setSelectedTrial] = useState<TrialProgress | null>(null)
   const { trials, bestTrial, isLoading, error } = useTrials()
+
 
   // Memoized helper functions to prevent unnecessary re-calculations
   const formatDuration = useMemo(() => (seconds: number | null | undefined) => {
@@ -136,7 +143,7 @@ const TrialGallery = React.memo(() => {
   return (
     <>
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="pt-6 pb-6">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {trials.map((trial) => {
               const isBestTrial = bestTrial && trial.trial_id === bestTrial.trial_id
@@ -144,80 +151,82 @@ const TrialGallery = React.memo(() => {
               return (
                 <Card 
                   key={`trial-${trial.trial_id || trial.trial_number}`}
-                  className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
+                  className={`transition-all duration-200 hover:shadow-md ${
                     isBestTrial 
                       ? "ring-2 ring-orange-500 shadow-lg bg-orange-50 dark:bg-orange-900/20" 
                       : "hover:ring-2 hover:ring-blue-300"
                   }`}
-                  onClick={() => setSelectedTrial(trial)}
                 >
-                  <CardContent className="p-4">
-                    <div className="space-y-3">
-                      {/* Header */}
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <Hash className="w-4 h-4 text-muted-foreground" />
-                          <span className="font-medium">Trial {trial.trial_number}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <TrialStatusBadge status={trial.status} />
-                          {isBestTrial && (
-                            <Badge className="bg-orange-500 text-white text-xs">
-                              Best Trial
-                            </Badge>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Performance Metrics */}
-                      {trial.performance && (
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-sm text-muted-foreground">Accuracy</span>
-                            <span className="text-sm font-medium">
-                              {formatScore(trial.performance.accuracy)}
-                            </span>
+                  <CardContent className="p-4 h-full">
+                    <div className="flex flex-col h-full">
+                      <div className="space-y-3 flex-1">
+                        {/* Header */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Hash className="w-4 h-4 text-muted-foreground" />
+                            <span className="font-medium">Trial {trial.trial_number}</span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-sm text-muted-foreground">Total Score</span>
-                            <span className="text-sm font-medium">
-                              {formatScore(trial.performance.total_score)}
-                            </span>
+                          <div className="flex items-center gap-2">
+                            <TrialStatusBadge status={trial.status} />
+                            {isBestTrial && (
+                              <Badge className="bg-orange-500 text-white text-xs">
+                                Best Trial
+                              </Badge>
+                            )}
                           </div>
                         </div>
-                      )}
 
-                      {/* Health Metrics */}
-                      {trial.health_metrics && (
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-sm text-muted-foreground">Health Score</span>
-                            <span className="text-sm font-medium">
-                              {formatScore(trial.health_metrics.overall_health)}
-                            </span>
+                        {/* Performance Metrics */}
+                        {trial.performance && (
+                          <div className="space-y-2">
+                            <div className="flex justify-between items-center">
+                              <span className="text-sm text-muted-foreground">Accuracy</span>
+                              <span className="text-sm font-medium">
+                                {formatScore(trial.performance.accuracy)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                              <span className="text-sm text-muted-foreground">Total Score</span>
+                              <span className="text-sm font-medium">
+                                {formatScore(trial.performance.total_score)}
+                              </span>
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
 
-                      {/* Architecture Info */}
-                      {trial.architecture && (
+                        {/* Health Metrics */}
+                        {trial.health_metrics && (
+                          <div className="space-y-2">
+                            <div className="flex justify-between items-center">
+                              <span className="text-sm text-muted-foreground">Health Score</span>
+                              <span className="text-sm font-medium">
+                                {formatScore(trial.health_metrics.overall_health)}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Architecture Info */}
+                        {trial.architecture && (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Layers className="w-4 h-4" />
+                            <span>{trial.architecture.type || "Unknown"} Architecture</span>
+                          </div>
+                        )}
+
+                        {/* Duration */}
                         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <Layers className="w-4 h-4" />
-                          <span>{trial.architecture.type || "Unknown"} Architecture</span>
+                          <Clock className="w-4 h-4" />
+                          <span>Duration: {formatDuration(trial.duration_seconds)}</span>
                         </div>
-                      )}
-
-                      {/* Duration */}
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Clock className="w-4 h-4" />
-                        <span>Duration: {formatDuration(trial.duration_seconds)}</span>
                       </div>
 
-                      {/* View Button */}
+                      {/* View Button - Fixed to bottom */}
                       <Button 
                         variant="outline" 
                         size="sm" 
                         className="w-full mt-3"
+                        disabled={trial.status !== 'completed'}
                         onClick={(e) => {
                           e.stopPropagation()
                           setSelectedTrial(trial)
@@ -237,7 +246,7 @@ const TrialGallery = React.memo(() => {
 
       {/* Educational Visualization Modal */}
       <Dialog open={!!selectedTrial} onOpenChange={() => setSelectedTrial(null)}>
-        <DialogContent className="max-w-7xl max-h-[90vh] w-[95vw]">
+        <DialogContent className="max-w-7xl max-h-[90vh] w-[95vw] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Activity className="w-5 h-5" />
@@ -248,14 +257,14 @@ const TrialGallery = React.memo(() => {
             </DialogTitle>
           </DialogHeader>
           
-          <div className="mt-4">
+          <div className="mt-4 flex-1 overflow-y-auto">
             <EducationalVisualizationContainer 
               jobId={currentJobId} 
               selectedTrial={selectedTrial} 
             />
           </div>
           
-          <DialogClose />
+          <DialogClose onClose={() => setSelectedTrial(null)} />
         </DialogContent>
       </Dialog>
     </>

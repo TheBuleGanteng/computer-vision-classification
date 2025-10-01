@@ -11,12 +11,16 @@ Usage:
     logger.error("Model failed to load")
 """
 
-import logging
-import os
 from datetime import datetime
-from typing import Optional, Union, Dict, Any
+import logging
+import matplotlib.font_manager
+import matplotlib.pyplot as plt
+import os
 from pathlib import Path
+import time
+from typing import Optional, Union, Dict, Any
 
+from logging.handlers import RotatingFileHandler
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to console output."""
@@ -101,8 +105,7 @@ def setup_logging(
     # File handler with rotation and error handling
     file_handler = None
     try:
-        from logging.handlers import RotatingFileHandler
-        
+       
         # Test if we can write to the file first
         log_file_path_resolved.touch()  # Create file if it doesn't exist
         
@@ -141,13 +144,19 @@ def setup_logging(
         # Also silence other commonly verbose libraries
         logging.getLogger('PIL').setLevel(logging.WARNING)
         logging.getLogger('fontTools').setLevel(logging.WARNING)
+
+        # Silence boto3/botocore verbose debug logs
+        logging.getLogger('boto3').setLevel(logging.WARNING)
+        logging.getLogger('botocore').setLevel(logging.WARNING)
+        logging.getLogger('botocore.httpsession').setLevel(logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
         
         # Optionally silence TensorFlow verbose logs (uncomment if needed)
         # logging.getLogger('tensorflow').setLevel(logging.ERROR)
         # logging.getLogger('tensorflow.python.platform').setLevel(logging.ERROR)
         
         setup_logger = logging.getLogger(__name__)
-        setup_logger.info("Matplotlib and PIL verbose logging silenced (WARNING level and above will still show)")
+        setup_logger.info("Third-party library verbose logging silenced: matplotlib, PIL, boto3/botocore (WARNING level and above will still show)")
     
     # Log the setup completion
     setup_logger = logging.getLogger(__name__)
@@ -155,7 +164,7 @@ def setup_logging(
     setup_logger.info(f"Log file: {log_file_path_resolved}")
     
     if silence_matplotlib:
-        setup_logger.info("Third-party library verbose logging silenced (matplotlib, PIL)")
+        setup_logger.info("Third-party library verbose logging silenced (matplotlib, PIL, boto3/botocore)")
     
     if file_handler:
         # Force a test write to ensure file logging works
@@ -313,12 +322,9 @@ if __name__ == "__main__":
     
     # Test timed operation
     with TimedOperation("data loading"):
-        import time
         time.sleep(1)  # Simulate work
     
     # Test matplotlib logging (should be silenced)
-    import matplotlib.pyplot as plt
-    import matplotlib.font_manager
     print("Testing matplotlib - verbose logs should be silenced...")
     plt.figure()
     plt.plot([1, 2, 3], [1, 4, 9])
