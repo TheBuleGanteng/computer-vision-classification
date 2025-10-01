@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useCallback } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
+import { logger } from '@/lib/logger';
 
 // Register Dagre layout (always available)
 cytoscape.use(dagre);
@@ -22,10 +23,10 @@ const loadELK = async (): Promise<boolean> => {
       const elk = await import('cytoscape-elk');
       cytoscape.use(elk.default || elk);
       elkAvailable = true;
-      console.log('ELK layout loaded successfully');
+      logger.log('ELK layout loaded successfully');
       return true;
     } catch (error) {
-      console.warn('ELK layout failed to load, using Dagre fallback:', error);
+      logger.warn('ELK layout failed to load, using Dagre fallback:', error);
       elkAvailable = false;
       return false;
     }
@@ -539,7 +540,7 @@ export const ModelGraph = React.forwardRef<
   // Debug logging for layout calculation
   React.useEffect(() => {
     if (architectureData?.nodes) {
-      console.log('🔧 Layout calculation:', {
+      logger.log('🔧 Layout calculation:', {
         nodeCount,
         hasMultipleDense,
         optimalLayout,
@@ -726,8 +727,8 @@ export const ModelGraph = React.forwardRef<
         edge.style('font-weight', 'normal');
       }
     });
-    
-    console.log('Reset animations and restored tensor transform labels'); // Debug log
+
+    logger.log('Reset animations and restored tensor transform labels'); // Debug log
   };
 
   const runSingleAnimationCycle = () => {
@@ -776,7 +777,7 @@ export const ModelGraph = React.forwardRef<
           } finally {
             const rafDuration = performance.now() - rafStart;
             if (rafDuration > 16.67) {
-              console.warn(`🎨 Cytoscape RAF slow: ${rafDuration.toFixed(2)}ms in forward pass animation`);
+              logger.warn(`🎨 Cytoscape RAF slow: ${rafDuration.toFixed(2)}ms in forward pass animation`);
             }
           }
           
@@ -823,7 +824,7 @@ export const ModelGraph = React.forwardRef<
           } finally {
             const rafDuration = performance.now() - rafStart;
             if (rafDuration > 16.67) {
-              console.warn(`🎨 Cytoscape RAF slow: ${rafDuration.toFixed(2)}ms in backward pass animation`);
+              logger.warn(`🎨 Cytoscape RAF slow: ${rafDuration.toFixed(2)}ms in backward pass animation`);
             }
           }
           
@@ -872,11 +873,11 @@ export const ModelGraph = React.forwardRef<
   };
 
   const toggleAnimation = () => {
-    console.log('Toggle animation clicked, current state:', isAnimating); // Debug log
-    
+    logger.log('Toggle animation clicked, current state:', isAnimating); // Debug log
+
     if (isAnimating) {
       // Stop animation
-      console.log('Stopping animation'); // Debug log
+      logger.log('Stopping animation'); // Debug log
       setIsAnimating(false);
       isAnimatingRef.current = false;
       if (animationIntervalRef.current) {
@@ -887,13 +888,13 @@ export const ModelGraph = React.forwardRef<
       resetAnimations();
     } else {
       // Start animation loop
-      console.log('Starting animation'); // Debug log
+      logger.log('Starting animation'); // Debug log
       setIsAnimating(true);
       isAnimatingRef.current = true;
       resetAnimations();
-      
+
       // Start immediately since we're using ref
-      console.log('Starting animation cycle immediately'); // Debug log
+      logger.log('Starting animation cycle immediately'); // Debug log
       runSingleAnimationCycle();
     }
   };
@@ -910,7 +911,7 @@ export const ModelGraph = React.forwardRef<
   // PNG Export function
   const exportToPNG = React.useCallback(async (): Promise<Blob | null> => {
     if (!cyRef.current) {
-      console.warn('Cytoscape instance not available for PNG export');
+      logger.warn('Cytoscape instance not available for PNG export');
       return null;
     }
 
@@ -943,10 +944,10 @@ export const ModelGraph = React.forwardRef<
         runSingleAnimationCycle();
       }
 
-      console.log('PNG export successful');
+      logger.log('PNG export successful');
       return pngBlob;
     } catch (error) {
-      console.error('PNG export failed:', error);
+      logger.error('PNG export failed:', error);
       return null;
     }
   }, [setIsAnimating]); // eslint-disable-line react-hooks/exhaustive-deps

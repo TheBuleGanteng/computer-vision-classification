@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 // import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, Download, ExternalLink, AlertCircle, BarChart3, Activity, Zap, Maximize2, Minimize2, Brain, Target, Play, Skull, TrendingUp, LineChart } from 'lucide-react';
+import { logger } from '@/lib/logger';
 
 interface TrainingMetricsPanelProps {
   jobId: string;
@@ -63,7 +64,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
       
       const response = await fetch(endpoint);
       if (!response.ok) {
-        console.warn('⚠️ Plots API response not ok:', response.status, response.statusText);
+        logger.warn('⚠️ Plots API response not ok:', response.status, response.statusText);
         if (response.status === 404) {
           return null; // No plots available yet
         }
@@ -89,7 +90,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
     queryFn: async (): Promise<TensorBoardConfig | null> => {
       const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
       if (!response.ok) {
-        console.warn('⚠️ TensorBoard config not available:', response.status, response.statusText);
+        logger.warn('⚠️ TensorBoard config not available:', response.status, response.statusText);
         return null; // TensorBoard not available
       }
       const config = await response.json();
@@ -265,7 +266,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                       // Fetch the plot image as blob
                       const response = await fetch(fullUrl);
                       if (!response.ok) {
-                        console.error('Failed to fetch plot image:', response.status);
+                        logger.error('Failed to fetch plot image:', response.status);
                         window.open(fullUrl, '_blank'); // Fallback to open in new tab
                         return;
                       }
@@ -289,14 +290,14 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                           const writable = await fileHandle.createWritable();
                           await writable.write(plotBlob);
                           await writable.close();
-                          console.log('Plot saved successfully');
+                          logger.log('Plot saved successfully');
                           return;
                         } catch (saveError: unknown) {
                           if ((saveError as Error).name === 'AbortError') {
-                            console.log('Save dialog was cancelled by user');
+                            logger.log('Save dialog was cancelled by user');
                             return;
                           }
-                          console.warn('Save As dialog failed, falling back to download:', saveError);
+                          logger.warn('Save As dialog failed, falling back to download:', saveError);
                         }
                       }
 
@@ -309,9 +310,9 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                       link.click();
                       document.body.removeChild(link);
                       URL.revokeObjectURL(url);
-                      console.log('Plot downloaded successfully (fallback method)');
+                      logger.log('Plot downloaded successfully (fallback method)');
                     } catch (error) {
-                      console.error('Failed to download plot:', error);
+                      logger.error('Failed to download plot:', error);
                       // Final fallback - open in new tab
                       const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
                       window.open(fullUrl, '_blank');
@@ -380,9 +381,9 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                       unoptimized={true}
                       onError={(e) => {
                         const fullUrl = `${API_BASE_URL}${currentPlot.url}`;
-                        console.error('❌ Failed to load plot:', fullUrl);
-                        console.error('❌ Plot data:', { plot_type: currentPlot.plot_type, filename: currentPlot.filename, url: currentPlot.url });
-                        console.error('❌ API_BASE_URL:', API_BASE_URL);
+                        logger.error('❌ Failed to load plot:', fullUrl);
+                        logger.error('❌ Plot data:', { plot_type: currentPlot.plot_type, filename: currentPlot.filename, url: currentPlot.url });
+                        logger.error('❌ API_BASE_URL:', API_BASE_URL);
                         const target = e.target as HTMLImageElement;
                         target.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDIwMCAxMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjIwMCIgaGVpZ2h0PSIxMDAiIGZpbGw9IiNmM2Y0ZjYiLz48dGV4dCB4PSIxMDAiIHk9IjUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjM2MzYzIj5QbG90IGZhaWxlZCB0byBsb2FkPC90ZXh0Pjwvc3ZnPg==';
                         target.style.maxHeight = '200px';

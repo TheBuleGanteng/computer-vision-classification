@@ -2,8 +2,8 @@
 // Provides data fetching, caching, and state management
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { 
-  getBestModelVisualization, 
+import {
+  getBestModelVisualization,
   downloadVisualizationFile,
   hasVisualizationData,
   VisualizationAPIError,
@@ -11,6 +11,7 @@ import {
 } from '@/lib/api/visualization';
 import { BestModelResponse } from '@/types/visualization';
 import { toast } from 'sonner';
+import { logger } from '@/lib/logger';
 
 /**
  * Hook to fetch 3D visualization data for a job's best model
@@ -85,7 +86,7 @@ export function useVisualizationDownload() {
       toast.success('Visualization data downloaded successfully');
     },
     onError: (error) => {
-      console.error('Download failed:', error);
+      logger.error('Download failed:', error);
       toast.error(`Download failed: ${error.message}`);
     },
   });

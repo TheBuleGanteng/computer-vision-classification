@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@
 import { useDashboard } from "./dashboard-provider"
 import { apiClient } from "@/lib/api-client"
 import { TrialProgress } from "@/types/optimization"
-import { 
+import {
   Eye,
   Target,
   Activity,
@@ -18,6 +18,7 @@ import {
   Download,
   Loader2
 } from "lucide-react"
+import { logger } from "@/lib/logger"
 import { UnifiedEducationalInterface } from "@/components/visualization/unified-educational-interface"
 import { useModelVisualization, useVisualizationDownload } from "@/hooks/use-model-visualization"
 
@@ -94,18 +95,18 @@ export function TrialGallery() {
       const rawTrials = response.trials || []
       
       // 🔍 DEBUG: Log all trial data received from API
-      console.log('🔍 FRONTEND TRIAL DATA DEBUG:')
-      console.log(`  📊 Total trials received: ${rawTrials.length}`)
+      logger.log('🔍 FRONTEND TRIAL DATA DEBUG:')
+      logger.log(`  📊 Total trials received: ${rawTrials.length}`)
       if (rawTrials.length > 0) {
         const sampleTrial = rawTrials[0]
-        console.log(`  📊 Sample trial structure:`, sampleTrial)
-        console.log(`  📊 Sample performance:`, sampleTrial.performance)
-        console.log(`  📊 Sample health_metrics:`, sampleTrial.health_metrics)
+        logger.log(`  📊 Sample trial structure:`, sampleTrial)
+        logger.log(`  📊 Sample performance:`, sampleTrial.performance)
+        logger.log(`  📊 Sample health_metrics:`, sampleTrial.health_metrics)
         if (sampleTrial.health_metrics) {
-          console.log(`  📊 Health metrics keys:`, Object.keys(sampleTrial.health_metrics))
-          console.log(`  📊 convergence_quality:`, sampleTrial.health_metrics.convergence_quality)
-          console.log(`  📊 accuracy_consistency:`, sampleTrial.health_metrics.accuracy_consistency)
-          console.log(`  📊 gradient_health:`, sampleTrial.health_metrics.gradient_health)
+          logger.log(`  📊 Health metrics keys:`, Object.keys(sampleTrial.health_metrics))
+          logger.log(`  📊 convergence_quality:`, sampleTrial.health_metrics.convergence_quality)
+          logger.log(`  📊 accuracy_consistency:`, sampleTrial.health_metrics.accuracy_consistency)
+          logger.log(`  📊 gradient_health:`, sampleTrial.health_metrics.gradient_health)
         }
       }
 
@@ -119,10 +120,10 @@ export function TrialGallery() {
       })
       
       setTrials(uniqueTrials)
-      console.log('Fetched trial history:', response)
-      console.log('Deduplicated trials:', uniqueTrials)
+      logger.log('Fetched trial history:', response)
+      logger.log('Deduplicated trials:', uniqueTrials)
     } catch (err) {
-      console.error('Failed to fetch trial history:', err)
+      logger.error('Failed to fetch trial history:', err)
       setError(err instanceof Error ? err.message : 'Failed to fetch trial data')
       // Fallback to empty array on error
       setTrials([])
@@ -198,7 +199,7 @@ export function TrialGallery() {
   // Debug logging for best trial identification
   useEffect(() => {
     if (bestTrial) {
-      console.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${((bestTrial.performance?.total_score ?? 0) * 100).toFixed(1)}%`)
+      logger.log(`🏆 BEST TRIAL IDENTIFIED: Trial ${bestTrial.trial_number} with score ${((bestTrial.performance?.total_score ?? 0) * 100).toFixed(1)}%`)
     }
   }, [bestTrial])
 

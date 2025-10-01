@@ -17,6 +17,7 @@ import {
 } from "lucide-react"
 import { TrialProgress } from "@/types/optimization"
 import { ProgressData } from "./dashboard-provider"
+import { logger } from "@/lib/logger"
 
 // Supported datasets from your optimization system
 const DATASETS = [
@@ -77,7 +78,7 @@ export function OptimizationControls() {
       if (currentJobId) {
         checkModelAvailability(currentJobId)
       }
-      console.log("Optimization completed successfully")
+      logger.log("Optimization completed successfully")
     } else if (jobStatus.status === 'failed' || jobStatus.status === 'cancelled') {
       setIsOptimizationRunning(false)
       setCurrentJobId(null)
@@ -86,7 +87,7 @@ export function OptimizationControls() {
       if (jobStatus.error) {
         setError(jobStatus.error)
       }
-      console.log(`Optimization ${jobStatus.status}`)
+      logger.log(`Optimization ${jobStatus.status}`)
     }
   }, [jobStatus?.status, jobStatus?.error, jobStatus, currentJobId, setIsOptimizationRunning, setCurrentJobId, setProgress])
   
@@ -101,7 +102,7 @@ export function OptimizationControls() {
 
   // Memoize weight config handler to prevent infinite re-renders
   const handleWeightConfigChange = useCallback((config: WeightConfig) => {
-    console.log('[OptimizationControls] Received weight configuration from WeightSliders:', config)
+    logger.log('[OptimizationControls] Received weight configuration from WeightSliders:', config)
     setWeightConfig(config)
   }, [])
 
@@ -117,7 +118,7 @@ export function OptimizationControls() {
         }
         setDefaultWeights(config)
       } catch (err) {
-        console.error("Failed to fetch default weights:", err)
+        logger.error("Failed to fetch default weights:", err)
         // Use fallback defaults if API call fails
         setDefaultWeights({
           accuracyWeight: 0.70,
@@ -165,9 +166,9 @@ export function OptimizationControls() {
         setIsOptimizationRunning(false)
         setCurrentJobId(null)
         setIsModelAvailable(false) // Reset model availability on cancellation
-        console.log("Optimization cancelled successfully")
+        logger.log("Optimization cancelled successfully")
       } catch (err) {
-        console.error("Failed to cancel optimization:", err)
+        logger.error("Failed to cancel optimization:", err)
         setError(err instanceof Error ? err.message : "Failed to cancel optimization")
       }
     } else {
@@ -191,7 +192,7 @@ export function OptimizationControls() {
           request.health_overall_weight = weightConfig.healthOverallWeight
           request.health_component_proportions = weightConfig.healthComponentProportions
 
-          console.log('[OptimizationControls] Using custom weight configuration:', {
+          logger.log('[OptimizationControls] Using custom weight configuration:', {
             accuracy_weight: `${(weightConfig.accuracyWeight * 100).toFixed(1)}% (${weightConfig.accuracyWeight.toFixed(3)})`,
             health_overall_weight: `${(weightConfig.healthOverallWeight * 100).toFixed(1)}% (${weightConfig.healthOverallWeight.toFixed(3)})`,
             health_component_proportions: Object.entries(weightConfig.healthComponentProportions).map(([key, value]) =>
@@ -199,7 +200,7 @@ export function OptimizationControls() {
             )
           })
         } else {
-          console.log('[OptimizationControls] No custom weights configured - backend will use defaults')
+          logger.log('[OptimizationControls] No custom weights configured - backend will use defaults')
         }
 
         // Update dashboard context (deprecated but still used by some components)
@@ -207,7 +208,7 @@ export function OptimizationControls() {
         setHealthWeight(healthWeight)
         // All other parameters will use API defaults from OptimizationRequest
 
-        console.log('[OptimizationControls] Sending optimization request to API:', request)
+        logger.log('[OptimizationControls] Sending optimization request to API:', request)
 
         const response = await apiClient.startOptimization(request as typeof request & { dataset_name: string, mode: 'simple' | 'health' })
         
@@ -216,13 +217,13 @@ export function OptimizationControls() {
         setIsModelAvailable(false) // Reset model availability for new optimization
         setCurrentJobId(response.job_id)
         
-        console.log(`Optimization started with job ID: ${response.job_id}`)
+        logger.log(`Optimization started with job ID: ${response.job_id}`)
         
         // Start polling for progress updates
         startProgressPolling()
         
       } catch (err) {
-        console.error("Failed to start optimization:", err)
+        logger.error("Failed to start optimization:", err)
         const errorMessage = err instanceof Error ? err.message : 
           (typeof err === 'string' ? err : `Unknown error: ${JSON.stringify(err)}`)
         setError(errorMessage)
@@ -236,9 +237,9 @@ export function OptimizationControls() {
       // Check if the final model has been built and is available for download
       const hasModelPath = results?.model_result?.model_path
       setIsModelAvailable(!!hasModelPath)
-      console.log("Model availability check:", hasModelPath ? "Available" : "Not available")
+      logger.log("Model availability check:", hasModelPath ? "Available" : "Not available")
     } catch (err) {
-      console.error("Failed to check model availability:", err)
+      logger.error("Failed to check model availability:", err)
       setIsModelAvailable(false)
     }
   }
@@ -270,15 +271,15 @@ export function OptimizationControls() {
           await writable.write(blob)
           await writable.close()
           
-          console.log("Model package saved to user-selected location")
+          logger.log("Model package saved to user-selected location")
           return
         } catch (err: unknown) {
           // User cancelled the save dialog or API not supported
           if ((err as Error).name === 'AbortError') {
-            console.log("User cancelled save dialog")
+            logger.log("User cancelled save dialog")
             return
           }
-          console.log("File System Access API failed, falling back to traditional method")
+          logger.log("File System Access API failed, falling back to traditional method")
         }
       }
       
@@ -303,9 +304,9 @@ export function OptimizationControls() {
         }, 100)
       }
       
-      console.log("Model package download initiated - save dialog should appear")
+      logger.log("Model package download initiated - save dialog should appear")
     } catch (err) {
-      console.error("Failed to download model package:", err)
+      logger.error("Failed to download model package:", err)
       setError(err instanceof Error ? err.message : "Failed to download model package")
     }
   }
