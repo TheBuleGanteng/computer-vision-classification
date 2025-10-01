@@ -954,19 +954,19 @@ print(f"Best score: {result.best_total_score}")
 8. **Direct Optimizer Call** (Programmatic usage)
 
 
-### **ROADMAP PHASE 2: REMOVING HARDCODED HEALTH WEIGHTS (COPILOT FLAG)**
+### **ROADMAP PHASE 2: USER-ADJUSTABLE SCORING WEIGHTS (COPILOT FLAG RESOLUTION)**
 
 **Status**: Not started
 
 **Objective:**
-Eliminate hardcoded health component weights from the frontend to prevent sync issues with backend. Implement single source of truth by using backend-calculated health scores directly, removing frontend duplication of business logic.
+Implement user-adjustable weight sliders in the UI to allow customization of how accuracy and health components contribute to the overall optimization score. This eliminates hardcoded weight duplication while providing educational transparency into scoring calculations and enabling users to prioritize metrics according to their specific use case.
 
 ---
 
 #### **Problem Analysis**
 
 **Current Issue:**
-Health component weights are duplicated in two locations:
+Health component weights are hardcoded and duplicated in two locations:
 1. **Backend**: `src/health_analyzer.py` (Python) - Authoritative source
    ```python
    COMPONENT_WEIGHTS = {
@@ -991,256 +991,473 @@ Health component weights are duplicated in two locations:
    }
    ```
 
-**Risks:**
+**Additional Limitations:**
 - ❌ Violates DRY (Don't Repeat Yourself) principle
 - ❌ Backend weight changes don't propagate to frontend automatically
-- ❌ Frontend shows incorrect health scores if weights diverge
+- ❌ Users cannot customize scoring priorities for their specific use case
+- ❌ Lack of transparency in how total score is calculated
+- ❌ Educational opportunity missed (users don't understand weight impact)
 - ❌ Maintenance burden (must update two files for any weight change)
-- ❌ Potential for silent calculation errors (frontend and backend disagree)
 
 ---
 
-#### **Solution: Option 1 - Backend Calculates, Frontend Displays**
+#### **Solution: User-Adjustable Weight Sliders with Smart Auto-Balancing**
 
 **Approach:**
-- Backend's `health_analyzer.py` already calculates composite `health_score`
-- Backend API already returns `health_score` in trial results
-- Frontend should **display** pre-calculated scores, not recalculate them
-- Remove all health weight logic from frontend code
+- Define default weights in backend configuration (`src/data_classes/configs.py`)
+- Frontend fetches defaults and displays interactive sliders
+- Users adjust weights via UI before starting optimization
+- Weights sent with optimization request to backend
+- Backend calculates scores using user-provided or default weights
+- All weights always sum to 100% with automatic proportional adjustments
 
 **Benefits:**
-- ✅ Single source of truth (backend owns health calculation)
-- ✅ No duplication of business logic
-- ✅ Guaranteed consistency between backend and frontend
-- ✅ Simpler frontend code (less complexity)
-- ✅ Weight changes only require backend update
-- ✅ No API overhead (already returning health_score)
+- ✅ Single source of truth (backend defines defaults)
+- ✅ No hardcoded weight duplication
+- ✅ User customization enables use-case-specific optimization
+- ✅ Educational transparency (users see weight impact)
+- ✅ Smart auto-balancing maintains 100% total automatically
+- ✅ Per-run configuration (different runs can use different weights)
+- ✅ Mode switching preserves simplicity (simple mode = 100% accuracy)
+
+---
+
+#### **Weight Slider Architecture**
+
+##### **Three-Tier Slider System**
+
+**Tier 1: Accuracy Weight Slider** (Top-level)
+- Controls overall accuracy contribution to final score
+- Range: 0-100%
+- Default (health-aware mode): 70%
+- When changed: Health overall weight auto-adjusts to maintain 100% total
+- Simple mode: Fixed at 100% (slider disabled)
+
+**Tier 2: Health Overall Weight Slider** (Mid-level)
+- Controls overall health contribution to final score
+- Range: 0-100%
+- Default (health-aware mode): 30% (auto-calculated as 100% - accuracy weight)
+- When changed:
+  - Accuracy weight auto-adjusts to maintain 100% total
+  - All health sub-component weights scale proportionally to sum to new health overall value
+- Simple mode: Fixed at 0% (slider disabled)
+
+**Tier 3: Health Sub-Component Weight Sliders** (Bottom-level)
+- Individual sliders for each health metric component
+- Values represent proportion of health overall weight (not absolute percentage)
+- Default proportions (sum to 1.0, multiplied by health overall weight):
+  - neuron_utilization: 25%
+  - parameter_efficiency: 15%
+  - training_stability: 20%
+  - gradient_health: 15%
+  - convergence_quality: 15%
+  - accuracy_consistency: 10%
+- When one changed: Others auto-adjust proportionally to maintain sum = health overall weight
+- Simple mode: All fixed at 0% (sliders disabled/hidden)
+
+##### **Auto-Balancing Rules**
+
+**Rule 1: Total Score Always Sums to 100%**
+```
+accuracy_weight + health_overall_weight = 100%
+```
+
+**Rule 2: Health Sub-Components Always Sum to Health Overall**
+```
+neuron_utilization + parameter_efficiency + training_stability +
+gradient_health + convergence_quality + accuracy_consistency = health_overall_weight
+```
+
+**Rule 3: Proportional Scaling**
+- When health overall changes, all sub-components scale proportionally:
+  ```
+  new_sub_component_weight = old_sub_component_proportion × new_health_overall_weight
+  ```
+- When one sub-component changes, others scale to maintain sum:
+  ```
+  remaining_weight = health_overall_weight - changed_component_weight
+  other_components_scale_proportionally_to_fill(remaining_weight)
+  ```
+
+##### **Example Weight Adjustments**
+
+**Example 1: User increases accuracy weight**
+- **Initial**: Accuracy 70%, Health 30%
+  - Sub-components: neuron 7.5%, parameter 4.5%, stability 6.0%, gradient 4.5%, convergence 4.5%, consistency 3.0%
+- **User changes**: Accuracy slider → 80%
+- **Auto-adjustments**:
+  - Health overall: 30% → 20%
+  - neuron: 7.5% → 5.0% (0.25 × 20%)
+  - parameter: 4.5% → 3.0% (0.15 × 20%)
+  - stability: 6.0% → 4.0% (0.20 × 20%)
+  - gradient: 4.5% → 3.0% (0.15 × 20%)
+  - convergence: 4.5% → 3.0% (0.15 × 20%)
+  - consistency: 3.0% → 2.0% (0.10 × 20%)
+
+**Example 2: User increases health overall weight**
+- **Initial**: Accuracy 70%, Health 30%
+- **User changes**: Health overall slider → 40%
+- **Auto-adjustments**:
+  - Accuracy: 70% → 60%
+  - Health overall: 30% → 40%
+  - neuron: 7.5% → 10.0% (0.25 × 40%)
+  - parameter: 4.5% → 6.0% (0.15 × 40%)
+  - stability: 6.0% → 8.0% (0.20 × 40%)
+  - gradient: 4.5% → 6.0% (0.15 × 40%)
+  - convergence: 4.5% → 6.0% (0.15 × 40%)
+  - consistency: 3.0% → 4.0% (0.10 × 40%)
+
+**Example 3: User increases neuron_utilization sub-component**
+- **Initial**: Accuracy 70%, Health 30%, neuron 7.5% (25% of health)
+- **User changes**: neuron_utilization slider → 35% of health portion
+- **Auto-adjustments**:
+  - Accuracy: 70% (unchanged)
+  - Health overall: 30% (unchanged)
+  - neuron: 7.5% → 10.5% (0.35 × 30%)
+  - Remaining sub-components scale down proportionally to sum to 19.5%:
+    - parameter: 4.5% → ~3.69%
+    - stability: 6.0% → ~4.92%
+    - gradient: 4.5% → ~3.69%
+    - convergence: 4.5% → ~3.69%
+    - consistency: 3.0% → ~2.46%
+
+##### **Optimization Mode Integration**
+
+**Simple Mode**:
+- Accuracy weight: 100% (slider disabled/read-only)
+- Health overall: 0% (slider disabled/read-only)
+- All health sub-components: 0% (sliders disabled/hidden)
+- Final score = test_accuracy only
+
+**Health-Aware Mode**:
+- All sliders enabled and adjustable
+- Default: Accuracy 70%, Health 30%
+- Sub-component defaults as defined above
+- Final score = (accuracy_weight × test_accuracy) + (health_overall_weight × composite_health_score)
+
+**Mode Switching Behavior**:
+- Simple → Health-Aware: Restore default weights (70% accuracy, 30% health)
+- Health-Aware → Simple: Lock to 100% accuracy, 0% health
+- Custom weights **not preserved** when switching modes (revert to defaults)
 
 ---
 
 #### **Implementation Plan**
 
-##### **Phase 2.1: Code Audit and Analysis**
+##### **Phase 2.1: Backend Configuration and API Updates**
 
-**Step 1: Identify All Frontend Health Weight Usage**
-- **Action**: Search frontend codebase for hardcoded weights
-  ```bash
-  grep -r "HEALTH_COMPONENT_WEIGHTS" web-ui/src/
-  grep -r "neuron_health.*0.25" web-ui/src/
-  grep -r "parameter_efficiency.*0.15" web-ui/src/
+**Step 1: Move Default Weights to Backend Configuration**
+- **File**: `src/data_classes/configs.py`
+- **Action**: Add weight configuration to `OptimizationConfig` dataclass
+- **Changes**:
+  ```python
+  @dataclass
+  class OptimizationConfig:
+      # Existing fields...
+
+      # Scoring weight configuration (health-aware mode defaults)
+      accuracy_weight: float = 0.70
+      health_overall_weight: float = 0.30  # Auto-calculated: 1.0 - accuracy_weight
+
+      # Health sub-component proportions (sum to 1.0, multiplied by health_overall_weight)
+      health_component_proportions: Dict[str, float] = field(default_factory=lambda: {
+          'neuron_utilization': 0.25,
+          'parameter_efficiency': 0.15,
+          'training_stability': 0.20,
+          'gradient_health': 0.15,
+          'convergence_quality': 0.15,
+          'accuracy_consistency': 0.10
+      })
+
+      def __post_init__(self):
+          # Validate weights sum to 1.0
+          if self.optimization_mode == OptimizationMode.SIMPLE:
+              self.accuracy_weight = 1.0
+              self.health_overall_weight = 0.0
+          else:
+              # Ensure accuracy + health = 1.0
+              self.health_overall_weight = 1.0 - self.accuracy_weight
+
+          # Validate health component proportions sum to 1.0
+          component_sum = sum(self.health_component_proportions.values())
+          if not (0.99 <= component_sum <= 1.01):  # Allow small floating point errors
+              raise ValueError(f"Health component proportions must sum to 1.0, got {component_sum}")
   ```
-- **Expected Files**:
-  - `web-ui/src/components/dashboard/summary-stats.tsx` (confirmed)
-  - Any other components calculating health scores
-- **Documentation**: List all files using hardcoded weights
 
-**Step 2: Verify Backend API Returns Health Scores**
-- **Action**: Check API response structure for trial results
-- **Endpoints to verify**:
-  - `GET /jobs/{job_id}/status` - Returns trial results with health_score
-  - `GET /jobs/{job_id}/best-model` - Returns best model with health_score
-- **Expected Response**:
-  ```json
-  {
-    "trials": [
-      {
-        "trial_number": 0,
-        "health_score": 0.78,
-        "test_accuracy": 0.95,
-        ...
+**Step 2: Create API Endpoint for Default Weights**
+- **File**: `src/api_server.py`
+- **Action**: Add endpoint to fetch default weight configuration
+- **New Endpoint**:
+  ```python
+  @app.get("/api/default-scoring-weights")
+  async def get_default_scoring_weights():
+      """Return default scoring weight configuration for UI sliders."""
+      return {
+          "accuracy_weight": 0.70,
+          "health_overall_weight": 0.30,
+          "health_component_proportions": {
+              "neuron_utilization": 0.25,
+              "parameter_efficiency": 0.15,
+              "training_stability": 0.20,
+              "gradient_health": 0.15,
+              "convergence_quality": 0.15,
+              "accuracy_consistency": 0.10
+          }
       }
-    ]
-  }
   ```
-- **Validation**: Confirm `health_score` field present in all relevant endpoints
 
-**Step 3: Review Frontend Health Score Display Logic**
-- **Action**: Understand how frontend currently uses health scores
-- **Questions to answer**:
-  - Does frontend recalculate health scores from components?
-  - Does frontend display pre-calculated backend health scores?
-  - Are health weights used for anything besides score calculation?
-  - Does UI show individual health component breakdowns?
-- **Documentation**: Document current frontend health score usage patterns
+**Step 3: Update OptimizationRequest to Accept Custom Weights**
+- **File**: `src/api_server.py`
+- **Action**: Add optional weight parameters to `OptimizationRequest` model
+- **Changes**:
+  ```python
+  class OptimizationRequest(BaseModel):
+      # Existing fields...
+
+      # Optional custom scoring weights (if not provided, use defaults)
+      accuracy_weight: Optional[float] = None
+      health_overall_weight: Optional[float] = None
+      health_component_proportions: Optional[Dict[str, float]] = None
+  ```
+
+**Step 4: Update create_optimization_config() to Handle Custom Weights**
+- **File**: `src/api_server.py`
+- **Action**: Pass user-provided weights to `OptimizationConfig`
+- **Changes**:
+  ```python
+  def create_optimization_config(request: OptimizationRequest) -> OptimizationConfig:
+      config = OptimizationConfig(
+          # Existing parameters...
+
+          # Custom weights (if provided)
+          accuracy_weight=request.accuracy_weight if request.accuracy_weight is not None else 0.70,
+          health_component_proportions=request.health_component_proportions if request.health_component_proportions else None
+      )
+      return config
+  ```
+
+**Step 5: Update Health Analyzer to Use Configurable Weights**
+- **File**: `src/health_analyzer.py`
+- **Action**: Accept weight configuration from OptimizationConfig
+- **Changes**:
+  ```python
+  class HealthAnalyzer:
+      def __init__(self, optimization_config: Optional[OptimizationConfig] = None):
+          # Use config weights if provided, otherwise use defaults
+          if optimization_config and optimization_config.health_component_proportions:
+              self.component_weights = optimization_config.health_component_proportions
+          else:
+              # Fallback to current hardcoded defaults
+              self.component_weights = {
+                  'neuron_utilization': 0.25,
+                  'parameter_efficiency': 0.15,
+                  'training_stability': 0.20,
+                  'gradient_health': 0.15,
+                  'convergence_quality': 0.15,
+                  'accuracy_consistency': 0.10
+              }
+  ```
+
+**Step 6: Update Optimizer Score Calculation**
+- **File**: `src/optimizer.py`
+- **Action**: Use configurable accuracy_weight and health_overall_weight for final score
+- **Changes**:
+  ```python
+  # In _objective_function() or wherever total score is calculated
+  if self.config.optimization_mode == OptimizationMode.SIMPLE:
+      total_score = test_accuracy
+  else:  # HEALTH_AWARE
+      # Use configurable weights instead of hardcoded 0.5/0.5
+      total_score = (
+          self.config.accuracy_weight * test_accuracy +
+          self.config.health_overall_weight * health_score
+      )
+  ```
 
 ---
 
-##### **Phase 2.2: Frontend Code Refactoring**
+##### **Phase 2.2: Frontend Weight Slider UI Implementation**
 
-**Step 4: Remove Hardcoded Health Weights**
+**Step 7: Remove Hardcoded Frontend Weights from summary-stats.tsx**
 - **File**: `web-ui/src/components/dashboard/summary-stats.tsx`
-- **Changes**:
-  1. Delete `HEALTH_COMPONENT_WEIGHTS` constant definition
-  2. Remove any local health score calculation logic
-  3. Use `trial.health_score` directly from API response
-- **Before**:
-  ```typescript
-  const HEALTH_COMPONENT_WEIGHTS = { ... }
-  const calculatedHealthScore = calculateHealthScore(components, HEALTH_COMPONENT_WEIGHTS)
-  ```
-- **After**:
-  ```typescript
-  const healthScore = trial.health_score // Use backend-calculated value
-  ```
+- **Action**: Delete `HEALTH_COMPONENT_WEIGHTS` constant
+- **Expected**: File compiles without errors after removal
 
-**Step 5: Update TypeScript Interfaces**
-- **File**: `web-ui/src/types/` (or wherever trial types are defined)
-- **Changes**:
-  - Ensure `Trial` interface includes `health_score: number` field
-  - Add JSDoc comments indicating backend calculates this value
-- **Example**:
+**Step 8: Create Weight Slider Component**
+- **File**: `web-ui/src/components/optimization/weight-sliders.tsx` (new file)
+- **Action**: Create React component with three-tier slider system
+- **Features**:
+  - Tier 1: Accuracy weight slider (0-100%)
+  - Tier 2: Health overall weight slider (0-100%)
+  - Tier 3: Six health sub-component sliders
+  - Auto-balancing logic on slider change
+  - Mode-aware enable/disable (simple vs health-aware)
+  - Visual percentage displays next to sliders
+- **State Management**:
   ```typescript
-  interface Trial {
-    trial_number: number
-    test_accuracy: number
-    health_score: number  // Calculated by backend health_analyzer.py
-    // ... other fields
+  interface WeightState {
+    accuracyWeight: number
+    healthOverallWeight: number
+    healthComponentProportions: {
+      neuronUtilization: number
+      parameterEfficiency: number
+      trainingStability: number
+      gradientHealth: number
+      convergenceQuality: number
+      accuracyConsistency: number
+    }
   }
   ```
 
-**Step 6: Remove Any Health Calculation Helper Functions**
-- **Action**: Search for and remove frontend health calculation utilities
-  ```bash
-  grep -r "calculateHealth" web-ui/src/
-  grep -r "computeHealth" web-ui/src/
-  ```
-- **Files to check**:
-  - `web-ui/src/lib/` (utility functions)
-  - `web-ui/src/utils/` (helper functions)
-- **Changes**: Delete any functions that recalculate health scores from components
+**Step 9: Implement Auto-Balancing Logic**
+- **File**: `web-ui/src/components/optimization/weight-sliders.tsx`
+- **Action**: Add functions for proportional weight adjustments
+- **Functions**:
+  - `handleAccuracyChange()` - Adjusts health overall to maintain 100%
+  - `handleHealthOverallChange()` - Adjusts accuracy + scales all sub-components
+  - `handleSubComponentChange()` - Adjusts other sub-components proportionally
+  - `validateWeights()` - Ensures all weights sum correctly
 
-**Step 7: Update Frontend Tests**
-- **Files**: Any test files that mock health score calculations
-- **Changes**:
-  - Remove tests for frontend health calculation logic (no longer exists)
-  - Update mocks to include `health_score` field in API responses
-  - Add tests verifying frontend displays backend health scores correctly
-- **Example Test Update**:
+**Step 10: Integrate Weight Sliders into Configuration UI**
+- **File**: `web-ui/src/components/optimization/configuration-panel.tsx`
+- **Action**: Add weight sliders below optimization mode dropdown
+- **Conditional Rendering**:
+  - Simple mode: Hide sliders or show disabled (100% accuracy)
+  - Health-aware mode: Show enabled sliders with defaults
+
+**Step 11: Fetch Default Weights from Backend on Component Mount**
+- **File**: `web-ui/src/components/optimization/weight-sliders.tsx`
+- **Action**: Call new `/api/default-scoring-weights` endpoint
+- **Hook**:
   ```typescript
-  // BEFORE: Test frontend calculation
-  test('calculates health score correctly', () => {
-    const score = calculateHealthScore(components, weights)
-    expect(score).toBe(0.78)
-  })
+  useEffect(() => {
+    fetch('/api/default-scoring-weights')
+      .then(res => res.json())
+      .then(defaults => setWeights(defaults))
+  }, [])
+  ```
 
-  // AFTER: Test frontend displays backend value
-  test('displays backend health score', () => {
-    const trial = { health_score: 0.78, ... }
-    render(<SummaryStats trial={trial} />)
-    expect(screen.getByText('0.78')).toBeInTheDocument()
-  })
+**Step 12: Pass Custom Weights to Optimization Request**
+- **File**: `web-ui/src/components/optimization/configuration-panel.tsx`
+- **Action**: Include weight state in POST /optimize request body
+- **Request Payload**:
+  ```typescript
+  {
+    dataset_name: "mnist",
+    trials: 2,
+    optimization_mode: "health-aware",
+    accuracy_weight: 0.70,  // From slider state
+    health_overall_weight: 0.30,
+    health_component_proportions: { ... }  // From slider state
+  }
   ```
 
 ---
 
 ##### **Phase 2.3: Testing and Validation**
 
-**Step 8: Backend API Testing**
-- **Action**: Verify backend returns health_score in all scenarios
+**Step 13: Backend Unit Testing**
+- **Action**: Test backend weight configuration handling
 - **Test Cases**:
-  1. Single trial optimization - `health_score` present in response
-  2. Multi-trial optimization - All trials have `health_score` field
-  3. Best model endpoint - `health_score` included
-  4. Edge case: Health monitoring disabled - `health_score` is null or 0.0
-- **Commands**:
-  ```bash
-  # Test single trial run
-  curl -X POST http://localhost:8000/optimize -d '{"dataset_name":"mnist","trials":1}'
+  1. Default weights used when no custom weights provided
+  2. Custom weights accepted via API and passed to health_analyzer
+  3. Weight validation (must sum to 1.0)
+  4. Simple mode overrides to 100% accuracy regardless of custom weights
 
-  # Check response includes health_score
-  curl http://localhost:8000/jobs/{job_id}/status | jq '.trials[].health_score'
-  ```
-- **Expected**: All trials return valid `health_score` field
+**Step 14: Frontend Unit Testing - Weight Slider Component**
+- **File**: `web-ui/src/components/optimization/weight-sliders.test.tsx` (new)
+- **Test Cases**:
+  1. Sliders render with default values
+  2. Accuracy slider change triggers health overall auto-adjustment
+  3. Health overall slider change triggers accuracy + sub-component scaling
+  4. Sub-component slider change triggers other sub-components to scale
+  5. Weights always sum to 100%
+  6. Simple mode disables all sliders
+  7. Mode switch resets weights to defaults
 
-**Step 9: Frontend Unit Testing**
-- **Action**: Run frontend test suite to verify refactoring
-- **Commands**:
-  ```bash
-  cd web-ui
-  npm test
-  ```
+**Step 15: Integration Testing - Default Weights Fetch**
+- **Test**: Frontend fetches defaults from backend on mount
 - **Validation**:
-  - ✅ All tests pass
-  - ✅ No tests reference removed `HEALTH_COMPONENT_WEIGHTS`
-  - ✅ Tests verify backend health_score display
+  - API call to `/api/default-scoring-weights` succeeds
+  - Sliders initialize with backend-provided defaults
+  - Network error handled gracefully (fallback to hardcoded defaults)
 
-**Step 10: Frontend Integration Testing (Manual)**
-- **Action**: Start full stack and verify UI displays health scores correctly
+**Step 16: Integration Testing - Custom Weights End-to-End**
 - **Test Procedure**:
-  1. Start backend: `python api_server.py`
-  2. Start frontend: `cd web-ui && npm run dev`
-  3. Run optimization via UI (2 trials, mnist, 6 epochs)
-  4. Verify health scores appear in trial results
-  5. Verify summary statistics show correct health scores
-  6. Verify best model health score matches backend calculation
+  1. Start backend and frontend
+  2. Navigate to optimization configuration page
+  3. Select health-aware mode
+  4. Adjust accuracy slider from 70% → 80%
+  5. Verify health overall auto-adjusts to 20%
+  6. Verify all sub-components scale proportionally
+  7. Start optimization
+  8. Check backend logs for received custom weights
+  9. Verify health scores calculated using custom weights
 
-**Step 11: Cross-Reference Health Scores**
-- **Action**: Verify frontend health scores match backend logs
-- **Test Procedure**:
-  1. Run optimization with health monitoring enabled
-  2. Check backend logs for calculated health scores:
-     ```
-     grep "Health score:" logs/api_server.log
-     ```
-  3. Check frontend UI for displayed health scores
-  4. Compare values: Backend log value === Frontend display value
-- **Validation**: All health scores match exactly (no calculation drift)
-
-**Step 12: Edge Case Testing**
+**Step 17: Edge Case Testing**
 - **Test Cases**:
-  1. **Health monitoring disabled**: Verify frontend handles null/missing health_score gracefully
-  2. **Zero health score**: Verify UI displays 0.0 correctly (not "N/A" or error)
-  3. **Perfect health score (1.0)**: Verify UI displays without rounding errors
-  4. **Invalid health score**: Verify frontend validates range (0.0-1.0)
-- **Expected Behavior**:
-  - Missing health_score → Display "N/A" or "-"
-  - Valid health_score → Display with 2 decimal places (e.g., "0.78")
+  1. **Extreme values**: Accuracy 100% (health 0%), Accuracy 0% (health 100%)
+  2. **Rapid slider changes**: Multiple quick adjustments don't break auto-balancing
+  3. **Floating point precision**: Weights sum to exactly 100% (no 99.99% or 100.01%)
+  4. **Mode switching**: Custom weights → Simple mode → Health-aware restores defaults
+  5. **API failure**: Backend unreachable, frontend uses fallback defaults
+
+**Step 18: User Experience Testing (Manual)**
+- **Test Procedure**:
+  1. Visual clarity: Percentage displays update in real-time
+  2. Slider responsiveness: No lag when dragging
+  3. Auto-balance clarity: Users understand why other sliders move
+  4. Educational value: Users can see weight impact on scoring
+  5. Mobile responsiveness: Sliders work on touch devices
 
 ---
 
 ##### **Phase 2.4: Code Quality and Documentation**
 
-**Step 13: Code Review Checklist**
-- **Frontend Code Quality**:
-  - ✅ No hardcoded health weights remain
-  - ✅ No frontend health calculation logic
-  - ✅ TypeScript types updated with `health_score` field
-  - ✅ All health score references use backend-provided values
-  - ✅ No unused imports or dead code
+**Step 19: Code Review Checklist**
+- **Backend**:
+  - ✅ Default weights in `configs.py`
+  - ✅ `/api/default-scoring-weights` endpoint functional
+  - ✅ `OptimizationRequest` accepts custom weights
+  - ✅ `HealthAnalyzer` uses configurable weights
+  - ✅ Optimizer score calculation uses configurable weights
+  - ✅ Weight validation logic correct
 
-- **Backend Code Quality**:
-  - ✅ Backend health calculation logic unchanged
-  - ✅ API responses include `health_score` field
-  - ✅ Health weights documented in `health_analyzer.py`
+- **Frontend**:
+  - ✅ Hardcoded weights removed from `summary-stats.tsx`
+  - ✅ Weight slider component fully functional
+  - ✅ Auto-balancing logic mathematically correct
+  - ✅ Integration with configuration panel complete
+  - ✅ TypeScript types updated
+  - ✅ Unit tests passing
 
-**Step 14: Update Code Comments**
-- **Frontend Files**:
-  - Add comments explaining health_score is backend-calculated:
-    ```typescript
-    // Health score calculated by backend health_analyzer.py
-    // Do not recalculate on frontend - use API value directly
-    const healthScore = trial.health_score
-    ```
+**Step 20: Update Code Comments**
+- **Backend** (`configs.py`):
+  ```python
+  # AUTHORITATIVE SOURCE for default scoring weights
+  # Frontend fetches these via /api/default-scoring-weights
+  # Users can customize per-optimization-run via UI sliders
+  accuracy_weight: float = 0.70
+  ```
 
-- **Backend Files**:
-  - Add comments in `health_analyzer.py` confirming it's the authoritative source:
-    ```python
-    # AUTHORITATIVE SOURCE for health component weights
-    # Frontend displays these calculated values - DO NOT duplicate weights
-    COMPONENT_WEIGHTS = { ... }
-    ```
+- **Frontend** (`weight-sliders.tsx`):
+  ```typescript
+  // Weight sliders with smart auto-balancing
+  // All weights always sum to 100%
+  // Simple mode: 100% accuracy (sliders disabled)
+  // Health-aware mode: User-adjustable with defaults from backend
+  ```
 
-**Step 15: Update Documentation**
-- **README.md Updates**:
-  - Document that health scores are backend-calculated
-  - Note that weight changes only require backend updates
-  - Add to architecture documentation:
-    ```
-    Health Score Calculation:
-    - Single source of truth: src/health_analyzer.py
-    - Frontend displays pre-calculated values from API
-    - No weight duplication between backend and frontend
-    ```
+**Step 21: Update Documentation**
+- **README.md Architecture Section**:
+  ```markdown
+  ### Scoring Weight Configuration:
+  - Default weights defined in `src/data_classes/configs.py`
+  - Frontend fetches defaults via `/api/default-scoring-weights`
+  - Users adjust weights via UI sliders (per-run customization)
+  - Backend calculates scores using user-provided or default weights
+  - Auto-balancing ensures weights always sum to 100%
+  ```
 
 ---
 
@@ -1248,50 +1465,50 @@ Health component weights are duplicated in two locations:
 
 | **Test Phase** | **Test Type** | **Action** | **Expected Result** |
 |----------------|---------------|------------|---------------------|
-| **2.1: Audit** | Manual | Search codebase for hardcoded weights | All instances identified |
-| **2.1: Audit** | Manual | Verify API returns health_score | All endpoints include field |
-| **2.2: Refactor** | Automated | Remove hardcoded weights | No compilation errors |
-| **2.2: Refactor** | Automated | Update TypeScript types | Type checking passes |
-| **2.3: Testing** | Automated | Backend API tests | health_score in all responses |
-| **2.3: Testing** | Automated | Frontend unit tests | All tests pass |
-| **2.3: Testing** | Manual | Full stack integration | UI displays correct scores |
-| **2.3: Testing** | Manual | Cross-reference logs | Backend and frontend values match |
-| **2.3: Testing** | Manual | Edge cases | Null/zero/perfect scores handled correctly |
-| **2.4: Quality** | Manual | Code review checklist | All items checked |
+| **2.1: Backend** | Unit | Weight configuration in configs.py | Defaults defined correctly |
+| **2.1: Backend** | Integration | `/api/default-scoring-weights` endpoint | Returns correct defaults |
+| **2.1: Backend** | Integration | Custom weights via API | Accepted and used in calculation |
+| **2.2: Frontend** | Unit | Weight slider component | Auto-balancing works correctly |
+| **2.2: Frontend** | Unit | Mode switching | Weights reset to defaults |
+| **2.3: Integration** | End-to-end | Custom weights optimization run | Backend uses custom weights |
+| **2.3: Edge Cases** | Manual | Extreme values, rapid changes | No crashes or incorrect sums |
+| **2.3: UX** | Manual | Slider responsiveness, clarity | Smooth and intuitive |
 
 ---
 
 #### **Success Criteria**
 
-- ✅ **No Hardcoded Weights**: All `HEALTH_COMPONENT_WEIGHTS` removed from frontend
-- ✅ **Single Source of Truth**: Backend `health_analyzer.py` is only place defining weights
-- ✅ **API Consistency**: All backend endpoints return `health_score` field
-- ✅ **Frontend Simplification**: Frontend only displays backend-calculated values
-- ✅ **Test Coverage**: All tests pass and verify correct behavior
-- ✅ **Cross-Reference Match**: Frontend displays exactly match backend calculations
-- ✅ **Edge Case Handling**: Null/missing health scores handled gracefully
-- ✅ **Documentation Updated**: README.md and code comments reflect new architecture
+- ✅ **No Hardcoded Weights**: All frontend hardcoded weights removed
+- ✅ **Backend Defaults**: Default weights in `configs.py` only
+- ✅ **User Customization**: Weight sliders functional and intuitive
+- ✅ **Auto-Balancing**: Weights always sum to 100% automatically
+- ✅ **Mode Integration**: Simple mode locks 100% accuracy, health-aware enables sliders
+- ✅ **Per-Run Config**: Custom weights sent with each optimization request
+- ✅ **Educational Transparency**: Users understand scoring calculation
+- ✅ **Test Coverage**: All unit, integration, and edge case tests pass
+- ✅ **Code Quality**: Clean, well-documented, type-safe code
+- ✅ **Documentation**: README.md reflects new architecture
 
 ---
 
 #### **Rollback Plan**
 
 If issues arise during implementation:
-1. Revert frontend changes: `git checkout web-ui/src/components/dashboard/summary-stats.tsx`
-2. Verify backend still returns `health_score` in API responses
-3. Re-test with original hardcoded weights to confirm functionality
-4. Debug issue before retrying removal
+1. Revert frontend changes: `git checkout web-ui/src/components/`
+2. Revert backend changes: `git checkout src/data_classes/configs.py src/api_server.py`
+3. Re-test with original hardcoded weights
+4. Debug issue before retrying
 
 ---
 
 #### **Timeline Estimate**
 
-- **Phase 2.1 (Audit)**: 30-60 minutes
-- **Phase 2.2 (Refactor)**: 1-2 hours
-- **Phase 2.3 (Testing)**: 2-3 hours
-- **Phase 2.4 (Documentation)**: 30-60 minutes
+- **Phase 2.1 (Backend)**: 2-3 hours
+- **Phase 2.2 (Frontend Sliders)**: 4-5 hours
+- **Phase 2.3 (Testing)**: 3-4 hours
+- **Phase 2.4 (Documentation)**: 1-2 hours
 
-**Total Estimated Time**: 4-6.5 hours
+**Total Estimated Time**: 10-14 hours
 
 ---
 
