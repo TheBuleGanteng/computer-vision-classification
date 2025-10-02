@@ -3157,11 +3157,21 @@ Job ID: {job_id}
             
             # Fallback: Search for directory by pattern
             # Use /app path only if actually in RunPod container
-            if os.getenv('ENDPOINT_ID_RUNPOD') and os.path.exists('/app'):
-                logger.debug("running _get_job_results_directory ... Detected RunPod container environment")
+            # Detect environment: RunPod worker vs Local Docker vs Local development
+            # RunPod workers have ENDPOINT_ID_RUNPOD env var
+            # Local Docker containers have /app but no ENDPOINT_ID_RUNPOD
+            # Local development has neither
+            if os.path.exists('/app') and not os.getenv('ENDPOINT_ID_RUNPOD'):
+                # Local Docker container (backend service)
+                logger.debug("running _get_job_results_directory ... Detected local Docker container environment")
+                optimization_results_dir = Path("/app/optimization_results")
+            elif os.getenv('ENDPOINT_ID_RUNPOD'):
+                # RunPod worker container
+                logger.debug("running _get_job_results_directory ... Detected RunPod worker container environment")
                 optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "/app/optimization_results"))
             else:
-                logger.debug("running _get_job_results_directory ... Running in local environment")
+                # Local development (no container)
+                logger.debug("running _get_job_results_directory ... Running in local development environment")
                 optimization_results_dir = Path(os.getenv("OPTIMIZATION_RESULTS_DIR", "./optimization_results"))
             
             if not optimization_results_dir.exists():

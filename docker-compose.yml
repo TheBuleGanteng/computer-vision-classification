@@ -1,0 +1,60 @@
+services:
+  # Backend service (FastAPI + Optuna orchestrator)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cv-classification-backend
+    networks:
+      - app-network
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    volumes:
+      # Persist optimization results and logs across container restarts
+      - ./optimization_results:/app/optimization_results
+      - ./logs:/app/logs
+
+  # Frontend service (Next.js web UI)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: cv-classification-frontend
+    ports:
+      - "3000:3000"  # Exposed to host for access
+    networks:
+      - app-network
+    environment:
+      - NODE_ENV=${ENVIRONMENT:-development}
+      - NEXT_PUBLIC_API_URL=/api
+      - GCP_DEPLOYMENT=${GCP_DEPLOYMENT:-false}
+      - WEB_BASEPATH=${WEB_BASEPATH:-}
+      - BACKEND_INTERNAL_URL=http://backend:8000
+      - NEXT_TELEMETRY_DISABLED=1
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy  # Wait for backend to be healthy before starting
+
+# Docker network for inter-container communication
+networks:
+  app-network:
+    driver: bridge

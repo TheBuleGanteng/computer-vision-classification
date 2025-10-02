@@ -67,9 +67,17 @@ def setup_logging(
     
     # Use relative path if no specific path provided
     if log_file_path is None:
-        # Get the project root (assuming logger.py is in src/utils/)
-        current_file = Path(__file__)  # src/utils/logger.py
-        project_root = current_file.parent.parent.parent  # Go up 3 levels to project root
+        # Get the project root (assuming logger.py is in src/utils/ or utils/ in containerized mode)
+        current_file = Path(__file__)  # src/utils/logger.py or utils/logger.py
+
+        # Check if we're in containerized environment (utils/logger.py in /app/)
+        if current_file.parts[1] == 'app' and current_file.parts[2] == 'utils':
+            # Containerized: /app/utils/logger.py -> project_root = /app
+            project_root = Path('/app')
+        else:
+            # Local development: src/utils/logger.py -> go up 3 levels
+            project_root = current_file.parent.parent.parent
+
         log_file_path_resolved = project_root / "logs" / "non-cron.log"
     else:
         log_file_path_resolved = Path(log_file_path)

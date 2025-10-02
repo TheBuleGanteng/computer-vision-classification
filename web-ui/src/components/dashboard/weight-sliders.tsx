@@ -234,7 +234,7 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
                     <p><strong>Gradient Health:</strong> Gradient flow quality</p>
                     <p><strong>Convergence Quality:</strong> Training smoothness</p>
                     <p><strong>Accuracy Consistency:</strong> Cross-validation stability</p>
-                    <p className="pt-2 border-t text-gray-400">These proportions must sum to the value for "Health Overall"</p>
+                    <p className="pt-2 border-t text-gray-400">These proportions must sum to the value for &quot;Health Overall&quot;</p>
                   </div>
                 }
               >

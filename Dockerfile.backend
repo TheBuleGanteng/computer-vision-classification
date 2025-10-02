@@ -1,0 +1,53 @@
+# Backend Dockerfile for FastAPI + Optuna Orchestrator
+# Base image: Python 3.12 slim (smaller than full Python image)
+FROM python:3.12-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+# - curl: for health checks
+# - gcc, g++, build-essential: for compiling some Python packages (numpy, scipy, etc.)
+# - libgl1, libglib2.0-0: for OpenCV (cv2) to work properly
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    g++ \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file first (Docker layer caching optimization)
+COPY requirements.txt .
+
+# Install Python dependencies
+# --no-cache-dir: Don't cache pip downloads (smaller image)
+# Install gunicorn for production mode
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir gunicorn
+
+# Copy backend source code (all files are in src/ directory)
+COPY src/ ./
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Create directories for runtime data (will be volume-mounted)
+RUN mkdir -p /app/optimization_results /app/logs
+
+# Expose port 8000 (internal only - not exposed to host in docker-compose)
+EXPOSE 8000
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV LOG_LEVEL=DEBUG
+ENV ENVIRONMENT=development
+
+# Health check: curl the /health endpoint every 30 seconds
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Use entrypoint script that adapts to development/production mode
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
