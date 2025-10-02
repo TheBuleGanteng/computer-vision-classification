@@ -580,40 +580,14 @@ class DevelopmentServerManager:
         self._log("Clearing Docker resources...", Colors.YELLOW, "🧹 ")
 
         try:
-            # Stop and remove all containers for this project
-            self._log("Stopping and removing project containers...", Colors.YELLOW, "🛑 ")
+            # Stop and remove all containers, images, volumes, and orphans for this project
+            self._log("Stopping and removing project containers, images, and volumes...", Colors.YELLOW, "🛑 ")
             subprocess.run(
-                ["docker", "compose", "down", "--volumes", "--remove-orphans"],
+                ["docker", "compose", "down", "--volumes", "--remove-orphans", "--rmi", "all"],
                 cwd=self.project_root,
                 check=False,
                 capture_output=True
             )
-
-            # Remove project-specific images
-            self._log(" Removing project Docker images...", Colors.YELLOW, "🗑️ ")
-            subprocess.run(
-                ["docker", "compose", "rm", "-f"],
-                cwd=self.project_root,
-                check=False,
-                capture_output=True
-            )
-
-            # Get list of images to remove
-            image_result = subprocess.run(
-                ["docker", "images", "-q", "computer-vision-classification-backend", "computer-vision-classification-frontend"],
-                capture_output=True,
-                text=True
-            )
-
-            if image_result.stdout.strip():
-                image_ids = image_result.stdout.strip().split('\n')
-                self._log(f"Removing {len(image_ids)} project images...", Colors.YELLOW, "🗑️ ")
-                subprocess.run(
-                    ["docker", "rmi", "-f"] + image_ids,
-                    check=False,
-                    capture_output=True
-                )
-
             # Prune build cache
             self._log("Pruning Docker build cache...", Colors.YELLOW, "🧹 ")
             subprocess.run(
