@@ -3,10 +3,10 @@ import type { NextConfig } from "next";
 // Detect if running on GCP VM vs local development
 // GCP_DEPLOYMENT: true = use WEB_BASEPATH, false = use root path
 const isGCPDeployment = process.env.GCP_DEPLOYMENT === 'true';
-const basePath = isGCPDeployment ? (process.env.WEB_BASEPATH || '') : '';
+const basePath = isGCPDeployment && process.env.WEB_BASEPATH ? process.env.WEB_BASEPATH : undefined;
 
 const nextConfig: NextConfig = {
-  // Base path for serving from subpath on GCP, empty for local development
+  // Base path for serving from subpath on GCP, undefined for local development
   basePath: basePath,
 
   // Configure for both Webpack and Turbopack
