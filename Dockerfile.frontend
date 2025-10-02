@@ -1,0 +1,37 @@
+# Frontend Dockerfile for Next.js Web UI
+# Base image: Node.js 22 on Alpine Linux (smallest Node image)
+FROM node:22-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Install curl for health checks
+RUN apk add --no-cache curl
+
+# Copy package files first (Docker layer caching optimization)
+COPY web-ui/package.json web-ui/package-lock.json ./
+
+# Install dependencies using clean install (deterministic, faster in CI)
+RUN npm ci
+
+# Copy Next.js source code
+COPY web-ui/ .
+
+# Copy entrypoint script
+COPY docker-entrypoint-frontend.sh /app/docker-entrypoint-frontend.sh
+RUN chmod +x /app/docker-entrypoint-frontend.sh
+
+# Expose port 3000
+EXPOSE 3000
+
+# Set environment variables
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV ENVIRONMENT=development
+
+# Health check: curl the root endpoint every 30 seconds
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
+    CMD curl -f http://localhost:3000/ || exit 1
+
+# Use entrypoint script that adapts to development/production mode
+ENTRYPOINT ["/app/docker-entrypoint-frontend.sh"]

@@ -938,7 +938,7 @@ print(f"Best score: {result.best_total_score}")
 3. You confirm behavior matches expected results
 4. Only tests passing both phases are considered complete
 
-**Phase 3 - UI Testing**: **COMPLETE**
+**Phase 3 - UI Testing**: ✅ **COMPLETE**
 1. Repeat all 8 test configurations via Web UI interface
 2. Verify UI updates and progress display for all scenarios
 3. Confirm UI behavior matches API behavior across all test cases
@@ -956,7 +956,8 @@ print(f"Best score: {result.best_total_score}")
 
 ### **ROADMAP PHASE 2: USER-ADJUSTABLE SCORING WEIGHTS (COPILOT FLAG RESOLUTION)**
 
-**Status**: ✅ **COMPLETE AND TESTED** - Implementation complete, automated tests passed, manual testing verified
+**Status**: ✅ **COMPLETE AND TESTED**
+Implementation complete, automated tests passed, manual testing verified
 
 **Objective:**
 Implement user-adjustable weight sliders in the UI to allow customization of how accuracy and health components contribute to the overall optimization score. This eliminates hardcoded weight duplication while providing educational transparency into scoring calculations and enabling users to prioritize metrics according to their specific use case.
@@ -1163,7 +1164,7 @@ gradient_health + convergence_quality + accuracy_consistency = health_overall_we
 
 #### **Implementation Plan**
 
-##### **Phase 2.1: Backend Configuration and API Updates**
+##### **Phase 2.1: Backend Configuration and API Updates** ✅
 
 **Step 1: Move Default Weights to Backend Configuration**
 - **File**: `src/data_classes/configs.py`
@@ -1537,7 +1538,7 @@ If issues arise during implementation:
 
 ### **ROADMAP PHASE 3: CONTAINERIZATION AND PREPARATION FOR HOSTING**
 
-**Status**: Not started
+**Status**: Underway
 
 **Objective:**
 Containerize both the front-end and back-end of the program to enable web hosting on GCP VM. The application will be accessible via https://kebayorantechnologies.com/hyperparameter-tuning/demo-computer-vision, running independently alongside an existing containerized professional website (https://www.kebayorantechnologies.com) on the same GCP infrastructure.
@@ -2065,69 +2066,177 @@ networks:
 ##### **Phase 2.5: GCP VM Deployment**
 
 **Step 21: GCP VM Preparation (Manual)**
-- **Prerequisites Check**:
-  - Verify Docker installed: `docker --version` (should be 24.0+)
-  - Verify Docker Compose installed: `docker-compose --version` (should be 2.20+)
-  - If not installed, run installation script for Ubuntu/Debian
 
-- **Directory Setup**:
-  - Create deployment directory: `sudo mkdir -p /opt/cv-classification`
-  - Set ownership: `sudo chown $USER:$USER /opt/cv-classification`
-  - Navigate: `cd /opt/cv-classification`
+**21.1 - Prerequisites Check on GCP VM (35.238.181.177)**:
+- SSH into GCP VM: `ssh matt@35.238.181.177`
+- Verify Docker installed: `docker --version` (should be 24.0+)
+- Verify Docker Compose installed: `docker compose version` (should be 2.20+)
+- Check existing containers: `docker ps` (verify professional website running)
 
-- **Transfer Files**:
-  - Transfer repository via git: `git clone <repo-url> .`
-  - OR transfer Docker images directly (if repo is private)
-  - Securely transfer `.env.docker`: `scp .env.docker user@gcp-vm:/opt/cv-classification/`
+**21.2 - Repository Transfer to GCP VM**:
+1. **On local machine**: Push latest code to GitHub
+   ```bash
+   git add .
+   git commit -m "feat: Phase 3 containerization complete"
+   git push origin deployment-2
+   ```
 
-- **Port Availability Check**:
-  - Check if port 3000 available: `sudo lsof -i :3000` (should show nothing)
-  - If port in use, either stop conflicting service or use alternative port
+2. **On GCP VM**: Clone/pull repository
+   ```bash
+   # SSH into VM
+   ssh matt@35.238.181.177
 
-- **Reverse Proxy Configuration (Nginx Example)**:
-  ```nginx
-  # Add to existing Nginx config
-  location /hyperparameter-tuning/demo-computer-vision {
-      proxy_pass http://localhost:3000;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection 'upgrade';
-      proxy_set_header Host $host;
-      proxy_cache_bypass $http_upgrade;
-  }
-  ```
-  - Reload Nginx: `sudo nginx -s reload`
-  - Verify configuration: `sudo nginx -t`
+   # Create deployment directory
+   sudo mkdir -p /opt/cv-classification
+   sudo chown matt:matt /opt/cv-classification
+   cd /opt/cv-classification
+
+   # Clone repository (or pull if already cloned)
+   git clone https://github.com/TheBuleGanteng/computer-vision-classification.git .
+   # OR if already exists:
+   git pull origin deployment-2
+   ```
+
+3. **Transfer .env file securely** (contains RunPod credentials):
+   ```bash
+   # From local machine
+   scp .env matt@35.238.181.177:/opt/cv-classification/
+   ```
+
+   **Note**: Files like `node_modules/`, `.next/`, `next-env.d.ts` are gitignored and will be auto-generated during container build. Do NOT manually transfer them.
+
+4. **Update .env file on GCP VM** (enable GCP deployment mode):
+   ```bash
+   # On GCP VM
+   ssh matt@35.238.181.177
+   cd /opt/cv-classification
+
+   # Edit .env and change GCP_DEPLOYMENT from false to true
+   nano .env
+   # Change: GCP_DEPLOYMENT=false
+   # To:     GCP_DEPLOYMENT=true
+   # Save and exit (Ctrl+X, Y, Enter)
+   ```
+
+   **How it works:**
+   - `.env` contains both `GCP_DEPLOYMENT` and `WEB_BASEPATH`
+   - `WEB_BASEPATH` is always `/model-architecture/computer-vision` (same in both environments)
+   - `GCP_DEPLOYMENT=true` → Next.js uses `WEB_BASEPATH`
+   - `GCP_DEPLOYMENT=false` → Next.js uses root path (for local development)
+   - To switch between local and GCP: just toggle `GCP_DEPLOYMENT` in your `.env`
+
+**21.3 - Port Availability Check**:
+- Check if port 3000 available: `sudo lsof -i :3000`
+- If port in use, modify docker-compose.yml to use different port (e.g., 3001)
+
+**21.4 - Update Professional Website's Docker Compose**:
+Your professional website likely has its own `docker-compose.yml`. You need to integrate this optimization app into it OR ensure they use different Docker networks.
+
+**Option A - Separate Docker Compose (Recommended)**:
+- Keep professional website's `docker-compose.yml` unchanged
+- Run optimization app with separate compose: `cd /opt/cv-classification && docker compose up -d`
+- Both apps run independently on same VM
+
+**Option B - Unified Docker Compose**:
+- Add optimization app services to professional website's `docker-compose.yml`
+- Share the same Docker network
+- Single `docker compose up -d` starts everything
+
+**21.5 - Nginx Reverse Proxy Configuration**:
+Your professional website already has Nginx configured with SSL. Add this location block to route traffic to the optimization app:
+
+```nginx
+# Add to /etc/nginx/sites-available/kebayorantechnologies.com (or wherever your Nginx config is)
+
+server {
+    listen 443 ssl;
+    server_name kebayorantechnologies.com;
+
+    # Existing SSL certificate configuration (already in place)
+    ssl_certificate /path/to/your/fullchain.pem;
+    ssl_certificate_key /path/to/your/privkey.pem;
+
+    # Existing location blocks for professional website...
+
+    # NEW: Route optimization app traffic
+    location /model-architecture/computer-vision {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+
+        # Important: Preserve the /model-architecture/computer-vision prefix
+        # Next.js will handle routing from this base path
+    }
+}
+```
+
+After editing Nginx config:
+```bash
+# Test configuration
+sudo nginx -t
+
+# Reload Nginx (if test passes)
+sudo nginx -s reload
+```
+
+**21.6 - Verify Configuration**:
+The Next.js app will automatically detect it's running on GCP (via `GCP_DEPLOYMENT=true` in .env) and use the correct base path `/model-architecture/computer-vision`. No manual configuration needed - it's already set up in `next.config.ts`.
 
 **Step 22: Deploy to GCP VM (Manual)**
+
+On GCP VM (ssh matt@35.238.181.177):
+
 - **Build Containers**:
-  - Build both images: `docker-compose build`
-  - Verify builds succeeded: `docker images | grep cv-classification`
+  ```bash
+  cd /opt/cv-classification
+  docker compose build --progress=plain
+  ```
+  - Verify builds succeeded: `docker images | grep computer-vision-classification`
 
 - **Start Containers**:
-  - Start in detached mode: `docker-compose up -d`
-  - Monitor startup logs: `docker-compose logs -f`
+  ```bash
+  # Start in detached mode
+  docker compose up -d
+
+  # Monitor startup logs (Ctrl+C to exit)
+  docker compose logs -f
+  ```
   - Wait for health checks: `watch docker ps` (wait for "healthy" status)
 
 - **Verify Containers Running**:
-  - Check container status: `docker ps`
-  - Verify health: Both containers should show "healthy"
-  - Check logs for errors: `docker-compose logs --tail=50`
+  ```bash
+  # Check container status
+  docker ps
+
+  # Should see both containers with "healthy" status:
+  # - cv-classification-backend
+  # - cv-classification-frontend
+
+  # Check logs for errors
+  docker compose logs --tail=50
+  ```
 
 **Step 23: Post-Deployment Testing on GCP VM (Manual)**
 
 **Test 1: Access Frontend via Public URL**
-- URL: `https://kebayorantechnologies.com/hyperparameter-tuning/demo-computer-vision`
+- URL: `https://kebayorantechnologies.com/model-architecture/computer-vision`
 - Validation:
   - ✅ UI loads correctly without errors
   - ✅ SSL certificate valid (browser shows padlock)
   - ✅ No mixed content warnings
   - ✅ All assets (CSS, JS, images) load properly
+  - ✅ Next.js routing works with base path
 
 **Test 2: Verify Backend Isolation**
-- Try accessing backend directly: `curl https://kebayorantechnologies.com:8000` (should fail)
-- Try from VM: `curl http://localhost:8000` (should fail - port not exposed)
-- Validates: Backend only accessible from frontend container
+- Try accessing backend directly from internet: `curl https://kebayorantechnologies.com:8000` (should fail - connection refused)
+- Try from VM: `curl http://localhost:8000` (should fail - port not exposed to host)
+- Validates: Backend only accessible from frontend container via Docker network
 
 **Test 3: Run Complete Optimization Workflow**
 - Perform same tests as Step 11, but via public URL:

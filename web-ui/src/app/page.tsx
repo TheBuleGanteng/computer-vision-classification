@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useEffect } from "react"
+import { Suspense } from "react"
 import { OptimizationControls } from "@/components/dashboard/optimization-controls"
 import { SummaryStats } from "@/components/dashboard/summary-stats"
 import { BestArchitectureView } from "@/components/dashboard/best-architecture-view"

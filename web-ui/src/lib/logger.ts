@@ -24,31 +24,31 @@ class Logger {
     return true
   }
 
-  log(...args: any[]) {
+  log(...args: unknown[]) {
     if (this.shouldLog('log')) {
       console.log(...args)
     }
   }
 
-  warn(...args: any[]) {
+  warn(...args: unknown[]) {
     if (this.shouldLog('warn')) {
       console.warn(...args)
     }
   }
 
-  error(...args: any[]) {
+  error(...args: unknown[]) {
     if (this.shouldLog('error')) {
       console.error(...args)
     }
   }
 
-  info(...args: any[]) {
+  info(...args: unknown[]) {
     if (this.shouldLog('info')) {
       console.info(...args)
     }
   }
 
-  debug(...args: any[]) {
+  debug(...args: unknown[]) {
     if (this.shouldLog('debug')) {
       console.debug(...args)
     }
@@ -82,7 +82,7 @@ class Logger {
    * Table view for structured data
    * Only works in development
    */
-  table(data: any) {
+  table(data: unknown) {
     if (this.shouldLog('log')) {
       console.table(data)
     }
