@@ -20,18 +20,22 @@ Features:
 - Automatic port conflict detection and resolution
 
 """
-
+import argparse
+from datetime import datetime
+import logging
 import os
-import sys
+from pathlib import Path
+import psutil
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
-import psutil
-import logging
-import argparse
-from pathlib import Path
 from typing import Optional, List
+
+
+
 
 # Setup logging
 current_file = Path(__file__)
@@ -841,6 +845,18 @@ def main():
 
     # Change to script directory
     os.chdir(Path(__file__).parent)
+
+    # Clear logs directory for fresh start
+    logs_dir = Path(__file__).parent / "logs"
+    if logs_dir.exists():
+        try:
+            shutil.rmtree(logs_dir)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🧹 Cleared logs directory for fresh start")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️  Warning: Could not clear logs directory: {e}")
+    else:
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
     # Create and run server manager
     manager = DevelopmentServerManager(
