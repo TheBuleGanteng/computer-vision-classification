@@ -71,12 +71,17 @@ def setup_logging(
         current_file = Path(__file__)  # src/utils/logger.py or utils/logger.py
 
         # Check if we're in containerized environment (utils/logger.py in /app/)
-        if current_file.parts[1] == 'app' and current_file.parts[2] == 'utils':
+        if Path('/app/utils') in current_file.parents:
             # Containerized: /app/utils/logger.py -> project_root = /app
             project_root = Path('/app')
         else:
-            # Local development: src/utils/logger.py -> go up 3 levels
-            project_root = current_file.parent.parent.parent
+            # Local development: find 'src' in parents and set project_root to its parent
+            try:
+                src_index = [p.name for p in current_file.parents].index('src')
+                project_root = current_file.parents[src_index + 1]
+            except ValueError:
+                # Fallback: go up 3 levels as before
+                project_root = current_file.parent.parent.parent
 
         log_file_path_resolved = project_root / "logs" / "non-cron.log"
     else:
