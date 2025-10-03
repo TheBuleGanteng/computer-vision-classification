@@ -11,6 +11,14 @@ const nextConfig: NextConfig = {
 
   // Configure for both Webpack and Turbopack
   webpack: (config, { isServer }) => {
+    // Exclude .legacy files from build
+    config.plugins = config.plugins || [];
+    config.plugins.push(
+      new (require('webpack').IgnorePlugin)({
+        resourceRegExp: /\.legacy\.(tsx?|jsx?)$/
+      })
+    );
+
     if (!isServer) {
       // Handle cytoscape-elk worker files
       config.resolve.fallback = {
@@ -28,7 +36,7 @@ const nextConfig: NextConfig = {
         },
       });
     }
-    
+
     return config;
   },
   
