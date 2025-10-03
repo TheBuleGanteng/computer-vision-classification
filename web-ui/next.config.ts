@@ -9,6 +9,11 @@ const nextConfig: NextConfig = {
   // Base path for serving from subpath on GCP, undefined for local development
   basePath: basePath,
 
+  // Disable image optimization when using basePath (workaround for production)
+  images: {
+    unoptimized: true,
+  },
+
   // Configure for both Webpack and Turbopack
   webpack: (config, { isServer }) => {
     // Exclude .legacy files from build
