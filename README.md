@@ -2067,8 +2067,8 @@ networks:
 
 **Step 21: GCP VM Preparation (Manual)**
 
-**21.1 - Prerequisites Check on GCP VM (35.238.181.177)**:
-- SSH into GCP VM: `ssh matt@35.238.181.177`
+**21.1 - Prerequisites Check on GCP VM (<GCP VM External IP>)**:
+- SSH into GCP VM: `ssh matt@<GCP VM External IP>`
 - Verify Docker installed: `docker --version` (should be 24.0+)
 - Verify Docker Compose installed: `docker compose version` (should be 2.20+)
 - Check existing containers: `docker ps` (verify professional website running)
@@ -2084,7 +2084,7 @@ networks:
 2. **On GCP VM**: Clone/pull repository
    ```bash
    # SSH into VM
-   ssh matt@35.238.181.177
+   ssh matt@<GCP VM External IP>
 
    # Create deployment directory
    sudo mkdir -p /opt/cv-classification
@@ -2100,7 +2100,7 @@ networks:
 3. **Transfer .env file securely** (contains RunPod credentials):
    ```bash
    # From local machine
-   scp .env matt@35.238.181.177:/opt/cv-classification/
+   scp .env matt@<GCP VM External IP>:/opt/cv-classification/
    ```
 
    **Note**: Files like `node_modules/`, `.next/`, `next-env.d.ts` are gitignored and will be auto-generated during container build. Do NOT manually transfer them.
@@ -2108,7 +2108,7 @@ networks:
 4. **Update .env file on GCP VM** (enable GCP deployment mode):
    ```bash
    # On GCP VM
-   ssh matt@35.238.181.177
+   ssh matt@<GCP VM External IP>
    cd /opt/cv-classification
 
    # Edit .env and change GCP_DEPLOYMENT from false to true
@@ -2190,7 +2190,7 @@ The Next.js app will automatically detect it's running on GCP (via `GCP_DEPLOYME
 
 **Step 22: Deploy to GCP VM (Manual)**
 
-On GCP VM (ssh matt@35.238.181.177):
+On GCP VM (ssh matt@<GCP VM External IP>):
 
 - **Build Containers**:
   ```bash
