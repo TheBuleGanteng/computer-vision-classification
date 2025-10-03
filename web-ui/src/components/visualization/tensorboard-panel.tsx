@@ -94,6 +94,13 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
         return null; // TensorBoard not available
       }
       const config = await response.json();
+
+      // Transform localhost URL to use Next.js API proxy
+      if (config?.tensorboard_url) {
+        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+        config.tensorboard_url = `${basePath}/api/tensorboard/${jobId}`;
+      }
+
       return config;
     },
     enabled: !!jobId,
