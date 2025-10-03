@@ -28,9 +28,10 @@ export async function GET(
   const { jobId, path } = await params;
   
   // Get the actual TensorBoard port from the backend instead of calculating
+  const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://localhost:8000';
   let port: number;
   try {
-    const backendResponse = await fetch(`http://localhost:8000/jobs/${jobId}/tensorboard/url`);
+    const backendResponse = await fetch(`${backendUrl}/jobs/${jobId}/tensorboard/url`);
     if (backendResponse.ok) {
       const backendData = await backendResponse.json();
       port = backendData.port;
@@ -40,10 +41,12 @@ export async function GET(
   } catch {
     port = getTensorBoardPort(jobId); // Fallback to calculation
   }
-  
+
   // Construct TensorBoard URL
   const pathString = path ? path.join('/') : '';
-  const tensorboardUrl = `http://localhost:${port}/${pathString}`;
+  // Use backend hostname for TensorBoard (runs on backend container)
+  const backendHost = backendUrl.replace('http://', '').split(':')[0];
+  const tensorboardUrl = `http://${backendHost}:${port}/${pathString}`;
   
   // Forward query parameters
   const url = new URL(request.url);
@@ -144,9 +147,10 @@ export async function POST(
   const { jobId, path } = await params;
   
   // Get the actual TensorBoard port from the backend instead of calculating
+  const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://localhost:8000';
   let port: number;
   try {
-    const backendResponse = await fetch(`http://localhost:8000/jobs/${jobId}/tensorboard/url`);
+    const backendResponse = await fetch(`${backendUrl}/jobs/${jobId}/tensorboard/url`);
     if (backendResponse.ok) {
       const backendData = await backendResponse.json();
       port = backendData.port;
@@ -156,9 +160,11 @@ export async function POST(
   } catch {
     port = getTensorBoardPort(jobId); // Fallback to calculation
   }
-  
+
   const pathString = path ? path.join('/') : '';
-  const tensorboardUrl = `http://localhost:${port}/${pathString}`;
+  // Use backend hostname for TensorBoard (runs on backend container)
+  const backendHost = backendUrl.replace('http://', '').split(':')[0];
+  const tensorboardUrl = `http://${backendHost}:${port}/${pathString}`;
   
   try {
     const body = await request.arrayBuffer();

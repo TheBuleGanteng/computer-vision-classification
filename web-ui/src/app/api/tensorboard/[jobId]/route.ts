@@ -26,9 +26,10 @@ export async function GET(
   const { jobId } = await params;
   
   // Get the actual TensorBoard port from the backend instead of calculating
+  const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://localhost:8000';
   let port: number;
   try {
-    const backendResponse = await fetch(`http://localhost:8000/jobs/${jobId}/tensorboard/url`);
+    const backendResponse = await fetch(`${backendUrl}/jobs/${jobId}/tensorboard/url`);
     if (backendResponse.ok) {
       const backendData = await backendResponse.json();
       port = backendData.port;
@@ -38,7 +39,7 @@ export async function GET(
   } catch {
     port = getTensorBoardPort(jobId); // Fallback to calculation
   }
-  
+
   // Root TensorBoard URL - only handle actual job IDs, not file paths
   if (jobId.includes('.') || jobId.includes('/')) {
     return NextResponse.json(
@@ -46,8 +47,10 @@ export async function GET(
       { status: 400 }
     );
   }
-  
-  const tensorboardUrl = `http://localhost:${port}/`;
+
+  // Use backend hostname for TensorBoard (runs on backend container)
+  const backendHost = backendUrl.replace('http://', '').split(':')[0];
+  const tensorboardUrl = `http://${backendHost}:${port}/`;
   
   // Forward query parameters
   const url = new URL(request.url);

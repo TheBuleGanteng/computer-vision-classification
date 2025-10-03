@@ -284,8 +284,9 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        // Open TensorBoard - same logic as other tabs
-                        const tbUrl = process.env.NEXT_PUBLIC_TENSORBOARD_URL || `http://localhost:6006`;
+                        // Open TensorBoard via Next.js API proxy
+                        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+                        const tbUrl = `${basePath}/api/tensorboard/${jobId}`;
                         window.open(tbUrl, '_blank');
                       }}
                       className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
