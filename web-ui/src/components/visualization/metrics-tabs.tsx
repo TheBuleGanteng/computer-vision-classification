@@ -283,7 +283,18 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
+                      onClick={async () => {
+                        // Check if TensorBoard is running, start if needed
+                        const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+                        const statusData = await status.json();
+
+                        if (!statusData.running) {
+                          // Start TensorBoard first
+                          await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
+                          // Wait a moment for it to start
+                          await new Promise(resolve => setTimeout(resolve, 1000));
+                        }
+
                         // Open TensorBoard via Next.js API proxy
                         const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                         const tbUrl = `${basePath}/api/tensorboard/${jobId}`;

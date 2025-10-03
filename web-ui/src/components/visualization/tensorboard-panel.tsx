@@ -248,8 +248,19 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => {
-                  // Open TensorBoard without filtering - users can select runs in the TensorBoard UI
+                onClick={async () => {
+                  // Check if TensorBoard is running, start if needed
+                  const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+                  const statusData = await status.json();
+
+                  if (!statusData.running) {
+                    // Start TensorBoard first
+                    await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
+                    // Wait a moment for it to start
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                  }
+
+                  // Open TensorBoard
                   window.open(tbConfig.tensorboard_url, '_blank');
                 }}
                 className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
