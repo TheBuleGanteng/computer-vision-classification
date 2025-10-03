@@ -3,6 +3,8 @@
 import Link from "next/link"
 import Image from "next/image"
 
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+
 export function Footer() {
   return (
     <footer className="sticky bottom-0 w-full bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t border-border/40 py-2">
@@ -30,7 +32,7 @@ export function Footer() {
             className="flex items-center hover:opacity-80 transition-opacity"
           >
             <Image
-              src="/github_dark.png"
+              src={`${basePath}/github_dark.png`}
               alt="GitHub Repository"
               width={16}
               height={16}

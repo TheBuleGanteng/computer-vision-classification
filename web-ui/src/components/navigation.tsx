@@ -5,6 +5,8 @@ import Image from "next/image"
 
 // Removed navigation array as all items were non-functional links
 
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+
 export function Navigation() {
 
   return (
@@ -12,14 +14,14 @@ export function Navigation() {
       <div className="container mx-auto px-4 sm:px-6 flex h-14 max-w-screen-2xl items-center">
         <div className="mr-4 flex">
           <div className="mr-2 sm:mr-6 flex items-center space-x-2">
-            <Link 
-              href="https://www.kebayorantechnologies.com" 
-              target="_blank" 
+            <Link
+              href="https://www.kebayorantechnologies.com"
+              target="_blank"
               rel="noopener noreferrer"
               className="flex items-center"
             >
-              <Image 
-                src="/logo_keytech.png" 
+              <Image
+                src={`${basePath}/logo_keytech.png`} 
                 alt="Keytech Logo" 
                 width={32} 
                 height={32} 
