@@ -81,32 +81,23 @@ export async function GET(
       );
     }
 
-    // Get the response body
+    // Get the response body - pass through without modification
     const body = await response.arrayBuffer();
-    
-    // Check if it's HTML content and inject base URL
-    const responseContentType = response.headers.get('content-type') || '';
-    let processedBody = body;
-    
-    if (responseContentType.includes('text/html')) {
-      const htmlText = new TextDecoder().decode(body);
-      // Inject base tag to fix relative URLs
-      const baseTag = `<base href="/api/tensorboard/${jobId}/">`;
-      const modifiedHtml = htmlText.replace('<head>', `<head>\n  ${baseTag}`);
-      processedBody = new TextEncoder().encode(modifiedHtml).buffer;
-    }
-    
+
     // Create response with headers to allow iframe embedding
-    const nextResponse = new NextResponse(processedBody, {
+    const nextResponse = new NextResponse(body, {
       status: response.status,
       statusText: response.statusText,
     });
-    
-    // Copy content headers
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      nextResponse.headers.set('content-type', contentType);
-    }
+
+    // Copy all relevant headers unchanged
+    const headersToCopy = ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified'];
+    headersToCopy.forEach(headerName => {
+      const value = response.headers.get(headerName);
+      if (value) {
+        nextResponse.headers.set(headerName, value);
+      }
+    });
     
     // Override security headers to allow iframe embedding
     nextResponse.headers.delete('x-frame-options');

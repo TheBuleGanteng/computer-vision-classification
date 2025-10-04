@@ -119,18 +119,37 @@ class TensorBoardManager:
                 "--host", "0.0.0.0",
                 "--reload_interval", "10"
             ]
-            
+
+            logger.info(f"TensorBoardManager.start_server: Executing command: {' '.join(cmd)}")
+
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=os.environ.copy()
             )
-            
+
             # Store process reference
             self.running_servers[job_id] = (process, port)
-            
-            logger.info(f"running start_server ... Started TensorBoard server for job {job_id} on port {port}")
+
+            # Capture TensorBoard stderr in background without blocking
+            def log_tensorboard_output():
+                import time
+                time.sleep(3)  # Give TensorBoard time to start and scan directories
+                if process.stderr:
+                    try:
+                        stderr_output = process.stderr.read(8192).decode('utf-8', errors='ignore')
+                        if stderr_output:
+                            logger.info(f"=== TensorBoard stderr for job {job_id} ===\n{stderr_output}\n=== End TensorBoard stderr ===")
+                        else:
+                            logger.info(f"TensorBoard stderr for job {job_id}: (empty)")
+                    except Exception as e:
+                        logger.error(f"Failed to read TensorBoard stderr: {e}")
+
+            import threading
+            threading.Thread(target=log_tensorboard_output, daemon=True).start()
+
+            logger.info(f"TensorBoardManager.start_server: Started TensorBoard server for job {job_id} on port {port} (PID: {process.pid})")
             
             return {
                 "status": "started",
@@ -2059,7 +2078,7 @@ class OptimizationAPI:
         logger.debug(f"running _start_optimization ... User parameters: trials={request.trials}, mode={request.mode}, accuracy_weight={request.accuracy_weight}, use_runpod_service={request.use_runpod_service}")
 
         # Log custom scoring weights if provided
-        if request.accuracy_weight is not None:
+        if request.accuracy_weight is not None and request.health_overall_weight is not None:
             logger.info(f"[WEIGHT CONFIG] Custom scoring weights provided by user:")
             logger.info(f"[WEIGHT CONFIG]   - Accuracy weight: {request.accuracy_weight:.3f} ({request.accuracy_weight*100:.1f}%)")
             logger.info(f"[WEIGHT CONFIG]   - Health overall weight: {request.health_overall_weight:.3f} ({request.health_overall_weight*100:.1f}%)")
@@ -3284,49 +3303,64 @@ Job ID: {job_id}
     async def _start_tensorboard_server(self, job_id: str) -> Dict[str, Any]:
         """
         Start TensorBoard server for a job
-        
+
         Args:
             job_id: Unique job identifier
-            
+
         Returns:
             Dictionary with server status and URL
-            
+
         Raises:
             HTTPException: If TensorBoard logs not found or server cannot be started
         """
-        # Remove job existence check - only check if TensorBoard logs exist
-        
+        # Check if job exists
+        if job_id not in self.jobs:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+
+        job = self.jobs[job_id]
+
         try:
-            tensorboard_base_dir = Path("tensorboard_logs")
-            
-            if not tensorboard_base_dir.exists():
+            # Get TensorBoard logs directory from job's optimizer results_dir
+            if not job.optimizer or not hasattr(job.optimizer, 'results_dir') or not job.optimizer.results_dir:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No TensorBoard logs found for this job"
+                    detail="No results directory configured for this job"
                 )
-            
-            # Find the most recent run directory (new namespaced structure only)
-            run_dirs = [d for d in tensorboard_base_dir.iterdir() if d.is_dir()]
-            
-            if not run_dirs:
+
+            tensorboard_dir = job.optimizer.results_dir / "tensorboard_logs"
+
+            logger.info(f"_start_tensorboard_server: Looking for TensorBoard logs at: {tensorboard_dir}")
+
+            if not tensorboard_dir.exists():
+                logger.error(f"_start_tensorboard_server: Directory does not exist: {tensorboard_dir}")
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No run directories found in TensorBoard logs"
+                    detail=f"No TensorBoard logs found at {tensorboard_dir}"
                 )
-            
-            # Sort by modification time to get the most recent run
-            latest_run_dir = max(run_dirs, key=lambda x: x.stat().st_mtime)
-            tensorboard_dir = latest_run_dir
-            
-            # Check if there are any trial directories in the chosen directory
+
+            # Check if there are any trial directories
             trial_dirs = [d for d in tensorboard_dir.iterdir() if d.is_dir() and d.name.startswith("trial_")]
+            logger.info(f"_start_tensorboard_server: Found {len(trial_dirs)} trial directories: {[d.name for d in trial_dirs]}")
+
             if not trial_dirs:
+                logger.error(f"_start_tensorboard_server: No trial directories in {tensorboard_dir}")
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="No trial directories found in TensorBoard logs"
                 )
-            
+
+            # List actual event files found
+            for trial_dir in trial_dirs:
+                event_files = list(trial_dir.rglob("*.tfevents.*"))
+                logger.info(f"_start_tensorboard_server: {trial_dir.name} contains {len(event_files)} event files")
+                for ef in event_files[:3]:  # Log first 3 files
+                    logger.info(f"  - {ef.relative_to(tensorboard_dir)}")
+
             # Use TensorBoard manager to start server pointing to the correct directory
+            logger.info(f"_start_tensorboard_server: Starting TensorBoard with logdir={tensorboard_dir}")
             return self.tensorboard_manager.start_server(job_id, tensorboard_dir)
             
         except HTTPException:

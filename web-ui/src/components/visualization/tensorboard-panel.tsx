@@ -95,11 +95,8 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
       }
       const config = await response.json();
 
-      // Transform localhost URL to use Next.js API proxy
-      if (config?.tensorboard_url) {
-        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-        config.tensorboard_url = `${basePath}/api/tensorboard/${jobId}`;
-      }
+      // Use direct URL from backend - no proxy manipulation
+      console.log('[TensorBoard] URL from backend:', config?.tensorboard_url);
 
       return config;
     },
@@ -250,7 +247,7 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                 size="sm"
                 onClick={async () => {
                   // Check if TensorBoard is running, start if needed
-                  const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+                  const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                   const statusData = await status.json();
 
                   if (!statusData.running) {
@@ -258,10 +255,18 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                     await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
                     // Wait a moment for it to start
                     await new Promise(resolve => setTimeout(resolve, 1000));
+                    // Fetch the updated URL after starting
+                    const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
+                    const updatedData = await updatedStatus.json();
+                    const directUrl = updatedData.tensorboard_url;
+                    alert(`Opening TensorBoard at: ${directUrl}`); // Debug
+                    window.open(directUrl, '_blank');
+                  } else {
+                    // Use the URL from status response
+                    const directUrl = statusData.tensorboard_url;
+                    alert(`Opening TensorBoard at: ${directUrl}`); // Debug
+                    window.open(directUrl, '_blank');
                   }
-
-                  // Open TensorBoard
-                  window.open(tbConfig.tensorboard_url, '_blank');
                 }}
                 className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
                 title="Open full TensorBoard interface for deep analysis"

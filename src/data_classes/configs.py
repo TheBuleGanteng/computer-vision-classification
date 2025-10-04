@@ -96,7 +96,7 @@ class OptimizationConfig(BaseModel):
     )
     
     # Execution control
-    use_runpod_service: bool = Field(True, description="Use RunPod cloud service for trials and final model building")
+    use_runpod_service: bool = Field(False, description="Use RunPod cloud service for trials and final model building")
     
     # System configuration
     timeout_hours: Optional[float] = Field(5, description="Optimization timeout in hours")
@@ -285,12 +285,13 @@ class OptimizationConfig(BaseModel):
         """Validate that scoring weights are mathematically correct"""
 
         # Validate accuracy + health = 1.0 (allow small floating point errors)
-        total_weight = self.accuracy_weight + self.health_overall_weight
-        if not (0.99 <= total_weight <= 1.01):
-            raise ValueError(
-                f"Accuracy weight ({self.accuracy_weight}) + Health overall weight "
-                f"({self.health_overall_weight}) must sum to 1.0, got {total_weight:.4f}"
-            )
+        if self.accuracy_weight is not None and self.health_overall_weight is not None:
+            total_weight = self.accuracy_weight + self.health_overall_weight
+            if not (0.99 <= total_weight <= 1.01):
+                raise ValueError(
+                    f"Accuracy weight ({self.accuracy_weight}) + Health overall weight "
+                    f"({self.health_overall_weight}) must sum to 1.0, got {total_weight:.4f}"
+                )
 
         # Validate health component proportions sum to 1.0
         if self.health_component_proportions:

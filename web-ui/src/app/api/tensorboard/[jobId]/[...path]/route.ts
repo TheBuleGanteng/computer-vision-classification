@@ -74,42 +74,23 @@ export async function GET(
       );
     }
 
-    // Get the response body
+    // Get the response body - pass through without modification
     const body = await response.arrayBuffer();
-    
-    // Check if it's HTML content and inject base URL
-    const responseContentType = response.headers.get('content-type') || 'text/html';
-    let processedBody = body;
-    
-    console.log(`[TensorBoard Proxy] Path: ${pathString}, Content-Type: ${responseContentType}`);
-    
-    // Only inject base tag for actual HTML files, not JS files
-    const shouldInjectBase = responseContentType.includes('text/html') && !pathString.endsWith('.js') && !responseContentType.includes('javascript');
-    console.log(`[TensorBoard Proxy] Should inject base: ${shouldInjectBase}`);
-    
-    if (shouldInjectBase) {
-      const htmlText = new TextDecoder().decode(body);
-      // Inject base tag to fix relative URLs
-      const baseTag = `<base href="/api/tensorboard/${jobId}/">`;
-      const modifiedHtml = htmlText.replace('<head>', `<head>\n  ${baseTag}`);
-      processedBody = new TextEncoder().encode(modifiedHtml).buffer;
-      console.log(`[TensorBoard Proxy] Injected base tag for HTML content`);
-    } else {
-      console.log(`[TensorBoard Proxy] Skipping base tag injection for ${pathString}`);
-    }
-    
-    // Create response with modified headers to allow iframe embedding
-    const nextResponse = new NextResponse(processedBody, {
+
+    console.log(`[TensorBoard Proxy] Path: ${pathString}, Content-Type: ${response.headers.get('content-type')}, Size: ${body.byteLength}`);
+
+    // Create response - pass through unchanged
+    const nextResponse = new NextResponse(body, {
       status: response.status,
       statusText: response.statusText,
     });
-    
-    // Copy safe headers from TensorBoard response
-    const safeHeaders = ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified'];
-    safeHeaders.forEach(header => {
-      const value = response.headers.get(header);
+
+    // Copy all relevant headers unchanged
+    const headersToCopy = ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified'];
+    headersToCopy.forEach(headerName => {
+      const value = response.headers.get(headerName);
       if (value) {
-        nextResponse.headers.set(header, value);
+        nextResponse.headers.set(headerName, value);
       }
     });
     

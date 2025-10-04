@@ -1146,6 +1146,28 @@ async def start_training(job: Dict[str, Any]):
                 if hasattr(model_builder, 'model'):
                     logger.warning(f"running start_training ... model_builder.model is None: {model_builder.model is None}")
 
+        # Copy TensorBoard logs to plots directory BEFORE plot generation (so they get included in ZIP)
+        if model_builder and hasattr(model_builder, 'results_dir') and model_builder.results_dir:
+            try:
+                tensorboard_src = model_builder.results_dir / "tensorboard_logs" / f"trial_{trial_number}"
+                if tensorboard_src.exists():
+                    plots_dir = Path("/tmp/plots") / trial_id
+                    tensorboard_dest = plots_dir / "tensorboard_logs"
+
+                    # Copy TensorBoard logs directory
+                    import shutil
+                    shutil.copytree(tensorboard_src, tensorboard_dest, dirs_exist_ok=True)
+
+                    # Count TensorBoard files
+                    tb_file_count = sum(1 for _ in tensorboard_dest.rglob('*') if _.is_file())
+                    logger.info(f"running start_training ... ✅ Copied {tb_file_count} TensorBoard log files to plots directory")
+                    logger.info(f"running start_training ... TensorBoard logs will be included in S3 upload")
+                else:
+                    logger.warning(f"running start_training ... TensorBoard logs not found at {tensorboard_src}")
+            except Exception as e:
+                logger.error(f"running start_training ... Failed to copy TensorBoard logs: {e}")
+                # Don't fail the entire request if TensorBoard copy fails
+
         # Create OptimizationConfig object from config_data for plot generation
         optimization_config = None
         if config_data:

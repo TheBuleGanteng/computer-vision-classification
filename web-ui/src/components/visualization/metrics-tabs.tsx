@@ -293,12 +293,14 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
                           await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
                           // Wait a moment for it to start
                           await new Promise(resolve => setTimeout(resolve, 1000));
+                          // Fetch updated status to get the URL
+                          const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+                          const updatedData = await updatedStatus.json();
+                          window.open(updatedData.tensorboard_url, '_blank');
+                        } else {
+                          // Use direct URL from backend API response
+                          window.open(statusData.tensorboard_url, '_blank');
                         }
-
-                        // Open TensorBoard via Next.js API proxy
-                        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                        const tbUrl = `${basePath}/api/tensorboard/${jobId}`;
-                        window.open(tbUrl, '_blank');
                       }}
                       className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
                       title="Open TensorBoard interface"

@@ -1549,6 +1549,18 @@ class ModelOptimizer:
                                                             file_type = 'model' if file_ext in ['.keras', '.h5', '.pkl'] else 'plot'
                                                             logger.info(f"📂 Extracted {file_type}: {file_name} ({file_size} bytes)")
 
+                                                    # Move TensorBoard logs to correct location if they exist
+                                                    tensorboard_extracted = local_plots_dir / "tensorboard_logs"
+                                                    if tensorboard_extracted.exists() and tensorboard_extracted.is_dir():
+                                                        tensorboard_dest = self.results_dir / "tensorboard_logs" / f"trial_{trial.number}"
+                                                        tensorboard_dest.parent.mkdir(parents=True, exist_ok=True)
+
+                                                        import shutil
+                                                        shutil.move(str(tensorboard_extracted), str(tensorboard_dest))
+
+                                                        tb_file_count = sum(1 for _ in tensorboard_dest.rglob('*') if _.is_file())
+                                                        logger.info(f"📊 Moved {tb_file_count} TensorBoard log files to {tensorboard_dest}")
+
                                                     self._trials_with_plots.add(trial.number)
                                                     logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ S3 DOWNLOAD SUCCESS - {len(extracted_files)} files extracted")
                                             else:
