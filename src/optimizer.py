@@ -1567,6 +1567,45 @@ class ModelOptimizer:
 
                                                     self._trials_with_plots.add(trial.number)
                                                     logger.info(f"🏗️ WORKER_ISOLATION_TRACKING: ✅ S3 DOWNLOAD SUCCESS - {len(extracted_files)} files extracted")
+
+                                                # Download TensorBoard logs separately if available
+                                                tensorboard_s3_data = output.get('tensorboard_s3')
+                                                if tensorboard_s3_data and tensorboard_s3_data.get('s3_url'):
+                                                    logger.info(f"📊 Downloading TensorBoard logs from S3 for trial {trial.number}")
+                                                    tb_s3_url = tensorboard_s3_data['s3_url']
+                                                    tb_file_count = tensorboard_s3_data.get('file_count', 0)
+                                                    tb_size = tensorboard_s3_data.get('size', 0)
+
+                                                    logger.info(f"📦 TensorBoard ZIP: {tb_file_count} files, {tb_size} bytes")
+
+                                                    with tempfile.NamedTemporaryFile(suffix='_tensorboard.zip', delete=False) as tmp_tb_zip:
+                                                        temp_tb_zip_path = Path(tmp_tb_zip.name)
+
+                                                    try:
+                                                        if self._download_from_s3(tb_s3_url, temp_tb_zip_path, trial.number):
+                                                            # Extract TensorBoard ZIP directly to tensorboard_logs location
+                                                            tensorboard_dest = self.results_dir / "tensorboard_logs" / f"trial_{trial.number}"
+
+                                                            # Remove pre-created directory
+                                                            import shutil
+                                                            if tensorboard_dest.exists():
+                                                                shutil.rmtree(tensorboard_dest)
+
+                                                            # Extract ZIP - it contains trial_N directory structure
+                                                            with zipfile.ZipFile(temp_tb_zip_path, 'r') as zipf:
+                                                                zipf.extractall(self.results_dir / "tensorboard_logs")
+                                                                tb_extracted_files = zipf.namelist()
+
+                                                            actual_tb_count = sum(1 for _ in tensorboard_dest.rglob('*') if _.is_file())
+                                                            logger.info(f"📊 ✅ Extracted {actual_tb_count} TensorBoard log files to {tensorboard_dest}")
+                                                        else:
+                                                            logger.error(f"📊 ❌ Failed to download TensorBoard ZIP from S3")
+                                                    finally:
+                                                        # Clean up temporary ZIP
+                                                        try:
+                                                            temp_tb_zip_path.unlink()
+                                                        except Exception as cleanup_e:
+                                                            logger.warning(f"⚠️ Failed to cleanup TensorBoard temp zip: {cleanup_e}")
                                             else:
                                                 logger.error(f"❌ Failed to download ZIP from S3 for trial {trial.number}")
 
