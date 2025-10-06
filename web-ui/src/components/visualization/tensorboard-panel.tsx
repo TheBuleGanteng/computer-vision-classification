@@ -258,14 +258,20 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                     // Fetch the updated URL after starting
                     const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                     const updatedData = await updatedStatus.json();
-                    const directUrl = updatedData.tensorboard_url;
-                    alert(`Opening TensorBoard at: ${directUrl}`); // Debug
-                    window.open(directUrl, '_blank');
+
+                    // Transform URL for production (GCP) to use Next.js proxy
+                    const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+                    const tensorboardUrl = basePath
+                      ? `${basePath}/api/tensorboard/${jobId}`
+                      : updatedData.tensorboard_url;
+                    window.open(tensorboardUrl, '_blank');
                   } else {
-                    // Use the URL from status response
-                    const directUrl = statusData.tensorboard_url;
-                    alert(`Opening TensorBoard at: ${directUrl}`); // Debug
-                    window.open(directUrl, '_blank');
+                    // Transform URL for production (GCP) to use Next.js proxy
+                    const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+                    const tensorboardUrl = basePath
+                      ? `${basePath}/api/tensorboard/${jobId}`
+                      : statusData.tensorboard_url;
+                    window.open(tensorboardUrl, '_blank');
                   }
                 }}
                 className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"

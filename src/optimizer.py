@@ -1257,8 +1257,12 @@ class ModelOptimizer:
             )
 
             # Download using boto3 with authentication
+            # Disable multipart download (RunPod S3 has issues with Range requests)
+            from boto3.s3.transfer import TransferConfig
+            config = TransferConfig(multipart_threshold=1024*1024*1024)  # 1GB threshold (effectively disables multipart)
+
             logger.info(f"running _download_from_s3 ... Starting authenticated download from {s3_endpoint}")
-            s3_client.download_file(bucket, key, str(local_path))
+            s3_client.download_file(bucket, key, str(local_path), Config=config)
 
             actual_size = local_path.stat().st_size
             logger.info(f"running _download_from_s3 ... ✅ Download complete: {actual_size} bytes")
