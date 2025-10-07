@@ -2424,97 +2424,94 @@ On GCP VM (ssh matt@<GCP VM External IP>):
 
 ## Product Roadmap
 
-### Phase 2.6: TensorBoard GCP Deployment (READY FOR DEPLOYMENT)
+### Phase 2.6: TensorBoard Integration (LOCAL ONLY)
 
-**Status**: ✅ Development Complete - Ready for GCP deployment
+**Status**: ✅ Local Development Complete - GCP Disabled
 
-**Overview**: TensorBoard integration now fully supports both local containerized mode and GCP production deployment. The implementation uses nginx direct proxying to avoid HTML/asset rewriting issues.
+**Overview**: TensorBoard integration works in **local containerized mode only**. After extensive testing, TensorBoard's HTML/JS asset path generation is incompatible with proxying through nginx subpaths or subdomains in production. GCP users can download logs and run TensorBoard locally.
 
-#### Required GCP Deployment Steps
+#### Deployment Notes
 
-1. **Update nginx configuration on GCP VM**
-   - Copy `/default.conf` from this repo to GCP nginx config location
-   - The new TensorBoard proxy location block **MUST** be placed before other `/api/` locations
-   - Test configuration: `sudo nginx -t`
-   - Reload nginx: `sudo systemctl reload nginx`
+**GCP Production**: TensorBoard button shows alert message directing users to download logs for local viewing.
 
-2. **Update GCP docker-compose.yml**
-   - Set environment variable: `NEXT_PUBLIC_BASE_PATH=/model-architecture/computer-vision`
-   - **Do NOT** expose ports 6000-6999 on backend (nginx proxies internally)
-   - **Do NOT** set `NEXT_PUBLIC_CONTAINERIZED` (only for local Docker)
-
-3. **Deploy updated code to GCP**
-   ```bash
-   git pull
-   docker-compose build
-   docker-compose up -d
-   ```
+**Local Development**: TensorBoard fully functional via exposed ports (6000-6999).
 
 #### Technical Architecture
 
 **Local Containerized Mode:**
 - TensorBoard: Direct connection via exposed ports (6000-6999)
-- Browser accesses: `http://localhost:6168/`
-- No proxy complexity
+- Browser accesses: `http://localhost:{port}/`
+- Ports dynamically assigned via hash function
+- Full TensorBoard UI functionality
 
 **GCP Production Mode:**
-- TensorBoard: Runs internally on dynamic ports (not exposed)
-- Browser accesses: `https://kebayorantechnologies.com/model-architecture/computer-vision/tensorboard/{jobId}/`
-- Request flow: nginx → backend `/tensorboard-direct/` endpoint → TensorBoard process
-- Backend acts as intelligent proxy, looking up correct port per job
+- TensorBoard: Disabled in web UI
+- Users directed to download logs for local viewing
+- Reason: TensorBoard's absolute asset paths incompatible with nginx proxying
 
 #### Key Features Implemented
 
-1. **Backend proxy endpoint** (`/tensorboard-direct/{job_id}/{path:path}`)
-   - Located in `src/api_server.py`
-   - Forwards requests to correct TensorBoard port
-   - Returns responses unchanged (no HTML rewriting)
+1. **Dynamic port allocation**
+   - Hash-based port assignment (6000-6999) for each job
+   - Prevents port collisions across jobs
 
-2. **nginx direct routing**
-   - Regex location block captures jobId and path
-   - Proxies directly to backend, bypassing Next.js
-   - Avoids all asset path rewriting issues
+2. **Environment detection**
+   - Detects `NEXT_PUBLIC_BASE_PATH` to determine GCP vs local
+   - GCP: Shows alert directing to log download
+   - Local: Opens TensorBoard directly
 
-3. **Smart URL selection in frontend**
-   - Detects `NEXT_PUBLIC_BASE_PATH` to determine environment
-   - GCP: Uses `https://kebayorantechnologies.com/model-architecture/computer-vision/tensorboard/{jobId}/`
-   - Local: Uses `http://localhost:{port}/`
-
-4. **Automatic TensorBoard warmup**
+3. **Automatic TensorBoard warmup**
    - Frontend prefetches TensorBoard once logs are ready
    - Eliminates `ERR_EMPTY_RESPONSE` on first click
 
-5. **logs_ready validation**
+4. **logs_ready validation**
    - Backend checks for `.tfevents.*` files before allowing access
    - Prevents premature TensorBoard access before logs download
 
+5. **TensorBoard process management**
+   - Start/stop/status endpoints in backend
+   - Automatic cleanup on container restart
+
 #### Files Modified
 
-- `default.conf` - nginx configuration with TensorBoard proxy
-- `src/api_server.py` - Backend proxy endpoint
-- `web-ui/src/components/visualization/metrics-tabs.tsx` - URL selection logic
-- `web-ui/src/components/visualization/tensorboard-panel.tsx` - URL selection logic
+- `src/api_server.py` - TensorBoard process management, port allocation
+- `web-ui/src/components/visualization/metrics-tabs.tsx` - Environment detection, GCP disable
+- `web-ui/src/components/visualization/tensorboard-panel.tsx` - Environment detection, GCP disable
 - `src/optimizer.py` - Docker path detection
 - `docker-compose.yml` - Local port exposure (6000-6999)
 
-#### Testing Checklist for GCP
+#### Testing Checklist
 
-- [ ] Copy `default.conf` to GCP nginx
-- [ ] Test nginx config: `sudo nginx -t`
-- [ ] Reload nginx: `sudo systemctl reload nginx`
-- [ ] Update GCP docker-compose with `NEXT_PUBLIC_BASE_PATH`
-- [ ] Deploy code and rebuild containers
-- [ ] Run optimization with `use_runpod_service=True`
-- [ ] Wait for TensorBoard logs to download
+**Local Mode:**
+- [ ] Run optimization locally with Docker
+- [ ] Wait for TensorBoard logs to be ready
 - [ ] Click TensorBoard button
-- [ ] Verify URL: `https://kebayorantechnologies.com/model-architecture/computer-vision/tensorboard/{jobId}/`
-- [ ] Confirm TensorBoard loads with all assets (fonts, JS, plots)
-- [ ] Test multiple concurrent jobs with different TensorBoard instances
+- [ ] Verify opens `http://localhost:{port}/`
+- [ ] Confirm TensorBoard loads with all assets and metrics
+
+**GCP Mode:**
+- [ ] Deploy to GCP
+- [ ] Run optimization with `use_runpod_service=True`
+- [ ] Click TensorBoard button
+- [ ] Verify alert message appears directing to log download
+- [ ] Download logs via download button
+- [ ] Run TensorBoard locally: `tensorboard --logdir ./downloaded_logs`
 
 #### Known Limitations
 
-- TensorBoard ports (6000-6999) limit to 1000 concurrent jobs
+- **GCP**: TensorBoard web UI disabled - users must download logs for local viewing
+- **Local**: TensorBoard ports (6000-6999) limit to 1000 concurrent jobs
 - Port collision possible if multiple jobs map to same port (low probability with hash function)
 - TensorBoard processes persist until manually stopped or container restart
+
+#### Why TensorBoard Doesn't Work in GCP
+
+After extensive testing with multiple approaches (Next.js proxy, nginx direct proxy, subdomain routing, path_prefix), TensorBoard's architecture is fundamentally incompatible with production deployment behind proxies:
+
+1. **Absolute asset paths**: TensorBoard generates HTML/JS with absolute paths like `/font-roboto/file.woff2` and `/index.js`
+2. **Path prefix issues**: The `--path_prefix` flag doesn't rewrite all asset URLs correctly
+3. **HTML rewriting fragility**: Using nginx `sub_filter` to rewrite HTML on-the-fly is fragile and breaks with TensorBoard updates
+
+The simplest, most maintainable solution is to keep TensorBoard local-only and provide log download for GCP users.
 
 --- 

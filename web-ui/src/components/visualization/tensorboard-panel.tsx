@@ -265,19 +265,27 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                     const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                     const updatedData = await updatedStatus.json();
 
-                    // In GCP: Use subdomain. In local: Use direct localhost URL
+                    // TensorBoard only works in local mode
                     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                    const tensorboardUrl = basePath
-                      ? `https://tensorboard.kebayorantechnologies.com/${jobId}/`
-                      : updatedData.tensorboard_url;
-                    window.open(tensorboardUrl, '_blank');
+                    if (basePath) {
+                      // GCP mode - TensorBoard disabled
+                      alert('TensorBoard is only available in local development mode. Download the logs to view them locally.');
+                      return;
+                    }
+
+                    // Local mode - open TensorBoard
+                    window.open(updatedData.tensorboard_url, '_blank');
                   } else {
-                    // In GCP: Use subdomain. In local: Use direct localhost URL
+                    // TensorBoard only works in local mode
                     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                    const tensorboardUrl = basePath
-                      ? `https://tensorboard.kebayorantechnologies.com/${jobId}/`
-                      : statusData.tensorboard_url;
-                    window.open(tensorboardUrl, '_blank');
+                    if (basePath) {
+                      // GCP mode - TensorBoard disabled
+                      alert('TensorBoard is only available in local development mode. Download the logs to view them locally.');
+                      return;
+                    }
+
+                    // Local mode - open TensorBoard
+                    window.open(statusData.tensorboard_url, '_blank');
                   }
                 }}
                 className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
