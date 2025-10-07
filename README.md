@@ -2420,4 +2420,101 @@ On GCP VM (ssh matt@<GCP VM External IP>):
 
 **Total Estimated Time**: 13-18 hours (excluding 24-hour stability test waiting time)
 
+---
+
+## Product Roadmap
+
+### Phase 2.6: TensorBoard GCP Deployment (READY FOR DEPLOYMENT)
+
+**Status**: ✅ Development Complete - Ready for GCP deployment
+
+**Overview**: TensorBoard integration now fully supports both local containerized mode and GCP production deployment. The implementation uses nginx direct proxying to avoid HTML/asset rewriting issues.
+
+#### Required GCP Deployment Steps
+
+1. **Update nginx configuration on GCP VM**
+   - Copy `/default.conf` from this repo to GCP nginx config location
+   - The new TensorBoard proxy location block **MUST** be placed before other `/api/` locations
+   - Test configuration: `sudo nginx -t`
+   - Reload nginx: `sudo systemctl reload nginx`
+
+2. **Update GCP docker-compose.yml**
+   - Set environment variable: `NEXT_PUBLIC_BASE_PATH=/model-architecture/computer-vision`
+   - **Do NOT** expose ports 6000-6999 on backend (nginx proxies internally)
+   - **Do NOT** set `NEXT_PUBLIC_CONTAINERIZED` (only for local Docker)
+
+3. **Deploy updated code to GCP**
+   ```bash
+   git pull
+   docker-compose build
+   docker-compose up -d
+   ```
+
+#### Technical Architecture
+
+**Local Containerized Mode:**
+- TensorBoard: Direct connection via exposed ports (6000-6999)
+- Browser accesses: `http://localhost:6168/`
+- No proxy complexity
+
+**GCP Production Mode:**
+- TensorBoard: Runs internally on dynamic ports (not exposed)
+- Browser accesses: `https://kebayorantechnologies.com/model-architecture/computer-vision/tensorboard/{jobId}/`
+- Request flow: nginx → backend `/tensorboard-direct/` endpoint → TensorBoard process
+- Backend acts as intelligent proxy, looking up correct port per job
+
+#### Key Features Implemented
+
+1. **Backend proxy endpoint** (`/tensorboard-direct/{job_id}/{path:path}`)
+   - Located in `src/api_server.py`
+   - Forwards requests to correct TensorBoard port
+   - Returns responses unchanged (no HTML rewriting)
+
+2. **nginx direct routing**
+   - Regex location block captures jobId and path
+   - Proxies directly to backend, bypassing Next.js
+   - Avoids all asset path rewriting issues
+
+3. **Smart URL selection in frontend**
+   - Detects `NEXT_PUBLIC_BASE_PATH` to determine environment
+   - GCP: Uses `https://kebayorantechnologies.com/model-architecture/computer-vision/tensorboard/{jobId}/`
+   - Local: Uses `http://localhost:{port}/`
+
+4. **Automatic TensorBoard warmup**
+   - Frontend prefetches TensorBoard once logs are ready
+   - Eliminates `ERR_EMPTY_RESPONSE` on first click
+
+5. **logs_ready validation**
+   - Backend checks for `.tfevents.*` files before allowing access
+   - Prevents premature TensorBoard access before logs download
+
+#### Files Modified
+
+- `default.conf` - nginx configuration with TensorBoard proxy
+- `src/api_server.py` - Backend proxy endpoint
+- `web-ui/src/components/visualization/metrics-tabs.tsx` - URL selection logic
+- `web-ui/src/components/visualization/tensorboard-panel.tsx` - URL selection logic
+- `src/optimizer.py` - Docker path detection
+- `docker-compose.yml` - Local port exposure (6000-6999)
+
+#### Testing Checklist for GCP
+
+- [ ] Copy `default.conf` to GCP nginx
+- [ ] Test nginx config: `sudo nginx -t`
+- [ ] Reload nginx: `sudo systemctl reload nginx`
+- [ ] Update GCP docker-compose with `NEXT_PUBLIC_BASE_PATH`
+- [ ] Deploy code and rebuild containers
+- [ ] Run optimization with `use_runpod_service=True`
+- [ ] Wait for TensorBoard logs to download
+- [ ] Click TensorBoard button
+- [ ] Verify URL: `https://kebayorantechnologies.com/model-architecture/computer-vision/tensorboard/{jobId}/`
+- [ ] Confirm TensorBoard loads with all assets (fonts, JS, plots)
+- [ ] Test multiple concurrent jobs with different TensorBoard instances
+
+#### Known Limitations
+
+- TensorBoard ports (6000-6999) limit to 1000 concurrent jobs
+- Port collision possible if multiple jobs map to same port (low probability with hash function)
+- TensorBoard processes persist until manually stopped or container restart
+
 --- 

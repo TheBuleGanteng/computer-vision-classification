@@ -265,17 +265,17 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                     const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                     const updatedData = await updatedStatus.json();
 
-                    // Use proxy route only for GCP production (not local containerized)
+                    // In GCP: Use nginx direct proxy route. In local: Use direct localhost URL
                     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                     const tensorboardUrl = basePath
-                      ? `${basePath}/api/tensorboard/${jobId}`
+                      ? `https://kebayorantechnologies.com${basePath}/tensorboard/${jobId}/`
                       : updatedData.tensorboard_url;
                     window.open(tensorboardUrl, '_blank');
                   } else {
-                    // Use proxy route only for GCP production (not local containerized)
+                    // In GCP: Use nginx direct proxy route. In local: Use direct localhost URL
                     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                     const tensorboardUrl = basePath
-                      ? `${basePath}/api/tensorboard/${jobId}`
+                      ? `https://kebayorantechnologies.com${basePath}/tensorboard/${jobId}/`
                       : statusData.tensorboard_url;
                     window.open(tensorboardUrl, '_blank');
                   }

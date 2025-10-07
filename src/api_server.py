@@ -1996,7 +1996,73 @@ class OptimizationAPI:
         async def stop_tensorboard_server(job_id: str):
             """Stop TensorBoard server for a job"""
             return await self._stop_tensorboard_server(job_id)
-        
+
+        # TensorBoard direct proxy endpoint (for GCP nginx routing)
+        @self.app.get("/tensorboard-direct/{job_id}/{path:path}")
+        async def tensorboard_direct_proxy(job_id: str, path: str = "", request: Request = None):
+            """
+            Direct proxy to TensorBoard server, bypassing Next.js
+
+            This endpoint is used in GCP production where nginx routes TensorBoard
+            requests directly to the backend, which then forwards to the correct
+            TensorBoard process running on a dynamic port.
+
+            Args:
+                job_id: The job ID to proxy TensorBoard for
+                path: The remaining path to forward (e.g., index.js, font-roboto/file.woff2)
+                request: The incoming request
+
+            Returns:
+                Response from TensorBoard server
+            """
+            import httpx
+            from fastapi.responses import Response
+
+            # Check if TensorBoard is running for this job
+            if job_id not in self.tensorboard_manager.running_servers:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"TensorBoard not running for job {job_id}. Start it first via /jobs/{job_id}/tensorboard/start"
+                )
+
+            # Get the port for this job's TensorBoard instance
+            _, port = self.tensorboard_manager.running_servers[job_id]
+
+            # Build TensorBoard URL
+            tensorboard_url = f"http://localhost:{port}/{path}"
+
+            # Preserve query parameters
+            if request and request.url.query:
+                tensorboard_url += f"?{request.url.query}"
+
+            # Forward request to TensorBoard
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    # Forward headers (exclude host/connection which httpx sets)
+                    headers = {}
+                    if request:
+                        headers = {
+                            k: v for k, v in request.headers.items()
+                            if k.lower() not in ['host', 'connection']
+                        }
+
+                    response = await client.get(tensorboard_url, headers=headers)
+
+                    # Return TensorBoard's response
+                    return Response(
+                        content=response.content,
+                        status_code=response.status_code,
+                        headers=dict(response.headers),
+                        media_type=response.headers.get("content-type")
+                    )
+
+                except httpx.RequestError as e:
+                    logger.error(f"Failed to proxy to TensorBoard at {tensorboard_url}: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Failed to connect to TensorBoard: {str(e)}"
+                    )
+
         # Plot serving endpoints for embedded visualizations
         @self.app.get("/jobs/{job_id}/plots/{trial_id}/{plot_type}")
         async def get_trial_plot(job_id: str, trial_id: str, plot_type: str):
