@@ -1997,19 +1997,18 @@ class OptimizationAPI:
             """Stop TensorBoard server for a job"""
             return await self._stop_tensorboard_server(job_id)
 
-        # TensorBoard direct proxy endpoint (for GCP nginx routing)
-        @self.app.get("/tensorboard-direct/{job_id}/{path:path}")
-        async def tensorboard_direct_proxy(job_id: str, path: str = "", request: Request = None):
+        # TensorBoard subdomain proxy endpoint (for GCP with subdomain routing)
+        @self.app.get("/tensorboard-subdomain/{job_id}/{path:path}")
+        async def tensorboard_subdomain_proxy(job_id: str, path: str = "", request: Request = None):
             """
-            Direct proxy to TensorBoard server, bypassing Next.js
+            Proxy to TensorBoard server via subdomain routing
 
-            This endpoint is used in GCP production where nginx routes TensorBoard
-            requests directly to the backend, which then forwards to the correct
-            TensorBoard process running on a dynamic port.
+            Used with subdomain approach: https://tensorboard.kebayorantechnologies.com/{job_id}/
+            TensorBoard runs at root without path_prefix, avoiding asset URL rewriting issues.
 
             Args:
                 job_id: The job ID to proxy TensorBoard for
-                path: The remaining path to forward (e.g., index.js, font-roboto/file.woff2)
+                path: The remaining path to forward (e.g., index.js, data/logdir)
                 request: The incoming request
 
             Returns:
@@ -2028,7 +2027,7 @@ class OptimizationAPI:
             # Get the port for this job's TensorBoard instance
             _, port = self.tensorboard_manager.running_servers[job_id]
 
-            # Build TensorBoard URL
+            # Build TensorBoard URL - request to root since no path_prefix used
             tensorboard_url = f"http://localhost:{port}/{path}"
 
             # Preserve query parameters
@@ -2048,7 +2047,7 @@ class OptimizationAPI:
 
                     response = await client.get(tensorboard_url, headers=headers)
 
-                    # Return TensorBoard's response
+                    # Return TensorBoard's response unchanged
                     return Response(
                         content=response.content,
                         status_code=response.status_code,
