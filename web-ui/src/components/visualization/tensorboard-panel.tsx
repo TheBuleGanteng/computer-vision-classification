@@ -246,27 +246,33 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                 variant="outline"
                 size="sm"
                 onClick={async () => {
-                  // Check if TensorBoard is running, start if needed
+                  // Check if TensorBoard is running and logs are ready
                   const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                   const statusData = await status.json();
+
+                  // Don't open if logs aren't ready yet
+                  if (!statusData.logs_ready) {
+                    alert('TensorBoard logs are still downloading. Please wait a moment and try again.');
+                    return;
+                  }
 
                   if (!statusData.running) {
                     // Start TensorBoard first
                     await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
-                    // Wait a moment for it to start
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    // Wait longer for TensorBoard to fully initialize and be ready to serve requests
+                    await new Promise(resolve => setTimeout(resolve, 3000));
                     // Fetch the updated URL after starting
                     const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                     const updatedData = await updatedStatus.json();
 
-                    // Transform URL for production (GCP) to use Next.js proxy
+                    // Use proxy route only for GCP production (not local containerized)
                     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                     const tensorboardUrl = basePath
                       ? `${basePath}/api/tensorboard/${jobId}`
                       : updatedData.tensorboard_url;
                     window.open(tensorboardUrl, '_blank');
                   } else {
-                    // Transform URL for production (GCP) to use Next.js proxy
+                    // Use proxy route only for GCP production (not local containerized)
                     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                     const tensorboardUrl = basePath
                       ? `${basePath}/api/tensorboard/${jobId}`

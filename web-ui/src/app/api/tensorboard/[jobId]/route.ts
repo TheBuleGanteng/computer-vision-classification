@@ -50,8 +50,10 @@ export async function GET(
 
   // Use backend hostname for TensorBoard (runs on backend container)
   const backendHost = backendUrl.replace('http://', '').split(':')[0];
+
+  // TensorBoard runs at root (no path prefix) - proxy strips /api/tensorboard/{jobId} before forwarding
   const tensorboardUrl = `http://${backendHost}:${port}/`;
-  
+
   // Forward query parameters
   const url = new URL(request.url);
   const searchParams = url.searchParams.toString();
@@ -81,8 +83,28 @@ export async function GET(
       );
     }
 
-    // Get the response body - pass through without modification
-    const body = await response.arrayBuffer();
+    // Get the response body and modify HTML to add base tag for correct asset paths
+    const contentType = response.headers.get('content-type') || '';
+    let body: ArrayBuffer | string = await response.arrayBuffer();
+
+    // If HTML, inject <base> tag and rewrite absolute URLs to relative
+    if (contentType.includes('text/html')) {
+      let html = new TextDecoder().decode(body);
+
+      // Inject base tag right after <head> to tell browser where to resolve relative URLs
+      const baseTag = `<base href="/api/tensorboard/${jobId}/">`;
+      html = html.replace(/<head>/i, `<head>${baseTag}`);
+
+      // Rewrite absolute URLs to relative (for assets that ignore <base> tag)
+      // Fix: url(/font-roboto/...) -> url(font-roboto/...)
+      html = html.replace(/url\(\//g, 'url(');
+      // Fix: src="/index.js" -> src="index.js"
+      html = html.replace(/src="\//g, 'src="');
+      html = html.replace(/href="\//g, 'href="');
+
+      console.log(`[TensorBoard Proxy Root] Injected base tag and rewrote absolute URLs for job ${jobId}`);
+      body = html;
+    }
 
     // Create response with headers to allow iframe embedding
     const nextResponse = new NextResponse(body, {
@@ -90,8 +112,11 @@ export async function GET(
       statusText: response.statusText,
     });
 
-    // Copy all relevant headers unchanged
-    const headersToCopy = ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified'];
+    // Copy all relevant headers (skip content-length if we modified the body)
+    const headersToCopy = ['content-type', 'cache-control', 'etag', 'last-modified'];
+    if (!contentType.includes('text/html')) {
+      headersToCopy.push('content-length'); // Only include content-length if we didn't modify the body
+    }
     headersToCopy.forEach(headerName => {
       const value = response.headers.get(headerName);
       if (value) {
@@ -113,11 +138,15 @@ export async function GET(
     
   } catch (error: unknown) {
     console.error('[TensorBoard Proxy Root] Fetch error:', error);
-    
+    if (error instanceof Error && 'cause' in error) {
+      console.error('[TensorBoard Proxy Root] Error cause:', error.cause);
+    }
+
     return NextResponse.json(
-      { 
+      {
         error: 'Failed to connect to TensorBoard server',
         details: error instanceof Error ? error.message : 'Unknown error',
+        cause: error instanceof Error && 'cause' in error ? String(error.cause) : undefined,
         port,
         jobId,
         suggestion: `Start TensorBoard server for job ${jobId} on port ${port}`

@@ -1029,9 +1029,17 @@ class ModelOptimizer:
     
     def _setup_results_directory(self) -> None:
         """Create directory using the unified run_name"""
-        current_file = Path(__file__)
-        project_root = current_file.parent.parent
-        optimization_results_dir = project_root / "optimization_results"
+        # Detect if running in Docker container
+        in_docker = os.path.exists('/.dockerenv') or os.getenv('ENVIRONMENT') in ['development', 'production']
+
+        if in_docker:
+            # In Docker, use absolute /app path (where code is copied)
+            optimization_results_dir = Path("/app/optimization_results")
+        else:
+            # Local development: use project root
+            current_file = Path(__file__)
+            project_root = current_file.parent.parent
+            optimization_results_dir = project_root / "optimization_results"
         
         if self.run_name:
             self.results_dir = optimization_results_dir / self.run_name

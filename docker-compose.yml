@@ -5,6 +5,8 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: cv-classification-backend
+    ports:
+      - "6000-6999:6000-6999"  # Expose TensorBoard port range to host
     networks:
       - app-network
     env_file:
@@ -38,6 +40,7 @@ services:
     environment:
       - NODE_ENV=${ENVIRONMENT:-development}
       - NEXT_PUBLIC_API_URL=/api
+      - NEXT_PUBLIC_CONTAINERIZED=true
       - GCP_DEPLOYMENT=${GCP_DEPLOYMENT:-false}
       - WEB_BASEPATH=${WEB_BASEPATH:-}
       - BACKEND_INTERNAL_URL=http://backend:8000

@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useCallback, useRef, useMemo, Suspense } from 'react';
+import React, { useState, useCallback, useRef, useMemo, Suspense, useEffect } from 'react';
 import { Activity, Zap, Brain, Target, Skull, TrendingUp, LineChart, Network, Download, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import TensorBoardPanel from './tensorboard-panel';
@@ -50,7 +50,43 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   const [showArchitecturePopup, setShowArchitecturePopup] = useState(false);
   const tabModelGraphRef = useRef<{ exportToPNG: () => Promise<Blob | null> } | null>(null);
   const lastRenderTime = useRef<number>(0);
-  
+  const [tensorboardPreloaded, setTensorboardPreloaded] = useState(false);
+
+  // Preload TensorBoard once logs are ready so it's warm when user clicks
+  useEffect(() => {
+    if (tensorboardPreloaded) return;
+
+    const checkAndPreload = async () => {
+      try {
+        const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+        const statusData = await status.json();
+
+        // Once logs are ready and server is running, prefetch TensorBoard to warm it up
+        if (statusData.logs_ready && statusData.running && !tensorboardPreloaded) {
+          const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+          const tensorboardUrl = basePath
+            ? `${basePath}/api/tensorboard/${jobId}`
+            : statusData.tensorboard_url;
+
+          // Make a background request to warm up TensorBoard
+          fetch(tensorboardUrl, { mode: 'no-cors' }).catch(() => {
+            // Ignore errors - this is just a prefetch
+          });
+
+          setTensorboardPreloaded(true);
+        }
+      } catch (error) {
+        // Ignore errors - this is optional optimization
+      }
+    };
+
+    // Check every 5 seconds until preloaded
+    const interval = setInterval(checkAndPreload, 5000);
+    checkAndPreload(); // Check immediately too
+
+    return () => clearInterval(interval);
+  }, [jobId, tensorboardPreloaded]);
+
   // Throttle heavy renders to prevent setTimeout violations
   const shouldRender = useMemo(() => {
     const now = Date.now();
@@ -284,27 +320,33 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
                       variant="outline"
                       size="sm"
                       onClick={async () => {
-                        // Check if TensorBoard is running, start if needed
+                        // Check if TensorBoard is running and logs are ready
                         const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
                         const statusData = await status.json();
+
+                        // Don't open if logs aren't ready yet
+                        if (!statusData.logs_ready) {
+                          alert('TensorBoard logs are still downloading. Please wait a moment and try again.');
+                          return;
+                        }
 
                         if (!statusData.running) {
                           // Start TensorBoard first
                           await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
-                          // Wait a moment for it to start
-                          await new Promise(resolve => setTimeout(resolve, 1000));
+                          // Wait longer for TensorBoard to fully initialize and be ready to serve requests
+                          await new Promise(resolve => setTimeout(resolve, 3000));
                           // Fetch updated status to get the URL
                           const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
                           const updatedData = await updatedStatus.json();
 
-                          // Transform URL for production (GCP) to use Next.js proxy
+                          // Use proxy route only for GCP production (not local containerized)
                           const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                           const tensorboardUrl = basePath
                             ? `${basePath}/api/tensorboard/${jobId}`
                             : updatedData.tensorboard_url;
                           window.open(tensorboardUrl, '_blank');
                         } else {
-                          // Transform URL for production (GCP) to use Next.js proxy
+                          // Use proxy route only for GCP production (not local containerized)
                           const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
                           const tensorboardUrl = basePath
                             ? `${basePath}/api/tensorboard/${jobId}`

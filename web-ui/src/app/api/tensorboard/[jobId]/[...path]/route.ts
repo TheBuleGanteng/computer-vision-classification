@@ -46,6 +46,8 @@ export async function GET(
   const pathString = path ? path.join('/') : '';
   // Use backend hostname for TensorBoard (runs on backend container)
   const backendHost = backendUrl.replace('http://', '').split(':')[0];
+
+  // TensorBoard runs at root (no path prefix) - proxy strips /api/tensorboard/{jobId} before forwarding
   const tensorboardUrl = `http://${backendHost}:${port}/${pathString}`;
   
   // Forward query parameters

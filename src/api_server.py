@@ -111,7 +111,18 @@ class TensorBoardManager:
                 del self.running_servers[job_id]
         
         try:
+            # Detect if running in containerized environment
+            in_docker = os.path.exists('/.dockerenv') or os.getenv('ENVIRONMENT') in ['development', 'production']
+
+            if in_docker:
+                logger.info(f"TensorBoardManager.start_server: 🐳 Running in containerized mode - Next.js proxy will handle path routing")
+            else:
+                logger.info(f"TensorBoardManager.start_server: 💻 Running in local mode - will use direct localhost URLs")
+
             # Start TensorBoard server
+            # NOTE: We do NOT use --path_prefix in containerized mode because TensorBoard doesn't
+            # correctly rewrite all asset URLs. Instead, the Next.js proxy strips the path prefix
+            # before forwarding requests to TensorBoard at root.
             cmd = [
                 "tensorboard",
                 "--logdir", str(log_dir),
@@ -226,33 +237,44 @@ class TensorBoardManager:
     def get_server_status(self, job_id: str) -> Dict[str, Any]:
         """
         Get status of TensorBoard server for a job
-        
+
         Args:
             job_id: Unique job identifier
-            
+
         Returns:
-            Dictionary with server status
+            Dictionary with server status including logs_ready flag
         """
+        # Check if TensorBoard logs exist and have event files
+        logs_ready = False
+        if hasattr(self, 'app_instance') and self.app_instance:
+            job = self.app_instance.jobs.get(job_id)
+            if job and job.tensorboard_logs_dir and job.tensorboard_logs_dir.exists():
+                # Check if directory has any .tfevents files
+                event_files = list(job.tensorboard_logs_dir.rglob('*.tfevents.*'))
+                logs_ready = len(event_files) > 0
+
         if job_id not in self.running_servers:
             return {
                 "status": "stopped",
                 "job_id": job_id,
                 "running": False,
+                "logs_ready": logs_ready,
                 "port": self.get_port_for_job(job_id),
                 "tensorboard_url": f"http://localhost:{self.get_port_for_job(job_id)}"
             }
-        
+
         process, port = self.running_servers[job_id]
         running = process.poll() is None
-        
+
         if not running:
             # Process died, clean up
             del self.running_servers[job_id]
-        
+
         return {
             "status": "running" if running else "stopped",
             "job_id": job_id,
             "running": running,
+            "logs_ready": logs_ready,
             "port": port,
             "tensorboard_url": f"http://localhost:{port}",
             "pid": process.pid if running else None
@@ -838,6 +860,7 @@ class OptimizationJob:
         # TensorBoard manager for automatic server startup
         self.tensorboard_manager = tensorboard_manager
         self.tensorboard_logs_dir: Optional[Path] = None  # Will be set when optimization starts
+        self.tensorboard_logs_ready: bool = False  # Set to True when first logs are downloaded
         self._current_epoch_info: Dict[str, Any] = {}
         
         logger.debug(f"running OptimizationJob.__init__ ... Created job {self.job_id} for dataset {request.dataset_name}")
@@ -1153,39 +1176,33 @@ class OptimizationJob:
         
         # Start optimization with direct routing
         self.task = asyncio.create_task(self.execute_optimization())
-        
-        # Auto-start TensorBoard server in the background (only for local execution)
-        if not (self.request.use_runpod_service and self.request.runpod_service_endpoint):
-            asyncio.create_task(self._auto_start_tensorboard())
+
+        # Auto-start TensorBoard server in the background
+        # TensorBoard will monitor the directory and auto-reload as logs appear
+        asyncio.create_task(self._auto_start_tensorboard())
     
     async def _auto_start_tensorboard(self) -> None:
         """
-        Automatically start TensorBoard server after optimization begins
-        
-        Waits for TensorBoard logs to be created, then starts the server automatically.
-        This eliminates the need for manual TensorBoard server startup.
+        Automatically start TensorBoard server when optimization begins
+
+        Creates the tensorboard_logs directory immediately and starts TensorBoard.
+        TensorBoard will auto-reload as logs appear (via --reload_interval flag).
         """
         try:
             if not self.tensorboard_manager:
                 logger.info(f"No TensorBoard manager available for job {self.job_id}")
                 return
-                
+
             logger.info(f"Auto-starting TensorBoard for job {self.job_id}")
-            
-            # Wait a bit for optimization to start and create log directories
-            await asyncio.sleep(10)  # Give time for first trial to start logging
-            
-            # Wait for tensorboard logs directory to be available
-            max_wait = 30  # Wait up to 30 more seconds
-            wait_count = 0
-            while not self.tensorboard_logs_dir and wait_count < max_wait:
-                await asyncio.sleep(1)
-                wait_count += 1
-            
+
+            # Brief wait to ensure tensorboard_logs_dir is set
+            await asyncio.sleep(2)
+
             if not self.tensorboard_logs_dir:
-                logger.warning(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard logs directory not available after waiting")
+                logger.warning(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard logs directory path not available")
                 return
-            
+
+            # Create directory immediately (even if empty) - TensorBoard will monitor it
             if not self.tensorboard_logs_dir.exists():
                 logger.info(f"running OptimizationJob._auto_start_tensorboard ... Creating TensorBoard logs directory: {self.tensorboard_logs_dir}")
                 try:
@@ -1194,12 +1211,12 @@ class OptimizationJob:
                 except Exception as e:
                     logger.warning(f"running OptimizationJob._auto_start_tensorboard ... Failed to create TensorBoard logs directory: {e}")
                     return
-            
-            # Start TensorBoard server automatically
+
+            # Start TensorBoard server immediately - it will auto-reload as logs appear
             logger.info(f"Starting TensorBoard server with logs from: {self.tensorboard_logs_dir}")
             result = self.tensorboard_manager.start_server(self.job_id, self.tensorboard_logs_dir)
             logger.info(f"running OptimizationJob._auto_start_tensorboard ... TensorBoard auto-started: {result}")
-                
+
         except Exception as e:
             logger.warning(f"running OptimizationJob._auto_start_tensorboard ... Failed to auto-start TensorBoard: {e}")
             # Don't fail the optimization if TensorBoard startup fails
@@ -1744,8 +1761,9 @@ class OptimizationAPI:
             lifespan=self.lifespan
         )
         
-        # Initialize TensorBoard manager
+        # Initialize TensorBoard manager with reference to this app instance
         self.tensorboard_manager = TensorBoardManager()
+        self.tensorboard_manager.app_instance = self
         
         # Configure CORS for Next.js development server
         self.app.add_middleware(
