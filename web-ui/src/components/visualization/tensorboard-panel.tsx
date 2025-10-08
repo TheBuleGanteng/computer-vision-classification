@@ -241,7 +241,8 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
             })()}
           </div>
           <div className="flex flex-col gap-1 w-24">
-            {tbConfig?.tensorboard_url && (
+            {/* Only show TensorBoard button in local mode */}
+            {!process.env.NEXT_PUBLIC_BASE_PATH && tbConfig?.tensorboard_url && (
               <Button
                 variant="outline"
                 size="sm"
@@ -264,27 +265,8 @@ export const TrainingMetricsPanel: React.FC<TrainingMetricsPanelProps> = ({
                     // Fetch the updated URL after starting
                     const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url?t=${Date.now()}`);
                     const updatedData = await updatedStatus.json();
-
-                    // TensorBoard only works in local mode
-                    const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                    if (basePath) {
-                      // GCP mode - TensorBoard disabled
-                      alert('TensorBoard is only available in local development mode. Download the logs to view them locally.');
-                      return;
-                    }
-
-                    // Local mode - open TensorBoard
                     window.open(updatedData.tensorboard_url, '_blank');
                   } else {
-                    // TensorBoard only works in local mode
-                    const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                    if (basePath) {
-                      // GCP mode - TensorBoard disabled
-                      alert('TensorBoard is only available in local development mode. Download the logs to view them locally.');
-                      return;
-                    }
-
-                    // Local mode - open TensorBoard
                     window.open(statusData.tensorboard_url, '_blank');
                   }
                 }}

@@ -316,58 +316,42 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
                     </p>
                   </div>
                   <div className="flex flex-col gap-1 w-24">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={async () => {
-                        // Check if TensorBoard is running and logs are ready
-                        const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
-                        const statusData = await status.json();
+                    {/* Only show TensorBoard button in local mode */}
+                    {!process.env.NEXT_PUBLIC_BASE_PATH && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={async () => {
+                          // Check if TensorBoard is running and logs are ready
+                          const status = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+                          const statusData = await status.json();
 
-                        // Don't open if logs aren't ready yet
-                        if (!statusData.logs_ready) {
-                          alert('TensorBoard logs are still downloading. Please wait a moment and try again.');
-                          return;
-                        }
-
-                        if (!statusData.running) {
-                          // Start TensorBoard first
-                          await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
-                          // Wait longer for TensorBoard to fully initialize and be ready to serve requests
-                          await new Promise(resolve => setTimeout(resolve, 3000));
-                          // Fetch updated status to get the URL
-                          const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
-                          const updatedData = await updatedStatus.json();
-
-                          // TensorBoard only works in local mode
-                          const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                          if (basePath) {
-                            // GCP mode - TensorBoard disabled
-                            alert('TensorBoard is only available in local development mode. Download the logs to view them locally.');
+                          // Don't open if logs aren't ready yet
+                          if (!statusData.logs_ready) {
+                            alert('TensorBoard logs are still downloading. Please wait a moment and try again.');
                             return;
                           }
 
-                          // Local mode - open TensorBoard
-                          window.open(updatedData.tensorboard_url, '_blank');
-                        } else {
-                          // TensorBoard only works in local mode
-                          const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-                          if (basePath) {
-                            // GCP mode - TensorBoard disabled
-                            alert('TensorBoard is only available in local development mode. Download the logs to view them locally.');
-                            return;
+                          if (!statusData.running) {
+                            // Start TensorBoard first
+                            await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/start`, { method: 'POST' });
+                            // Wait longer for TensorBoard to fully initialize and be ready to serve requests
+                            await new Promise(resolve => setTimeout(resolve, 3000));
+                            // Fetch updated status to get the URL
+                            const updatedStatus = await fetch(`${API_BASE_URL}/jobs/${jobId}/tensorboard/url`);
+                            const updatedData = await updatedStatus.json();
+                            window.open(updatedData.tensorboard_url, '_blank');
+                          } else {
+                            window.open(statusData.tensorboard_url, '_blank');
                           }
-
-                          // Local mode - open TensorBoard
-                          window.open(statusData.tensorboard_url, '_blank');
-                        }
-                      }}
-                      className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
-                      title="Open TensorBoard interface"
-                    >
-                      <ExternalLink className="w-2 h-2" />
-                      TensorBoard
-                    </Button>
+                        }}
+                        className="flex items-center justify-center gap-1 w-full h-6 text-xs px-2 py-1"
+                        title="Open TensorBoard interface"
+                      >
+                        <ExternalLink className="w-2 h-2" />
+                        TensorBoard
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
