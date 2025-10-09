@@ -12,6 +12,7 @@ export interface SliderProps {
   className?: string
   label?: string
   showValue?: boolean
+  formatAsPercentage?: boolean
 }
 
 export function Slider({
@@ -23,11 +24,15 @@ export function Slider({
   disabled = false,
   className = "",
   label,
-  showValue = true
+  showValue = true,
+  formatAsPercentage = true
 }: SliderProps) {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     onChange(parseFloat(e.target.value))
   }
+
+  // Format value for display
+  const displayValue = formatAsPercentage ? `${value.toFixed(1)}%` : value.toFixed(0)
 
   return (
     <div className={`flex flex-col gap-2 ${className}`}>
@@ -35,7 +40,7 @@ export function Slider({
         <div className="flex justify-between items-center">
           <label className="text-sm font-medium text-gray-700">{label}</label>
           {showValue && (
-            <span className="text-sm font-medium text-gray-600">{value.toFixed(1)}%</span>
+            <span className="text-sm font-medium text-gray-600">{displayValue}</span>
           )}
         </div>
       )}
@@ -70,7 +75,7 @@ export function Slider({
           `}
         />
         {!label && showValue && (
-          <span className="text-xs font-medium text-gray-300 w-12 text-right">{value.toFixed(1)}%</span>
+          <span className="text-xs font-medium text-gray-300 w-12 text-right">{displayValue}</span>
         )}
       </div>
     </div>

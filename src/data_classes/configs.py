@@ -80,8 +80,8 @@ class OptimizationConfig(BaseModel):
     dataset_name: str = Field("mnist", description="Dataset name (e.g., 'cifar10', `'mnist', 'imdb')")
     mode: str = Field("health", pattern="^(simple|health)$", description="Optimization mode")
     optimize_for: str = Field("val_accuracy", description="Optimization objective")
-    trials: int = Field(2, ge=1, le=500, description="Number of optimization trials")
-    max_epochs_per_trial: int = Field(7, ge=1, le=100, description="Maximum epochs per trial")
+    trials: int = Field(25, ge=1, le=500, description="Number of optimization trials")
+    max_epochs_per_trial: int = Field(30, ge=1, le=100, description="Maximum epochs per trial")
     min_epochs_per_trial: int = Field(5, ge=1, le=50, description="Minimum epochs per trial")
     health_weight: float = Field(0.3, ge=0.0, le=1.0, description="Health weighting (DEPRECATED - use accuracy_weight instead)")
 

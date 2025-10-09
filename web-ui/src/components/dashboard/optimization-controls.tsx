@@ -114,7 +114,9 @@ export function OptimizationControls() {
         const config: WeightConfig = {
           accuracyWeight: weights.accuracy_weight,
           healthOverallWeight: weights.health_overall_weight,
-          healthComponentProportions: weights.health_component_proportions
+          healthComponentProportions: weights.health_component_proportions,
+          trials: weights.trials,
+          maxEpochsPerTrial: weights.max_epochs_per_trial
         }
         setDefaultWeights(config)
       } catch (err) {
@@ -130,7 +132,9 @@ export function OptimizationControls() {
             gradient_health: 0.15,
             convergence_quality: 0.15,
             accuracy_consistency: 0.10
-          }
+          },
+          trials: 10,
+          maxEpochsPerTrial: 25
         })
       }
     }
@@ -191,13 +195,17 @@ export function OptimizationControls() {
           request.accuracy_weight = weightConfig.accuracyWeight
           request.health_overall_weight = weightConfig.healthOverallWeight
           request.health_component_proportions = weightConfig.healthComponentProportions
+          request.trials = weightConfig.trials
+          request.max_epochs_per_trial = weightConfig.maxEpochsPerTrial
 
           logger.log('[OptimizationControls] Using custom weight configuration:', {
             accuracy_weight: `${(weightConfig.accuracyWeight * 100).toFixed(1)}% (${weightConfig.accuracyWeight.toFixed(3)})`,
             health_overall_weight: `${(weightConfig.healthOverallWeight * 100).toFixed(1)}% (${weightConfig.healthOverallWeight.toFixed(3)})`,
             health_component_proportions: Object.entries(weightConfig.healthComponentProportions).map(([key, value]) =>
               `${key}: ${(value * 100).toFixed(1)}% of health (${value.toFixed(3)} proportion)`
-            )
+            ),
+            trials: weightConfig.trials,
+            max_epochs_per_trial: weightConfig.maxEpochsPerTrial
           })
         } else {
           logger.log('[OptimizationControls] No custom weights configured - backend will use defaults')

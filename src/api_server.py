@@ -1854,25 +1854,28 @@ class OptimizationAPI:
             """
             Get default scoring weight configuration for UI sliders.
 
-            Returns default weights for:
-            - accuracy_weight: Weight given to test accuracy in final score (0.70 for health mode)
-            - health_overall_weight: Weight given to overall health in final score (0.30 for health mode)
+            Returns default weights from OptimizationConfig defaults for:
+            - accuracy_weight: Weight given to test accuracy in final score
+            - health_overall_weight: Weight given to overall health in final score
             - health_component_proportions: Proportion of health weight allocated to each health metric
+            - trials: Default number of optimization trials
+            - max_epochs_per_trial: Default maximum epochs per trial
 
-            These defaults are used when optimization mode is "health". In "simple" mode,
-            accuracy_weight is 1.0 and health_overall_weight is 0.0.
+            These defaults come from OptimizationConfig field defaults in configs.py.
+            In "health" mode, accuracy_weight defaults to 0.70. In "simple" mode, it's 1.0.
             """
+            # Create a temporary config with health mode to get health-mode defaults
+            temp_config = OptimizationConfig(
+                dataset_name="mnist",  # dummy value, not used
+                mode="health"
+            )
+
             return {
-                "accuracy_weight": 0.70,
-                "health_overall_weight": 0.30,
-                "health_component_proportions": {
-                    "neuron_utilization": 0.25,
-                    "parameter_efficiency": 0.15,
-                    "training_stability": 0.20,
-                    "gradient_health": 0.15,
-                    "convergence_quality": 0.15,
-                    "accuracy_consistency": 0.10
-                }
+                "accuracy_weight": temp_config.accuracy_weight,
+                "health_overall_weight": temp_config.health_overall_weight,
+                "health_component_proportions": temp_config.health_component_proportions,
+                "trials": temp_config.trials,
+                "max_epochs_per_trial": temp_config.max_epochs_per_trial
             }
 
         # Job management endpoints

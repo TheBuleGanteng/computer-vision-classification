@@ -19,6 +19,8 @@ export interface WeightConfig {
     convergence_quality: number
     accuracy_consistency: number
   }
+  trials: number
+  maxEpochsPerTrial: number
 }
 
 interface WeightSlidersProps {
@@ -46,11 +48,17 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
     }
   )
 
+  // Optimization parameters
+  const [trials, setTrials] = useState(defaults?.trials || 10)
+  const [maxEpochsPerTrial, setMaxEpochsPerTrial] = useState(defaults?.maxEpochsPerTrial || 25)
+
   // Initialize from defaults if provided
   useEffect(() => {
     if (defaults) {
       setAccuracyWeight(defaults.accuracyWeight * 100)
       setHealthProportions(defaults.healthComponentProportions)
+      setTrials(defaults.trials)
+      setMaxEpochsPerTrial(defaults.maxEpochsPerTrial)
     }
   }, [defaults])
 
@@ -63,6 +71,8 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
         setAccuracyWeight(defaults.accuracyWeight * 100)
       }
       setHealthProportions(defaults.healthComponentProportions)
+      setTrials(defaults.trials)
+      setMaxEpochsPerTrial(defaults.maxEpochsPerTrial)
     }
   }, [mode, defaults])
 
@@ -74,7 +84,9 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
     const config = {
       accuracyWeight: accuracyWeight / 100,
       healthOverallWeight: healthOverallWeight / 100,
-      healthComponentProportions: healthProportions
+      healthComponentProportions: healthProportions,
+      trials: trials,
+      maxEpochsPerTrial: maxEpochsPerTrial
     }
     logger.log('[WeightSliders] Notifying parent with weight configuration:', {
       accuracyWeight: `${accuracyWeight.toFixed(1)}% (${config.accuracyWeight.toFixed(3)})`,
@@ -83,10 +95,12 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
         `${key}: ${(value * 100).toFixed(1)}% of health (${value.toFixed(3)} proportion)`
       ),
       totalCheck: `Accuracy + Health = ${(config.accuracyWeight + config.healthOverallWeight).toFixed(3)} (should be 1.0)`,
-      healthProportionsSum: `Health proportions sum = ${Object.values(config.healthComponentProportions).reduce((sum, val) => sum + val, 0).toFixed(3)} (should be 1.0)`
+      healthProportionsSum: `Health proportions sum = ${Object.values(config.healthComponentProportions).reduce((sum, val) => sum + val, 0).toFixed(3)} (should be 1.0)`,
+      trials: config.trials,
+      maxEpochsPerTrial: config.maxEpochsPerTrial
     })
     onChange(config)
-  }, [accuracyWeight, healthOverallWeight, healthProportions, onChange])
+  }, [accuracyWeight, healthOverallWeight, healthProportions, trials, maxEpochsPerTrial, onChange])
 
   useEffect(() => {
     notifyParent()
@@ -150,6 +164,8 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
         setAccuracyWeight(defaults.accuracyWeight * 100)
       }
       setHealthProportions(defaults.healthComponentProportions)
+      setTrials(defaults.trials)
+      setMaxEpochsPerTrial(defaults.maxEpochsPerTrial)
     }
   }
 
@@ -170,8 +186,57 @@ export function WeightSliders({ mode, onChange, defaults }: WeightSlidersProps) 
           </Button>
         </div>
 
-        {/* Tier 1: Accuracy vs Health Overall */}
+        {/* Optimization Parameters */}
         <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <h4 className="text-xs font-bold text-gray-200">Optimization Parameters</h4>
+            <Tooltip
+              content={
+                <div className="space-y-2 text-xs">
+                  <p><strong>Number of Trials:</strong> How many different neural network architectures to test during optimization (more trials = better results but longer runtime)</p>
+                  <p><strong>Max Epochs per Trial:</strong> Maximum training epochs for each trial (higher values allow more training but increase time per trial)</p>
+                </div>
+              }
+            >
+              <div className="flex items-center justify-center w-4 h-4 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition-colors">
+                <Info className="h-2.5 w-2.5" />
+              </div>
+            </Tooltip>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <span className="text-xs font-medium text-gray-300 w-32">Number of Trials</span>
+            <div className="flex-1">
+              <Slider
+                value={trials}
+                onChange={setTrials}
+                min={5}
+                max={40}
+                step={1}
+                showValue
+                formatAsPercentage={false}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <span className="text-xs font-medium text-gray-300 w-32">Max Epochs per Trial</span>
+            <div className="flex-1">
+              <Slider
+                value={maxEpochsPerTrial}
+                onChange={setMaxEpochsPerTrial}
+                min={5}
+                max={40}
+                step={1}
+                showValue
+                formatAsPercentage={false}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Tier 1: Accuracy vs Health Overall */}
+        <div className="space-y-2 pt-4 border-t border-gray-700">
           <div className="flex items-center gap-2">
             <h4 className="text-xs font-bold text-gray-200">Primary Weights</h4>
             <Tooltip

@@ -315,6 +315,8 @@ class OptimizationApiClient {
       convergence_quality: number
       accuracy_consistency: number
     }
+    trials: number
+    max_epochs_per_trial: number
   }> {
     const response = await fetch(`${this.baseUrl}/default-scoring-weights`)
 

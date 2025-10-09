@@ -1029,8 +1029,9 @@ class ModelOptimizer:
     
     def _setup_results_directory(self) -> None:
         """Create directory using the unified run_name"""
-        # Detect if running in Docker container
-        in_docker = os.path.exists('/.dockerenv') or os.getenv('ENVIRONMENT') in ['development', 'production']
+        # Detect if running in Docker container - only check for /.dockerenv file
+        # Don't use ENVIRONMENT variable as it can be set in non-Docker environments
+        in_docker = os.path.exists('/.dockerenv')
 
         if in_docker:
             # In Docker, use absolute /app path (where code is copied)
