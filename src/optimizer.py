@@ -344,6 +344,9 @@ class ModelOptimizer:
         # RunPod job tracking for cancellation support
         self._active_runpod_jobs: Dict[int, str] = {}  # trial_number -> job_id
         self._runpod_jobs_lock = threading.Lock()  # Thread-safe access to job tracking
+        # True while a submitted RunPod job is sitting IN_QUEUE waiting for a worker
+        # (drives a truthful "Waiting for GPU worker (queued)..." status message).
+        self._runpod_waiting_for_worker = False
         
         # Architecture and health trends (protected by _state_lock)
         self._architecture_trends: Dict[str, List[float]] = {}
@@ -570,14 +573,17 @@ class ModelOptimizer:
 
     def _get_current_status_message(self, aggregated_progress: 'AggregatedProgress', current_epoch: Optional[int]) -> Optional[str]:
         """Determine the appropriate status message, preserving GPU initialization when needed"""
-        # If using RunPod service and no trials have actually started training yet, 
+        # If using RunPod service and no trials have actually started training yet,
         # preserve the "Initializing GPU" message
-        if (self.config.use_runpod_service and 
+        if (self.config.use_runpod_service and
             len(aggregated_progress.completed_trials) == 0 and
             (current_epoch is None or current_epoch < 1)):
-            
+
+            # Be truthful about waiting on a worker vs. actively initializing.
+            if getattr(self, '_runpod_waiting_for_worker', False):
+                return "Waiting for GPU worker (queued)..."
             return "Initializing GPU resources..."
-        
+
         return None  # Use default status message
 
     def _calculate_aggregate_epoch_progress(self) -> Tuple[int, int]:
@@ -1366,8 +1372,14 @@ class ModelOptimizer:
 
                 # Poll with faster interval for real-time plot downloads
                 max_poll_time = self.config.runpod_service_timeout
+                queue_timeout = self.config.runpod_queue_timeout
                 poll_interval = 2  # Reduced from 10 to 2 seconds for faster notification detection
                 start_time = time.time()
+                # Track when the job entered the queue so we can fail fast if no
+                # worker ever picks it up (e.g. endpoint maxWorkers=0 or no GPU
+                # capacity) instead of waiting the full training timeout.
+                queue_start_time = time.time()
+                seen_in_progress = False
                 status_url = f"{self.config.runpod_service_endpoint.rsplit('/run', 1)[0]}/status/{job_id}"
 
                 while time.time() - start_time < max_poll_time:
@@ -1661,6 +1673,24 @@ class ModelOptimizer:
                         raise RuntimeError(f"RunPod job failed: {error_logs}")
 
                     if job_status in ['IN_QUEUE', 'IN_PROGRESS']:
+                        if job_status == 'IN_PROGRESS':
+                            # A worker picked up the job; stop enforcing the queue timeout.
+                            seen_in_progress = True
+                            self._runpod_waiting_for_worker = False
+                        else:
+                            # Still IN_QUEUE. If a worker never becomes available
+                            # within queue_timeout, fail fast with a specific error
+                            # rather than spinning on "Initializing GPU resources..."
+                            # for the full training timeout.
+                            self._runpod_waiting_for_worker = True
+                            if not seen_in_progress and (time.time() - queue_start_time) >= queue_timeout:
+                                with self._runpod_jobs_lock:
+                                    self._active_runpod_jobs.pop(trial.number, None)
+                                raise RuntimeError(
+                                    f"RunPod job {job_id} stuck in queue for >{queue_timeout}s with no GPU "
+                                    f"worker available. The serverless endpoint likely has no available "
+                                    f"workers (check max workers > 0) or no GPU capacity in the region."
+                                )
                         # Report basic progress status during RunPod execution
                         self._report_runpod_progress(trial, job_status, status_data)
                         time.sleep(poll_interval)
@@ -1669,7 +1699,10 @@ class ModelOptimizer:
                     logger.warning(f"running _train_via_runpod_service ... Unknown job status: {job_status}")
                     time.sleep(poll_interval)
 
-                raise RuntimeError(f"RunPod job {job_id} did not complete within {max_poll_time} seconds")
+                raise RuntimeError(
+                    f"RunPod job {job_id} did not complete within {max_poll_time}s "
+                    f"(last status: {job_status})."
+                )
 
         except Exception as e:
             # Remove from active jobs tracking on error

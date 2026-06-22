@@ -104,6 +104,7 @@ class OptimizationConfig(BaseModel):
     max_bias_change_per_epoch: float = Field(10.0, description="Maximum bias change per epoch")
     runpod_service_endpoint: Optional[str] = Field(default_factory=_get_default_runpod_endpoint, description="RunPod service endpoint URL (auto-configured from ENDPOINT_ID_RUNPOD)")
     runpod_service_timeout: int = Field(1800, description="RunPod service timeout in seconds")  # 30 minutes for health mode
+    runpod_queue_timeout: int = Field(300, description="Max seconds a RunPod job may sit IN_QUEUE (waiting for a worker) before failing fast. Guards against an endpoint with no available workers / no GPU capacity, so the UI doesn't show 'Initializing GPU resources...' for the full training timeout.")  # 5 minutes
     runpod_service_fallback_local: bool = Field(True, description="Fallback to local execution if RunPod fails")
     concurrent: bool = Field(False, description="Enable concurrent execution")
     

@@ -236,3 +236,6 @@ CLAUDE*.md
 
 # CRDF compliance working doc (operator reference, not part of the app)
 CRDF_COMPLIANCE.md
+
+# RunPod fix working notes (operator reference, not part of the app)
+RUNPOD_FIX_NOTES.md
