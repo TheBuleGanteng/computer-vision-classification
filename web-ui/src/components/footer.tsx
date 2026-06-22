@@ -26,6 +26,18 @@ export function Footer() {
             Matthew McDonnell
           </Link></span>
           <Link
+            href="/privacy"
+            className="text-blue-500 hover:text-blue-700 transition-colors underline"
+          >
+            Privacy
+          </Link>
+          <Link
+            href="/terms"
+            className="text-blue-500 hover:text-blue-700 transition-colors underline"
+          >
+            Terms
+          </Link>
+          <Link
             href="https://github.com/TheBuleGanteng/computer-vision-classification"
             target="_blank"
             rel="noopener noreferrer"

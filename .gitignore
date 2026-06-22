@@ -230,3 +230,9 @@ optimization_results/*
 
 # Tensorboard logs
 tensorboard_logs/
+
+# Claudecode files
+CLAUDE*.md
+
+# CRDF compliance working doc (operator reference, not part of the app)
+CRDF_COMPLIANCE.md

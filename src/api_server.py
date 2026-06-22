@@ -1765,18 +1765,65 @@ class OptimizationAPI:
         self.tensorboard_manager = TensorBoardManager()
         self.tensorboard_manager.app_instance = self
         
-        # Configure CORS for Next.js development server
+        # Configure CORS.
+        #
+        # In production the browser reaches this API same-origin: it requests
+        # https://kebayorantechnologies.com/model-architecture/computer-vision/api/...
+        # which nginx path-routes to this backend, so no cross-origin request is
+        # ever made by the browser. CORS therefore only matters for local dev,
+        # where the Next.js dev server may call the API directly.
+        #
+        # Hardening vs. the previous config:
+        #   - allow_origins is a specific known list (never "*").
+        #   - allow_methods / allow_headers are restricted to what the API uses
+        #     (was "*" for both).
+        #   - allow_credentials is False — the API has no auth/cookies, so there
+        #     are no credentials to share, and "*" + credentials is never allowed.
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=[
-                "http://localhost:3000",  # Next.js dev server
+                "http://localhost:3000",       # Next.js dev server
                 "http://127.0.0.1:3000",
-                "http://0.0.0.0:3000"
+                "http://0.0.0.0:3000",
+                "https://kebayorantechnologies.com",  # production host (same-origin in prod)
             ],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type"],
         )
+
+        # Security middleware: add API-appropriate response hardening and a
+        # request-body size cap. Runs on every request/response.
+        #   - X-Content-Type-Options: nosniff on all responses (incl. file
+        #     downloads) so browsers don't MIME-sniff API output into HTML/SVG.
+        #   - Strip the Server token so the ASGI server isn't disclosed.
+        #   - Reject oversized request bodies before they are read, so a crafted
+        #     request can't exhaust a worker. This API only receives small JSON
+        #     config payloads (no uploads), so the cap is generous but bounded.
+        max_body_bytes = 10 * 1024 * 1024  # 10 MB
+
+        @self.app.middleware("http")
+        async def security_middleware(request: Request, call_next):
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > max_body_bytes:
+                        return JSONResponse(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            content={"detail": "Request body too large"},
+                        )
+                except ValueError:
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": "Invalid Content-Length header"},
+                    )
+
+            response = await call_next(request)
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            # Remove version/implementation disclosure
+            if "server" in response.headers:
+                del response.headers["server"]
+            return response
         
         # Job storage - in production, use Redis or database
         self.jobs: Dict[str, OptimizationJob] = {}
