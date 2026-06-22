@@ -165,7 +165,7 @@ const BestArchitectureView = React.memo(() => {
       <CardHeader>
         <div className="flex items-center justify-between">
           <div>
-            <CardTitle className="flex items-center gap-3">
+            <CardTitle className="flex flex-wrap items-center gap-x-3 gap-y-1">
               Best architecture - Trial #{bestTrial.trial_number}
               <Badge variant="outline" className="text-green-600 border-green-600">
                 {bestTrial.architecture?.type || 'Unknown'}

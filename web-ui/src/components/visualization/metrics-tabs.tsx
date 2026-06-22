@@ -275,22 +275,20 @@ const MetricsTabs: React.FC<MetricsTabsProps> = React.memo(({
   return (
     <div className={`h-full flex flex-col ${className}`}>
       {/* Tab Headers */}
-      <div className="flex flex-wrap justify-start sm:justify-center gap-1 sm:gap-0 bg-gray-800 border-b border-gray-600 pt-2 px-2 sm:px-0 overflow-x-visible scrollbar-hide">
+      {/* Mobile: single horizontally-scrollable row (no cramped wrap). Desktop: centered wrap. */}
+      <div className="flex flex-nowrap overflow-x-auto sm:flex-wrap sm:overflow-x-visible justify-start sm:justify-center gap-1 sm:gap-0 bg-gray-800 border-b border-gray-600 pt-2 px-2 sm:px-0 scrollbar-hide">
         {tabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-1 px-2 sm:px-3 py-1 text-xs font-medium transition-all duration-200 relative
+            className={`shrink-0 whitespace-nowrap flex items-center gap-1 px-3 py-2 sm:py-1 text-xs font-medium transition-all duration-200 relative
               ${activeTab === tab.id
                 ? 'text-blue-300 bg-gray-900 border-t-2 border-l border-r border-blue-400 border-b-0 rounded-t-md -mb-px z-10'
                 : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50 border border-gray-500 rounded-t-md'
               }`}
           >
             {tab.icon}
-            <span className="hidden sm:inline">{tab.label}</span>
-            <span className="sm:hidden text-xs truncate max-w-16" title={tab.label}>
-              {tab.label.split(' ')[0]}
-            </span>
+            <span>{tab.label}</span>
           </button>
         ))}
       </div>
