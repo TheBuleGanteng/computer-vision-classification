@@ -1271,13 +1271,20 @@ class ModelOptimizer:
                 endpoint_url=s3_endpoint
             )
 
-            # Download using boto3 with authentication
-            # Disable multipart download (RunPod S3 has issues with Range requests)
-            from boto3.s3.transfer import TransferConfig
-            config = TransferConfig(multipart_threshold=1024*1024*1024)  # 1GB threshold (effectively disables multipart)
-
+            # Download using a plain GetObject and stream the body to disk.
+            #
+            # IMPORTANT: do NOT use s3_client.download_file() here. boto3's
+            # managed transfer issues a HeadObject first (to size the object for
+            # multipart), and RunPod's S3-compatible API returns 403 Forbidden
+            # for HeadObject even when GetObject is permitted. That made every
+            # artifact download fail with "403 ... HeadObject", leaving the local
+            # plots/model directories empty (no plots in the UI, Download Model
+            # disabled). GetObject works with the same credentials, so we stream
+            # its body directly.
             logger.info(f"running _download_from_s3 ... Starting authenticated download from {s3_endpoint}")
-            s3_client.download_file(bucket, key, str(local_path), Config=config)
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            with open(local_path, 'wb') as f:
+                shutil.copyfileobj(response['Body'], f)
 
             actual_size = local_path.stat().st_size
             logger.info(f"running _download_from_s3 ... ✅ Download complete: {actual_size} bytes")
